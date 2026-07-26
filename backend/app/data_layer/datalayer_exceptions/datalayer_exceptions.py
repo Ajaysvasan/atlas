@@ -22,7 +22,7 @@ class IndexDirectoryDoesNotExists(Exception):
         super().__init__(self.directory_name)
 
     def __str__(self):
-        return f"The directory with the following name doesn't exists"
+        return f"The directory with the following name doesn't exist: {self.directory_name}"
 
 
 class InsertionError(Exception):

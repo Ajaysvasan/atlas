@@ -2,8 +2,8 @@ import hashlib
 import re
 from typing import List
 
-from ingestion.metadata.metadata import ChunkMetaData
-from nodes.nodes import Context, Document, HChunk, NormalizedContent, Section
+from data_layer.ingestion.metadata.metadata import ChunkMetaData
+from data_layer.ingestion.nodes.nodes import Context, Document, HChunk, NormalizedContent, Section
 
 from .DB_Manager import Manager
 
@@ -47,11 +47,28 @@ class HierarchicalChunker:
     def __find_sections(self, doc: Document):
 
         sections: List[Section] = []
-        pattern = re.compile(r"^[A-Z\s]+$", re.MULTILINE)
+        pattern = re.compile(r"^(?=.*[A-Z])[A-Z\s]+$", re.MULTILINE)
         matches = list(pattern.finditer(doc.normalizedText))
+        
+        if not matches:
+            sectionName = "MAIN"
+            sectionId = self.__generate_id(sectionName, doc.documentId)
+            content = doc.normalizedText.strip()
+            if content:
+                sections.append(Section(sectionId, doc.documentId, sectionName, content, len(content), 0, len(doc.normalizedText)))
+            return sections
+
         for i, match in enumerate(matches):
             sectionName = match.group().strip()
             sectionId = self.__generate_id(sectionName, doc.documentId)
+            
+            if i == 0 and match.start() > 0:
+                preamble_content = doc.normalizedText[0:match.start()].strip()
+                if preamble_content:
+                    preamble_name = "PREAMBLE"
+                    preamble_id = self.__generate_id(preamble_name, doc.documentId)
+                    sections.append(Section(preamble_id, doc.documentId, preamble_name, preamble_content, len(preamble_content), 0, match.start()))
+
             headerStart = match.start()
             headerEnd = match.end()
             contentStart = headerEnd
@@ -147,8 +164,10 @@ class HierarchicalChunker:
                     end,
                     self.__create_chunk_metadata(document),
                 )
-                start += self.chunkSize - self.chunkOverlap
                 chunks.append(chunkObj)
+                if end == len(context.context):
+                    break
+                start += self.chunkSize - self.chunkOverlap
         return chunks
 
     def __chunk_text(self, doc: Document, h_manager):

@@ -1,7 +1,7 @@
 from typing import List, Tuple
 
 from config import Config
-from ingestion.nodes.nodes import HChunk, NormalizedContent, RChunk
+from data_layer.ingestion.nodes.nodes import HChunk, NormalizedContent, RChunk
 
 from .HierarchicalChunker import HierarchicalChunker
 from .RecursiveChunker import RecursiveChunker

@@ -1,17 +1,24 @@
 from typing import List
 
-from datalayer_exceptions.datalayer_exceptions import InvalidEmbeddingArgument
-from ingestion.metadata.metadata import EmbeddedChunkMetaData
-from ingestion.nodes.nodes import EmbeddedChunk, HChunk, RChunk
 from sentence_transformers import SentenceTransformer
 
 from config import Config
+from data_layer.datalayer_exceptions.datalayer_exceptions import (
+    InvalidEmbeddingArgument,
+)
+from data_layer.ingestion.metadata.metadata import EmbeddedChunkMetaData
+from data_layer.ingestion.nodes.nodes import EmbeddedChunk, HChunk, RChunk
 
 
 class EmbeddingManager:
-    def __init__(self, model_name: str = Config.EMBEDDING_MODEL):
+    def __init__(
+        self,
+        model_name: str = Config.EMBEDDING_MODEL,
+        embeddding_dimension: int = Config.EMBEDDING_DIMENSIONS,
+    ):
         self.model_name = model_name
         self.model = SentenceTransformer(model_name)
+        self.embedding_dimension = embeddding_dimension
 
     def __create_meta_data(self, chunk_id: str, chunk: str) -> EmbeddedChunkMetaData:
         return EmbeddedChunkMetaData(chunk_id, chunk, self.model_name)
@@ -19,7 +26,7 @@ class EmbeddingManager:
     def __embed_chunk(self, chunkObj: HChunk | RChunk) -> EmbeddedChunk:
         chunk = chunkObj.chunk
         chunk_id = chunkObj.chunk_id
-        embedded_chunk = self.model.encode(chunk)
+        embedded_chunk = self.model.encode(chunk, truncate_dim=self.embedding_dimension)
         return EmbeddedChunk(
             embedded_chunk.tolist(), self.__create_meta_data(chunk_id, chunk)
         )
@@ -33,7 +40,14 @@ class EmbeddingManager:
                     f"The argument passed is of type {type(chunkObj).__name__}. The valid types are Chunk and list"
                 )
             texts.append(chunkObj.chunk)
-        vectors = self.model.encode(texts)
+
+        vectors = []
+        batch_size = 64
+        for i in range(0, len(texts), batch_size):
+            batch_vectors = self.model.encode(
+                texts[i : i + batch_size], truncate_dim=self.embedding_dimension
+            )
+            vectors.extend(batch_vectors)
         for chunkObj, vector in zip(chunks, vectors):
             chunk = chunkObj.chunk
             chunk_id = chunkObj.chunk_id

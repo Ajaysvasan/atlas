@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from vector_db_manager.vectorDbManager import VectorDbManager
+from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
 from config import Config
 
@@ -24,12 +24,12 @@ class IngestionPipeline:
         self.vector_db = VectorDbManager(
             distance_metrics=Config.DISTANCE_METRIC,
             vector_dtype=Config.VECTOR_DTYPE,
-            dimensions=Config.DIMENSIONS,
+            dimensions=Config.EMBEDDING_DIMENSIONS,
             max_vectors=Config.MAX_VECTORS,
             complexity=Config.COMPLEXITY,
-            graph_degree=Config.GRPAH_DEGREE,
+            graph_degree=Config.GRAPH_DEGREE,
             num_threads=Config.NUM_THREADS,
-            k_neighbors=Config.NUM_THREADS,
+            k_neighbors=Config.K_NEIGHBORS,
         )
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:

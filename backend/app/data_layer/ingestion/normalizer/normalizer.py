@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-from metadata.metadata import NormalizedTextMetaData
-from nodes.nodes import NormalizedContent
+from data_layer.ingestion.metadata.metadata import NormalizedTextMetaData
+from data_layer.ingestion.nodes.nodes import NormalizedContent
 
 NORMALIZATION_VERSION = "rag_v1"
 
@@ -39,7 +39,7 @@ class TextNormalizer:
         return str(hex_digest)
 
     def __generate_document_id(self, *args) -> str:
-        value = "".join(*args)
+        value = "".join(args)
         hash_object = hashlib.sha256(value.encode("utf-8"))
         hex_digest = hash_object.hexdigest()
         return str(hex_digest)
@@ -73,11 +73,10 @@ class TextNormalizer:
         text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
         return text
 
-    def __find_section_names(self, normalizedText):
-
+    def __find_section_names(self, text):
         sections = []
-        pattern = re.compile(r"^[A-Z\s]+$", re.MULTILINE)
-        matches = list(pattern.finditer(normalizedText))
+        pattern = re.compile(r"^(?=.*[A-Z])[A-Z\s]+$", re.MULTILINE)
+        matches = list(pattern.finditer(text))
         for i, match in enumerate(matches):
             sectionName = match.group().strip()
             sections.append(sectionName)
@@ -142,10 +141,10 @@ class TextNormalizer:
         file_name = Path(file_path).name
         file_type = Path(file_path).suffix.lower()
         ingestion_time = datetime.now(timezone.utc).isoformat()
+        has_section = self._has_section(text)
         normalized_text = self.__process_text(text)
         document_id = self.__generate_document_id(file_name, file_path, normalized_text)
         content_id = self.__generate_content_id(normalized_text)
-        has_section = self._has_section(normalized_text)
         return NormalizedContent(
             content=normalized_text,
             has_section=has_section,
@@ -165,12 +164,12 @@ class TextNormalizer:
             file_name = Path(file_path).name
             file_type = Path(file_path).suffix.lower()
             ingestion_time = datetime.now(timezone.utc).isoformat()
+            has_section = self._has_section(text)
             normalized_text = self.__process_text(text)
             document_id = self.__generate_document_id(
                 file_name, file_path, normalized_text
             )
             content_id = self.__generate_content_id(normalized_text)
-            has_section = self._has_section(normalized_text)
             normalized_documents_contents.append(
                 NormalizedContent(
                     normalized_text,

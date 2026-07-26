@@ -11,7 +11,7 @@ from config import Config
 class ConversationVectorManager:
     def __init__(
         self,
-        vector_dimension=Config.DIMENSIONS,
+        vector_dimension=Config.VECTOR_DIMENSIONS,
         vector_dtype=Config.VECTOR_DTYPE,
         summary_path=Config.SUMMARY_PATH,
         cummulative_vector_path=Config.CUMMULATIVE_VECTOR_PATH,

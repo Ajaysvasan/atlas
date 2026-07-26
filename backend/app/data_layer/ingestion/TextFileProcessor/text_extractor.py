@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Dict, Tuple
 
-from datalayer_exceptions.datalayer_exceptions import InvalidFileType
+from data_layer.datalayer_exceptions.datalayer_exceptions import InvalidFileType
 from config import get_logger
 
 logger = get_logger(__name__)
@@ -91,7 +91,7 @@ class TextExtractor:
         extension = Path(file_path).suffix.lower()
         logger.debug(f"Extracting text from '{file_path}' (extension: {extension})")
 
-        if extension == ".txt":
+        if extension in [".txt", ".csv", ".html", ".xml"]:
             extracted_text = self._extract_from_txt(file_path)
         elif extension == ".docx":
             extracted_text = self._extract_from_docx(file_path)

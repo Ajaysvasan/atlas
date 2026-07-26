@@ -17,24 +17,25 @@ class Config:
     LOG_FILE = "log/app.log"
     ABS_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     DATA_DIR = os.path.join(ABS_PATH, "data")
-    DB_PATH = "hierarchical_db"
+    DB_PATH = os.path.join(DATA_DIR, "hierarchical_db")
     EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
     MODEL_PATH = None
-    INDEX_PATH = "./disk_ann_index"
+    INDEX_PATH = os.path.join(DATA_DIR, "disk_ann_index")
     DISTANCE_METRIC = "l2"
     VECTOR_DTYPE = np.float32
-    DIMENSIONS = 128
+    EMBEDDING_DIMENSIONS = 128
     MAX_VECTORS = 1000000
     COMPLEXITY = 100
-    GRPAH_DEGREE = 120
+    GRAPH_DEGREE = 120
     NUM_THREADS = 4
     K_NEIGHBORS = 9
-    CONVERSATION_SNAPSHOT_DB = (
-        "memory/topic_pool/project_pool/conversation_pool/conversation_snapshot.db"
+    CONVERSATION_SNAPSHOT_DB = os.path.join(
+        DATA_DIR, "memory", "topic_pool", "project_pool", "conversation_pool", "conversation_snapshot.db"
     )
 
-    SUMMARY_PATH = r"memory/topic_pool/project_pool/conversation_pool/conversation_vectors/summary_vectors/"
-    CUMMULATIVE_VECTOR_PATH = "memory/topic_pool/project_pool/conversation_pool/conversation_vectors/cummulative_vector/"
+    SUMMARY_PATH = os.path.join(DATA_DIR, "memory", "topic_pool", "project_pool", "conversation_pool", "conversation_vectors", "summary_vectors")
+    CUMMULATIVE_VECTOR_PATH = os.path.join(DATA_DIR, "memory", "topic_pool", "project_pool", "conversation_pool", "conversation_vectors", "cummulative_vector")
+    VECTOR_DIMENSIONS = 128
 
 
 config = Config()

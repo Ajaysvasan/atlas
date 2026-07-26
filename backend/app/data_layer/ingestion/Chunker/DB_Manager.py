@@ -1,8 +1,8 @@
 import sqlite3
 from typing import List
 
-from datalayer_exceptions.datalayer_exceptions import InsertionError
-from ingestion.nodes.nodes import Context, Document, HChunk, Section
+from data_layer.datalayer_exceptions.datalayer_exceptions import InsertionError
+from data_layer.ingestion.nodes.nodes import Context, Document, HChunk, Section
 
 
 class Manager:
@@ -174,9 +174,8 @@ class Manager:
         return self.__get_hdocument(documentId)
 
     def insert_chunks(self, Chunks: List[HChunk]):
+        currentChunkId = None
         try:
-            self.cursor.execute("BEGIN IMMEDIATE;")
-            currentChunkId: str
             for ChunkObj in Chunks:
                 currentChunkId = ChunkObj.chunk_id
                 self.__insert_hchunk(ChunkObj)
@@ -186,9 +185,8 @@ class Manager:
             raise InsertionError(e, "Chunks", currentChunkId)
 
     def insert_contexts(self, Contexts: List[Context]):
+        currentContextId = None
         try:
-            self.cursor.execute("BEGIN IMMEDIATE;")
-            currentContextId: str
             for ContextObj in Contexts:
                 currentContextId = ContextObj.contextId
                 self.__insert_hcontext(ContextObj)
@@ -198,9 +196,8 @@ class Manager:
             raise InsertionError(e, "Context", currentContextId)
 
     def insert_documents(self, Documents: List[Document]):
+        currentDocId = None
         try:
-            self.cursor.execute("BEGIN IMMEDIATE;")
-            currentDocId: str
             for DocumentObj in Documents:
                 currentDocId = DocumentObj.documentId
                 self.__insert_hdocument(DocumentObj)
@@ -210,10 +207,8 @@ class Manager:
             raise InsertionError(e, "Documents", currentDocId)
 
     def insert_sections(self, Sections: List[Section]):
-
+        currentSectionId = None
         try:
-            self.cursor.execute("BEGIN IMMEDIATE;")
-            currentSectionId: str
             for SectionObj in Sections:
                 currentSectionId = SectionObj.sectionId
                 self.__insert_hsection(SectionObj)

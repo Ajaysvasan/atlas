@@ -1,8 +1,8 @@
 import hashlib
 from typing import List
 
-from metadata.metadata import ChunkMetaData
-from nodes.nodes import NormalizedContent, RChunk
+from data_layer.ingestion.metadata.metadata import ChunkMetaData
+from data_layer.ingestion.nodes.nodes import NormalizedContent, RChunk
 
 
 class RecursiveChunker:
@@ -41,9 +41,9 @@ class RecursiveChunker:
         if len(normalized_content) <= self.chunk_size:
             return [normalized_content] if normalized_content.strip() else []
 
-        separator = self.default_separators[-1]
+        separator = separators[-1] if separators else ""
         remaining_separator = []
-        for i, sep in enumerate(self.default_separators):
+        for i, sep in enumerate(separators):
             if sep == "" or sep in normalized_content:
                 separator = sep
                 remaining_separator = separators[i + 1 :]
@@ -74,7 +74,12 @@ class RecursiveChunker:
             overlapped = [chunks[0]]
             for i in range(1, len(chunks)):
                 prev_tail = chunks[i - 1][-self.overlap :]
-                overlapped.append(prev_tail + chunks[i])
+                space_left = self.chunk_size - len(chunks[i])
+                if space_left > 0:
+                    tail_to_use = prev_tail[-space_left:]
+                    overlapped.append(tail_to_use + chunks[i])
+                else:
+                    overlapped.append(chunks[i])
             chunks = overlapped
         return chunks
 

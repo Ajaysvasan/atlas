@@ -1,9 +1,10 @@
+import threading
 from typing import List, Type, Union
 
 import numpy
-from datalayer_exceptions.datalayer_exceptions import IndexDirectoryDoesNotExists
-from ingestion.nodes.nodes import EmbeddedChunk
-from vectorDB_diskann import VectorDb_diskann as vdap
+from data_layer.datalayer_exceptions.datalayer_exceptions import IndexDirectoryDoesNotExists
+from data_layer.ingestion.nodes.nodes import EmbeddedChunk
+from data_layer.vector_db_manager.vectorDB_diskann import VectorDb_diskann as vdap
 
 from config import Config, get_logger
 
@@ -41,12 +42,15 @@ class VectorDbManager:
             self.graph_degree,
             self.num_threads,
         )
+        self.lock = threading.Lock()
 
     def __insert_vector(self, vector, vector_id) -> None:
-        self.vector_db.insert(vector, vector_id)
+        with self.lock:
+            self.vector_db.insert(vector, vector_id)
 
     def __insert_vectors_in_batch(self, vectors, vector_ids) -> None:
-        self.vector_db.batch_insert(vectors, vector_ids)
+        with self.lock:
+            self.vector_db.batch_insert(vectors, vector_ids)
 
     def insert(self, embedded_chunk_obj: EmbeddedChunk) -> None:
         vector = embedded_chunk_obj.vector
@@ -73,21 +77,24 @@ class VectorDbManager:
         )
 
     def delete_vector(self, vector_id) -> None:
-
-        self.vector_db.delete_vector(vector_id)
+        with self.lock:
+            self.vector_db.delete_vector(vector_id)
 
     def delete_vectors(self, vector_ids) -> None:
-        self.vector_db.delete_vectors(vector_ids)
+        with self.lock:
+            self.vector_db.delete_vectors(vector_ids)
 
     def save(self, save_path=Config.INDEX_PATH):
         logger.info(f"Saving VectorDbManager index to path '{save_path}'...")
-        self.vector_db.save(save_path)
+        with self.lock:
+            self.vector_db.save(save_path)
         logger.info("VectorDbManager index saved successfully.")
 
     def load(self, load_path=Config.INDEX_PATH):
         try:
             logger.info(f"Loading VectorDbManager index from path '{load_path}'...")
-            idx = self.vector_db.load(load_path)
+            with self.lock:
+                idx = self.vector_db.load(load_path)
             logger.info("VectorDbManager index loaded successfully.")
             return idx
         except IndexDirectoryDoesNotExists:
