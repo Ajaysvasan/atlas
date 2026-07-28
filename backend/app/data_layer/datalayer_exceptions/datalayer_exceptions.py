@@ -1,3 +1,6 @@
+from numpy import uint32
+
+
 class InvalidFileType(Exception):
     def __init__(self, file_extention) -> None:
         self.file_extention = file_extention
@@ -43,3 +46,42 @@ class InvalidEmbeddingArgument(Exception):
 
     def __str__(self):
         return self.error_message
+
+
+class VectorNotFoundEror(Exception):
+    def __init__(self, vector_id: uint32) -> None:
+        self.vector_id = vector_id
+        super().__init__(vector_id)
+
+    def __str__(self):
+        return f"No vectors found for the vector Id : {self.vector_id}"
+
+
+class DuplicateVectorException(Exception):
+
+    def __init__(self, vector_id: uint32) -> None:
+        self.vector_id = vector_id
+        super().__init__(vector_id)
+
+    def __str__(self):
+        return f"The vector with vector id {self.vector_id} , already exists"
+
+
+class InvalidBatchSize(Exception):
+
+    def __init__(self, error_message) -> None:
+        self.error_message = error_message
+        super().__init__(self.error_message)
+
+    def __str__(self):
+        return self.error_message
+
+
+class InvalidVectorDimension(Exception):
+    def __init__(self, passed_dimension: int, expected_dimension: int) -> None:
+        self.passed_dimension = passed_dimension
+        self.expected_dimension = expected_dimension
+        super().__init__(self.passed_dimension, self.expected_dimension)
+
+    def __str__(self) -> str:
+        return f"Expected dimension {self.expected_dimension} , got {self.passed_dimension}"

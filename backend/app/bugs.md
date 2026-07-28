@@ -32,3 +32,30 @@ This document catalogs all logical, architectural, concurrency, and data integri
 - **Explanation:** Several core memory modules contain unwritten placeholder files or typos: `conversaton_summary.py` (typo `conversaton`) contains only `class ConversationSummary: pass`, `full_conversation_bucket.py` contains only `class FullConversationBucket: pass`, and `conversation_pool_manager.py`, `memory_manager.py`, `topic_manager.py`, `project_manager.py` are completely empty (0 bytes). This indicates that the core components of the memory architecture are fundamentally missing.
 
 ---
+
+## Section 7: Data Layer Architecture & Integrity (New Discoveries)
+
+### Bug 7.1: Invalid String UUID Passed to DiskANN Vector ID (`vectorDbManager.py`)
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `VectorDbManager` extracts `vector_id = embedded_chunk_obj.meta_data.chunk_id` (which is a SHA256 string hash generated in the Chunker) and passes it directly to DiskANN. `diskannpy` strictly requires vector IDs to be unsigned integers (`np.uint32` or `np.uint64`). Passing a string will trigger an immediate `TypeError` from pybind11 during `insert()` or `batch_insert()`.
+
+### Bug 7.2: Python List Passed to Numpy Array in Batch Insertion (`EmbeddingManager.py` / `vectorDB_diskann.py`)
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `EmbeddingManager` stores embeddings as a Python `List[float]` via `.tolist()`. `VectorDbManager` directly accumulates these lists and passes them into DiskANN's `batch_insert(vectors, vector_ids)`. DiskANN explicitly requires a contiguous 2D `numpy.ndarray` (specifically `np.float32` or `np.int8`). Supplying a nested `List[List[float]]` will cause a fatal type incompatibility crash.
+
+### Bug 7.3: Invalid Custom Exception Catching from Native Extension (`vectorDB_diskann.py`)
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** In `VectorDb_diskann.__insert_vector()`, the insertion call is wrapped in a `try...except VectorInsertionError:`. However, `VectorInsertionError` is a custom Python exception defined in our `datalayer_exceptions.py`. The native C++ wrapper (`diskannpy`) has absolutely no awareness of this custom exception and will never raise it. Any actual insertion failures will throw standard errors (like `RuntimeError` or `ValueError`), bypassing our exception handler entirely.
+
+### Bug 7.4: Markdown Extractor Double-Newline Corruption (`text_extractor.py`)
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** The private `__extract_text_from_md()` method reads Markdown files using `file.readlines()`, which retains the trailing `\n` character on every line. It then merges them using `"\n".join(text)`. This effectively appends an extra, unintended newline between every single line of text, deeply corrupting the spacing, formatting, and semantic parsing of the Markdown document.
+
+### Bug 7.5: Index Load State Desynchronization (`vectorDB_diskann.py` / `vectorDbManager.py`)
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `diskannpy.DynamicMemoryIndex.from_file()` returns a *brand new* initialized index instance instead of updating the current object. However, `VectorDb_diskann.load()` simply returns this instance without overriding `self.dynamic_dann`. Likewise, `VectorDbManager.load()` returns the new index to the caller but fails to update its own `self.vector_db`. Thus, after a `.load()`, any subsequent calls to `.insert()` or `.search_vector()` will silently route into the original, empty index instance, completely ignoring the loaded disk data.

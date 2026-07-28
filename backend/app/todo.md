@@ -1,9 +1,5 @@
 1. Do Conversation Memory (High Priority)
-2. Test the ingestion API (Sunday's work)
-3. Update the manager to store the Recursive chunker chunks as well (sunday's work)
-4. Update the normalizer and file loader and text extractor to support multiple formats (Sunday's work)
-5. Design a DB to store the vectors (either postgres or sqlite highest preference postgres)
-6. Fix the varying dimension problem
+2. Fix the vector DB bug logic (very high Priority)
 
 Post MVP Works:
 
