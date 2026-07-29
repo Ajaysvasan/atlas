@@ -85,3 +85,21 @@ class InvalidVectorDimension(Exception):
 
     def __str__(self) -> str:
         return f"Expected dimension {self.expected_dimension} , got {self.passed_dimension}"
+
+
+class InvalidVectorID(Exception):
+    def __init__(self, vectorID) -> None:
+        self.vectorId = vectorID
+        super().__init__(self.vectorId)
+
+    def __str__(self) -> str:
+        return f"There is arrtibute of id {self.vectorId}"
+
+
+class InvalidColumnNameException(Exception):
+    def __init__(self, columnName: str):
+        self.columnName = columnName
+        super().__init__(self.columnName)
+
+    def __str__(self):
+        return f"Got invalid column name : {self.columnName}"

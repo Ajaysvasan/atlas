@@ -59,3 +59,8 @@ This document catalogs all logical, architectural, concurrency, and data integri
 - **Criticality:** Critical
 - **Priority:** P0
 - **Explanation:** `diskannpy.DynamicMemoryIndex.from_file()` returns a *brand new* initialized index instance instead of updating the current object. However, `VectorDb_diskann.load()` simply returns this instance without overriding `self.dynamic_dann`. Likewise, `VectorDbManager.load()` returns the new index to the caller but fails to update its own `self.vector_db`. Thus, after a `.load()`, any subsequent calls to `.insert()` or `.search_vector()` will silently route into the original, empty index instance, completely ignoring the loaded disk data.
+
+### Bug 7.6: `TypeError` During Document ID Generation due to Uncast `PosixPath` (`normalizer.py` / `ingestion_pipeline.py`)
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** In `TextExtractor.extract_all`, dictionary keys are stored natively as `pathlib.Path` objects. These are passed to `Normalizer.normalize_all`, which passes the `file_path` directly into `__generate_document_id(self, *args)`. The internal call `"".join(args)` attempts to concatenate strings, but crashes instantly with `TypeError: sequence item 1: expected str instance, PosixPath found`. Any batch ingestion will permanently fail at the normalization stage.
