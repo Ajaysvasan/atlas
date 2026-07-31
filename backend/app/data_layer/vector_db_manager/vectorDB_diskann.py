@@ -1,12 +1,12 @@
 from pathlib import Path
 
 import diskannpy as dann
+
+from config import Config, get_logger
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
     IndexDirectoryDoesNotExists,
     VectorInsertionError,
 )
-
-from config import Config, get_logger
 
 logger = get_logger(__name__)
 
@@ -43,7 +43,7 @@ class VectorDb_diskann:
     def __insert_vector(self, vector, vector_id):
         try:
             self.dynamic_dann.insert(vector, vector_id)
-        except VectorInsertionError as e:
+        except ValueError | RuntimeError as e:
             raise VectorInsertionError(vector_id)
 
     def __insert_vectors(self, vectors, vector_ids):
@@ -105,5 +105,7 @@ class VectorDb_diskann:
             )
             logger.info("DiskANN index loaded successfully.")
             return index
-        logger.error(f"Failed to load DiskANN index: Directory '{load_path}' does not exist.")
+        logger.error(
+            f"Failed to load DiskANN index: Directory '{load_path}' does not exist."
+        )
         raise IndexDirectoryDoesNotExists(load_path)

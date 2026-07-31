@@ -1,5 +1,7 @@
+import hashlib
 from typing import List
 
+import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from config import Config
@@ -20,6 +22,11 @@ class EmbeddingManager:
         self.model = SentenceTransformer(model_name)
         self.embedding_dimension = embeddding_dimension
 
+    def __generate_vector_id(self, chunk: str) -> int:
+        hash_bytes = hashlib.md5(chunk.encode("utf-8")).digest()
+        uint64_id = int.from_bytes(hash_bytes[:8], byteorder="little", signed=False)
+        return uint64_id
+
     def __create_meta_data(self, chunk_id: str, chunk: str) -> EmbeddedChunkMetaData:
         return EmbeddedChunkMetaData(chunk_id, chunk, self.model_name)
 
@@ -28,7 +35,9 @@ class EmbeddingManager:
         chunk_id = chunkObj.chunk_id
         embedded_chunk = self.model.encode(chunk, truncate_dim=self.embedding_dimension)
         return EmbeddedChunk(
-            embedded_chunk.tolist(), self.__create_meta_data(chunk_id, chunk)
+            embedded_chunk.cpu().detach().numpy().astype(np.float32),
+            self.__generate_vector_id(chunk),
+            self.__create_meta_data(chunk_id, chunk),
         )
 
     def __embed_chunks(self, chunks: List[HChunk | RChunk]) -> List[EmbeddedChunk]:
@@ -52,7 +61,11 @@ class EmbeddingManager:
             chunk = chunkObj.chunk
             chunk_id = chunkObj.chunk_id
             embedded_chunks.append(
-                EmbeddedChunk(vector.tolist(), self.__create_meta_data(chunk_id, chunk))
+                EmbeddedChunk(
+                    vector.cpu().detach().numpy().astype(np.float32),
+                    self.__generate_vector_id(chunk),
+                    self.__create_meta_data(chunk_id, chunk),
+                )
             )
         return embedded_chunks
 

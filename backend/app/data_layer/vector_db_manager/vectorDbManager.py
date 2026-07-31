@@ -2,11 +2,13 @@ import threading
 from typing import List, Type, Union
 
 import numpy
-from data_layer.datalayer_exceptions.datalayer_exceptions import IndexDirectoryDoesNotExists
-from data_layer.ingestion.nodes.nodes import EmbeddedChunk
-from data_layer.vector_db_manager.vectorDB_diskann import VectorDb_diskann as vdap
 
 from config import Config, get_logger
+from data_layer.datalayer_exceptions.datalayer_exceptions import (
+    IndexDirectoryDoesNotExists,
+)
+from data_layer.ingestion.nodes.nodes import EmbeddedChunk
+from data_layer.vector_db_manager.vectorDB_diskann import VectorDb_diskann as vdap
 
 logger = get_logger(__name__)
 
@@ -32,7 +34,9 @@ class VectorDbManager:
         self.graph_degree = graph_degree
         self.num_threads = num_threads
         self.k_neighbors = k_neighbors
-        logger.info(f"Initializing VectorDbManager (distance={distance_metrics}, dims={dimensions}, max_vectors={max_vectors}, threads={num_threads})")
+        logger.info(
+            f"Initializing VectorDbManager (distance={distance_metrics}, dims={dimensions}, max_vectors={max_vectors}, threads={num_threads})"
+        )
         self.vector_db = vdap(
             self.distance_metrics,
             self.vector_dtype,
@@ -54,8 +58,8 @@ class VectorDbManager:
 
     def insert(self, embedded_chunk_obj: EmbeddedChunk) -> None:
         vector = embedded_chunk_obj.vector
-        vector_id = embedded_chunk_obj.meta_data.chunk_id
-        logger.debug(f"Inserting vector chunk_id='{vector_id}'")
+        vector_id = embedded_chunk_obj.vector_id
+        logger.debug(f"Inserting vector with vector_id='{vector_id}'")
         self.__insert_vector(vector, vector_id)
 
     def batch_insert(self, embedded_chunk_objs: List[EmbeddedChunk]):
@@ -63,10 +67,9 @@ class VectorDbManager:
         vector_ids = []
         for embedded_chunk_obj in embedded_chunk_objs:
             vectors.append(embedded_chunk_obj.vector)
-            vector_ids.append(embedded_chunk_obj.meta_data.chunk_id)
+            vector_ids.append(embedded_chunk_obj.vector_id)
         logger.info(f"Batch inserting {len(vector_ids)} vectors into index...")
         self.__insert_vectors_in_batch(vectors, vector_ids)
-
 
     def search_vector(self, query):
         return self.vector_db.search_vector(query, self.k_neighbors, self.complexity)
@@ -102,4 +105,3 @@ class VectorDbManager:
                 f"Index directory '{load_path}' does not exist. Returning None."
             )
             return None
-

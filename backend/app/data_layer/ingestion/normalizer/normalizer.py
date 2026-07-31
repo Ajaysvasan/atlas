@@ -39,6 +39,7 @@ class TextNormalizer:
         return str(hex_digest)
 
     def __generate_document_id(self, *args) -> str:
+        args = [str(arg) for arg in args]
         value = "".join(args)
         hash_object = hashlib.sha256(value.encode("utf-8"))
         hex_digest = hash_object.hexdigest()

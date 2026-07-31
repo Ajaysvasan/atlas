@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import List
+
+from numpy import ndarray
 
 from data_layer.ingestion.metadata.metadata import (
     ChunkMetaData,
@@ -68,5 +69,6 @@ class NormalizedContent:
 
 @dataclass(frozen=True)
 class EmbeddedChunk:
-    vector: List[float]
+    vector: ndarray
+    vector_id: int
     meta_data: EmbeddedChunkMetaData
