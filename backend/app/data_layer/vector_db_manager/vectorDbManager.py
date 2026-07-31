@@ -69,7 +69,7 @@ class VectorDbManager:
             vectors.append(embedded_chunk_obj.vector)
             vector_ids.append(embedded_chunk_obj.vector_id)
         logger.info(f"Batch inserting {len(vector_ids)} vectors into index...")
-        self.__insert_vectors_in_batch(vectors, vector_ids)
+        self.__insert_vectors_in_batch(numpy.array(vectors, dtype=numpy.float32), vector_ids)
 
     def search_vector(self, query):
         return self.vector_db.search_vector(query, self.k_neighbors, self.complexity)
@@ -99,7 +99,7 @@ class VectorDbManager:
             with self.lock:
                 idx = self.vector_db.load(load_path)
             logger.info("VectorDbManager index loaded successfully.")
-            return idx
+            return self.vector_db.dynamic_dann
         except IndexDirectoryDoesNotExists:
             logger.warning(
                 f"Index directory '{load_path}' does not exist. Returning None."

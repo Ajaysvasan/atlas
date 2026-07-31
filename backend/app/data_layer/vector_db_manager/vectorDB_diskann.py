@@ -43,7 +43,7 @@ class VectorDb_diskann:
     def __insert_vector(self, vector, vector_id):
         try:
             self.dynamic_dann.insert(vector, vector_id)
-        except ValueError | RuntimeError as e:
+        except (ValueError, RuntimeError) as e:
             raise VectorInsertionError(vector_id)
 
     def __insert_vectors(self, vectors, vector_ids):
@@ -103,6 +103,7 @@ class VectorDb_diskann:
                 vector_dtype=self.vector_dtype,
                 dimensions=self.dimensions,
             )
+            self.dynamic_dann = index
             logger.info("DiskANN index loaded successfully.")
             return index
         logger.error(

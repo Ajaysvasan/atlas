@@ -115,9 +115,10 @@ class TestDataLayerProduction(unittest.TestCase):
         
         # Create a perfectly valid production embedded chunk
         embedded_chunk = EmbeddedChunk(
-            vector=np.zeros(128, dtype=np.float32), 
+            vector=np.zeros(128, dtype=np.float32),
+            vector_id=1,
             meta_data=EmbeddedChunkMetaData(
-                chunk_id=1,  # Must be an integer for DiskANN
+                chunk_id="1",  # Must be a string for metadata
                 chunk="test",
                 modelUsedForChunking="test_model"
             )

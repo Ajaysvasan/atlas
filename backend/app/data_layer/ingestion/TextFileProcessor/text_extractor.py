@@ -77,11 +77,9 @@ class TextExtractor:
     def __extract_text_from_md(self, file_path: str) -> str:
         if not os.path.exists(file_path):
             raise Exception(f"The Path {file_path} does not exists")
-        text = []
         with open(file_path, "r", encoding="utf-8") as file:
-            text = file.readlines()
-
-        return "\n".join(text)
+            text = file.read()
+        return text
 
     def extract_text_from_file(self, file_path: str) -> Tuple[str, str]:
         if not os.path.exists(file_path):

@@ -35,7 +35,7 @@ class EmbeddingManager:
         chunk_id = chunkObj.chunk_id
         embedded_chunk = self.model.encode(chunk, truncate_dim=self.embedding_dimension)
         return EmbeddedChunk(
-            embedded_chunk.cpu().detach().numpy().astype(np.float32),
+            embedded_chunk.astype(np.float32),
             self.__generate_vector_id(chunk),
             self.__create_meta_data(chunk_id, chunk),
         )
@@ -62,7 +62,7 @@ class EmbeddingManager:
             chunk_id = chunkObj.chunk_id
             embedded_chunks.append(
                 EmbeddedChunk(
-                    vector.cpu().detach().numpy().astype(np.float32),
+                    vector.astype(np.float32),
                     self.__generate_vector_id(chunk),
                     self.__create_meta_data(chunk_id, chunk),
                 )
