@@ -18,17 +18,17 @@ This document catalogs all logical, architectural, concurrency, and data integri
 - **Priority:** P2
 - **Explanation:** In `SnapShot.add()`, whenever a new snapshot node is appended, `self.__left_cursor` is reset to `0` and `self.__right_cursor` to `len - 1` by default (`reset_right_pointer=True, reset_left_pointer=True`), clobbering any active iteration cursors. Additionally, in `__find_best_snapshot`, the while loop condition is `while self.__left_cursor <= self.__right_cursor:`. When `self.__left_cursor == self.__right_cursor` (the exact midpoint of an odd-length snapshot list), both `left_snap` and `right_snap` point to the same node, computing and comparing `cosine_similarity` twice for the exact same object before terminating.
 
-### Bug 1.3: Swapped Path Definitions & Unimplemented Method in Legacy `ConversationVectorManager` (`conversatoinVectorManager.py`)
+### Bug 1.3: [RESOLVED] Swapped Path Definitions & Unimplemented Method in Legacy `ConversationVectorManager` (`conversatoinVectorManager.py`)
 
 - **Criticality:** Critical
 - **Priority:** P0
-- **Explanation:** In `conversation_data_management/conversatoinVectorManager.py` (which has a typo in its filename), `add_cummulative_summary_vector` is completely unimplemented (`pass`). Furthermore, `add_summary_vectors` stores binary vectors inside `self.cummulative_vector_path`, while `get_summary_vector` reads from `self.cummulative_vector_path` and `get_cummulative_summary_vector` reads from `self.summary_path`. The directory paths and vector roles are completely inverted.
+- **Explanation:** (RESOLVED - File Rewritten) In `conversation_data_management/conversatoinVectorManager.py` (which has a typo in its filename), `add_cummulative_summary_vector` is completely unimplemented (`pass`). Furthermore, `add_summary_vectors` stores binary vectors inside `self.cummulative_vector_path`, while `get_summary_vector` reads from `self.cummulative_vector_path` and `get_cummulative_summary_vector` reads from `self.summary_path`. The directory paths and vector roles are completely inverted.
 
-### Bug 1.4: SQLite Connection Thread Incompatibility & Missing Transaction Rollbacks (`conversationVectorMetaManager.py`)
+### Bug 1.4: [RESOLVED] SQLite Connection Thread Incompatibility & Missing Transaction Rollbacks (`conversationVectorMetaManager.py`)
 
 - **Criticality:** High
 - **Priority:** P1
-- **Explanation:** `ConversationVectorMetaDataManager` maintains a persistent SQLite connection `self.conn` (`sqlite3.connect()`) across instance lifetime. If instance methods (`insert_snapshot`, `load_snap_shot_objects`) are invoked from different background worker threads or async tasks, `sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread` is thrown. Additionally, multi-row operations (`__insert_vector_ids`, `__insert_snapshot_metadata`) lack `try ... except sqlite3.Error: self.conn.rollback()` handling, leaving connections in aborted transaction states if a primary/foreign key constraint fails.
+- **Explanation:** (RESOLVED - File Rewritten using Context Managers) `ConversationVectorMetaDataManager` maintains a persistent SQLite connection `self.conn` (`sqlite3.connect()`) across instance lifetime. If instance methods (`insert_snapshot`, `load_snap_shot_objects`) are invoked from different background worker threads or async tasks, `sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread` is thrown. Additionally, multi-row operations (`__insert_vector_ids`, `__insert_snapshot_metadata`) lack `try ... except sqlite3.Error: self.conn.rollback()` handling, leaving connections in aborted transaction states if a primary/foreign key constraint fails.
 
 ### Bug 1.5: Empty & Placeholder Modules In Memory Pool
 

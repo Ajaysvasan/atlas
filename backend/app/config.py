@@ -29,12 +29,39 @@ class Config:
     GRAPH_DEGREE = 120
     NUM_THREADS = 4
     K_NEIGHBORS = 9
-    CONVERSATION_SNAPSHOT_DB = os.path.join(
-        DATA_DIR, "memory", "topic_pool", "project_pool", "conversation_pool", "conversation_snapshot.db"
+    CONVERSATION_SNAPSHOT_DB = Path(
+        os.path.join(
+            DATA_DIR,
+            "memory",
+            "topic_pool",
+            "project_pool",
+            "conversation_pool",
+            "conversation_snapshot.db",
+        )
     )
 
-    SUMMARY_PATH = os.path.join(DATA_DIR, "memory", "topic_pool", "project_pool", "conversation_pool", "conversation_vectors", "summary_vectors")
-    CUMMULATIVE_VECTOR_PATH = os.path.join(DATA_DIR, "memory", "topic_pool", "project_pool", "conversation_pool", "conversation_vectors", "cummulative_vector")
+    SUMMARY_VECTOR_DB_PATH = Path(
+        os.path.join(
+            DATA_DIR,
+            "memory",
+            "topic_pool",
+            "project_pool",
+            "conversation_pool",
+            "conversation_vectors",
+            "summary_vectors",
+        )
+    )
+    CUMMULATIVE_VECTOR_DB_PATH = Path(
+        os.path.join(
+            DATA_DIR,
+            "memory",
+            "topic_pool",
+            "project_pool",
+            "conversation_pool",
+            "conversation_vectors",
+            "cummulative_vector",
+        )
+    )
     VECTOR_DIMENSIONS = 128
 
 
