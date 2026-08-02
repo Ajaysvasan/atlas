@@ -1,3 +1,15 @@
+"""
+
+I need to maintain the snapshot that is taken recently
+and then I also need to store the ids for each projects in a file and load them
+A python dict would do I belive
+{
+    project_id : [snapshot_one_id , snapshot_two_id , ... , snapshot_n_id]
+    each snapshot is a summary vector
+}
+
+"""
+
 from typing import List
 
 from memory_pool_exceptions import InvalidCursorException, NullPointerException
@@ -10,7 +22,6 @@ class SnapShot:
     def __init__(
         self,
     ):
-        # a load function that is desiralizer will come here to load all the previous stated
         self.__left_cursor: int = -1
         self.__right_cursor: int = -1
         self.__snap_shot_list: List[SnapShotNode] = []
@@ -24,6 +35,7 @@ class SnapShot:
         summary_vector_ids: List,
         conversation_id: str,
         cumulative_summary_vector_id: uint32,
+        project_id: str,
     ) -> None:
         snap_shot = SnapShotNode(
             snapshot_id,
@@ -33,6 +45,7 @@ class SnapShot:
             summary_vector_ids,
             conversation_id,
             cumulative_summary_vector_id,
+            project_id,
         )
         self.__snap_shot_list.append(snap_shot)
 
@@ -44,6 +57,7 @@ class SnapShot:
         len_of_the_summary: int,
         summary_vector_ids: List,
         conversation_id: str,
+        project_id: str,
         cumulative_summary_vector_id: uint32,
         reset_right_pointer: bool = True,
         reset_left_pointer: bool = True,
@@ -56,6 +70,7 @@ class SnapShot:
             summary_vector_ids,
             conversation_id,
             cumulative_summary_vector_id,
+            project_id,
         )
         if self.__left_cursor == -1 and self.__right_cursor == -1:
             self.__left_cursor = self.__right_cursor = 0
@@ -106,9 +121,7 @@ class SnapShot:
                 # some logics
                 right_snap_vector_cumulative = tensor([])
                 left_snap_vector_cumulative = tensor([])
-                left_sim = cosine_similarity(
-                    left_snap_vector_cumulative, tensor(query)
-                )
+                left_sim = cosine_similarity(left_snap_vector_cumulative, tensor(query))
                 right_sim = cosine_similarity(
                     right_snap_vector_cumulative, tensor(query)
                 )
@@ -130,4 +143,3 @@ class SnapShot:
 
     def search(self, query: List):
         return self.__snap_shot_list[self.__find_best_snapshot(query)]
-
