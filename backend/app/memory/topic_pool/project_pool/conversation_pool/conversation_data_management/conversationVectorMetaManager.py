@@ -1,7 +1,33 @@
+"""
+
+Need to have cummulative summary
+
+
+how do I map the vector_id from the cummulative summary to the summary vector?
+
+have the cummulative summary vector id as the forgein key
+
+summary vectors can be stored in one table
+
+cummulative vectors are stored in another table
+
+have a fact table that maps the cummulative vector and the summary vector
+
+
+my cummulative vector table should contain the following things
+1. cummulative_vector_id : int
+2. cummulative_summary : str
+3. created_at : date
+
+while retriving it should ordered by created_time
+
+"""
+
 import sqlite3
-import threading
 from pathlib import Path
 from typing import List, Tuple
+
+from numpy.lib.index_tricks import nd_grid
 
 
 class ConversationVectorMetaDataManager:
@@ -35,6 +61,13 @@ class ConversationVectorMetaDataManager:
                     vector_id INTEGER PRIMARY KEY,
                     chunk_id TEXT NOT NULL,
                     chunk TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cumulative_summary_vector (
+                    cumulative_summary_vector_id INTEGER PRIMARY KEY,
+                    created_at DATETIME NOT NULL,
+                    cumulative_summary TEXT NOT NULL
                 )
             """)
             conn.commit()
@@ -108,3 +141,14 @@ class ConversationVectorMetaDataManager:
                 (vector_id,),
             )
             return cursor.fetchone()
+
+    def insert_cumulative_summary_vector(
+        self,
+        cumulative_summary_vector_id: int,
+        created_at: str,
+        cumulative_summary: str,
+    ):
+        pass
+
+    def search_cumulative_summary_vector(self, cummulative_vector_id: int):
+        pass
