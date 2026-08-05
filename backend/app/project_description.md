@@ -12,7 +12,9 @@ Therefore, there is a need for a local, project-aware memory system capable of o
 
 **Solution Statement**
 
-This project proposes a local Project-Aware Hierarchical Memory and Retrieval System that extends traditional Retrieval-Augmented Generation by introducing structured project-specific memory management. The system enables users to build persistent knowledge bases for multiple projects while maintaining conversational continuity through hierarchical memory organization.
+This project proposes a local Project-Aware Hierarchical Memory and Retrieval System that extends traditional Retrieval-Augmented Generation by introducing
+structured project-specific memory management. The system enables users to build persistent knowledge bases for multiple projects while maintaining conversational
+continuity through hierarchical memory organization.
 
 ## Project components
 
@@ -56,4 +58,63 @@ this is futher sub divided into 2 buckets
 ###### 2. cummulative summary , where the entire summary with out any summary gets embedded and stored
 
 This layer is responsible for generating appropirate answers and storing the context for that conversation and project.
-This layer mainly exists to prevent hallucinations and also to solve the problem of context rotting. We will see more about them in the working section
+This layer mainly exists to reduce the amount of hallucations and also to solve the problem of context rotting. We will see more about them in the working section
+This layer also uses CBR , where we only store the vector ids here , and when we get a query we use the vector IDs to get the vectors from the postgresql
+for CBR
+
+### 3. Query Decomposition layer
+
+This layer decomposes the query into two major categories
+
+#### 1. mode 1 query (development / plan query)-> where the user query is sort of like this "Help me to develop " or any queries similar to that
+
+#### 2. mode 2 query (doubt query)-> where the user query is sort of like "What does this do? " or any queries similar to that
+
+This layer helps in identifing the query the helps the model to make plans accordingly , for instance
+a simple query
+`Help me to build a physics engine in C `
+is not as simple as it looks , it contains complex things like
+
+1. Mathematics
+2. physics equations
+3. coding
+4. Creating appropirate data structures
+   and many more things
+
+So by decomposing the query to understand the hidden dependency and re-structuring them would help the model to plan efficiently
+also if we get a query like
+`Why do we use vectors instead of array here`
+then the model should not spend much time in it , rather it can just see either full conversation or appropirate summary to answer that rather than thinking heavily
+
+### 4. The planner critique layer
+
+#### 1. Planner layer
+
+The planner is the one that takes the mode 1 queries , and first plan the solution first.
+There will be 4 worker planners and 1 master planner
+
+Each of the 4 worker planner takes up one hypothesis from the query and work on it
+The master query is the one that finalizes the overall solution by stritching all the solutions provided by each hypothesis
+
+#### 2. Critique Layer:
+
+The critique layer takes the solution from the planner and find the loop holes , flaws , checks for fessiablity , checks for possible things that can go wrong ,
+checks if the solution is bound to the scope and returns that to the planner
+
+the planner then takes up that feedback from the critique and tries to find a solution with the existing solutiion or come up with new solution or together
+
+### 4. Retrieval layer
+
+The retrieval layer is responsible for retrieving the chunks that is needed by the planner to make the solution
+
+### 5. Generation layer
+
+This where the LLM lives , once the solution is validated by the critique , it is passed to the generation layer.
+Here the role of the LLM is generate a response which is human like along with the solution without chaning it.
+This is for human readability
+
+### 6. Knowledge accqusation
+
+This layer is there to check if the system has enough knowledge to address the given query is yes , then we proceed with the retrieval ,
+other wise the knowledge accqusation layer goes to the internet , crawls over it and take the neccessary data and add it to the vector DB
+once the neccessary data is obtained that's when the retrieval takes place
