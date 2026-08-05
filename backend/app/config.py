@@ -59,7 +59,7 @@ class Config:
             "project_pool",
             "conversation_pool",
             "conversation_vectors",
-            "cummulative_vector",
+            "cumulative_vector",
         )
     )
     VECTOR_DIMENSIONS = 128

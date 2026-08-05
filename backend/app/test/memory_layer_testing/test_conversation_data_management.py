@@ -10,7 +10,7 @@ import shutil
 import numpy as np
 
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import ConversationVectorMetaDataManager
-from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversatoinVectorManager import ConversationVectorManager
+from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager import ConversationVectorManager
 
 
 class TestConversationVectorMetaDataManager(unittest.TestCase):
@@ -79,7 +79,7 @@ class TestConversationVectorMetaDataManager(unittest.TestCase):
 
 
 class TestConversationVectorManager(unittest.TestCase):
-    @patch('memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversatoinVectorManager.VectorRepository')
+    @patch('memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager.VectorRepository')
     def setUp(self, MockVectorRepository):
         self.mock_repo = MockVectorRepository.return_value
         self.manager = ConversationVectorManager(project_name="TestProject", project_id="proj123")

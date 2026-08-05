@@ -18,11 +18,11 @@ This document catalogs all logical, architectural, concurrency, and data integri
 - **Priority:** P2
 - **Explanation:** In `SnapShot.add()`, whenever a new snapshot node is appended, `self.__left_cursor` is reset to `0` and `self.__right_cursor` to `len - 1` by default (`reset_right_pointer=True, reset_left_pointer=True`), clobbering any active iteration cursors. Additionally, in `__find_best_snapshot`, the while loop condition is `while self.__left_cursor <= self.__right_cursor:`. When `self.__left_cursor == self.__right_cursor` (the exact midpoint of an odd-length snapshot list), both `left_snap` and `right_snap` point to the same node, computing and comparing `cosine_similarity` twice for the exact same object before terminating.
 
-### Bug 1.3: [RESOLVED] Swapped Path Definitions & Unimplemented Method in Legacy `ConversationVectorManager` (`conversatoinVectorManager.py`)
+### Bug 1.3: [RESOLVED] Swapped Path Definitions & Unimplemented Method in Legacy `ConversationVectorManager` (`conversationVectorManager.py`)
 
 - **Criticality:** Critical
 - **Priority:** P0
-- **Explanation:** (RESOLVED - File Rewritten) In `conversation_data_management/conversatoinVectorManager.py` (which has a typo in its filename), `add_cummulative_summary_vector` is completely unimplemented (`pass`). Furthermore, `add_summary_vectors` stores binary vectors inside `self.cummulative_vector_path`, while `get_summary_vector` reads from `self.cummulative_vector_path` and `get_cummulative_summary_vector` reads from `self.summary_path`. The directory paths and vector roles are completely inverted.
+- **Explanation:** (RESOLVED - File Rewritten) In `conversation_data_management/conversationVectorManager.py` (which has a typo in its filename), `add_cumulative_summary_vector` is completely unimplemented (`pass`). Furthermore, `add_summary_vectors` stores binary vectors inside `self.cumulative_vector_path`, while `get_summary_vector` reads from `self.cumulative_vector_path` and `get_cumulative_summary_vector` reads from `self.summary_path`. The directory paths and vector roles are completely inverted.
 
 ### Bug 1.4: [RESOLVED] SQLite Connection Thread Incompatibility & Missing Transaction Rollbacks (`conversationVectorMetaManager.py`)
 
@@ -34,5 +34,5 @@ This document catalogs all logical, architectural, concurrency, and data integri
 
 - **Criticality:** Medium
 - **Priority:** P2
-- **Explanation:** Several core memory modules contain unwritten placeholder files or typos: `conversaton_summary.py` (typo `conversaton`) contains only `class ConversationSummary: pass`, `full_conversation_bucket.py` contains only `class FullConversationBucket: pass`, and `conversation_pool_manager.py`, `memory_manager.py`, `topic_manager.py`, `project_manager.py` are completely empty (0 bytes). This indicates that the core components of the memory architecture are fundamentally missing.
+- **Explanation:** Several core memory modules contain unwritten placeholder files or typos: `conversation_summary.py` (typo `conversation`) contains only `class ConversationSummary: pass`, `full_conversation_bucket.py` contains only `class FullConversationBucket: pass`, and `conversation_pool_manager.py`, `memory_manager.py`, `topic_manager.py`, `project_manager.py` are completely empty (0 bytes). This indicates that the core components of the memory architecture are fundamentally missing.
 

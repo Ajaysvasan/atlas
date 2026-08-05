@@ -3,7 +3,7 @@
 ## Overview & Purpose
 The `conversation_data_management` sub-module now consists of two modernized files for robust vector metadata tracking and storage integration:
 1. `conversationVectorMetaManager.py` defines `ConversationVectorMetaDataManager`. It creates and manages isolated SQLite databases for each project to store chunk and vector ID metadata (`<project_id>_full_conversation.db` and `<project_id>_summary_metadata.db`).
-2. `conversatoinVectorManager.py` defines `ConversationVectorManager`. It generates deterministic `uint32` vector IDs using MD5 hashes of the project and chunk identifiers, and acts as a direct integration proxy for the PostgreSQL `VectorRepository`.
+2. `conversationVectorManager.py` defines `ConversationVectorManager`. It generates deterministic `uint32` vector IDs using MD5 hashes of the project and chunk identifiers, and acts as a direct integration proxy for the PostgreSQL `VectorRepository`.
 
 ---
 
@@ -28,7 +28,7 @@ Creates the required directories if they don't exist, and initializes `chunks` t
 
 ---
 
-### `class ConversationVectorManager` (`conversatoinVectorManager.py`)
+### `class ConversationVectorManager` (`conversationVectorManager.py`)
 Provides deterministic vector ID generation and serves as the integration bridge to the external `VectorRepository`.
 
 #### Constructor
@@ -76,6 +76,6 @@ Initialized the SQLite database connection (`sqlite3.connect`) and enforced fore
 Legacy memory-mapped binary vector storage manager for appending and slicing vector arrays from raw `.bin` disk files.
 
 #### Legacy Methods
-- `add_summary_vectors(project_id: str, vectors: np.ndarray) -> Tuple[int, int]`: Appended 2D `np.float32` vector arrays directly to `<cummulative_vector_path>/<project_id>.bin` using `open(file_path, "ab")`.
-- `get_cummulative_summary_vector(start_idx: int, end_idx: int, project_id: str) -> np.ndarray`: Memory-mapped and sliced vectors.
+- `add_summary_vectors(project_id: str, vectors: np.ndarray) -> Tuple[int, int]`: Appended 2D `np.float32` vector arrays directly to `<cumulative_vector_path>/<project_id>.bin` using `open(file_path, "ab")`.
+- `get_cumulative_summary_vector(start_idx: int, end_idx: int, project_id: str) -> np.ndarray`: Memory-mapped and sliced vectors.
 - `get_summary_vector(start_idx: int, end_idx: int, project_id: str) -> np.ndarray`: Memory-mapped and sliced vectors from inverted directories due to an architectural bug.

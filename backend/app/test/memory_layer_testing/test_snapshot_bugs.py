@@ -24,7 +24,8 @@ class TestSnapShotBugs(unittest.TestCase):
             len_of_the_summary=10,
             summary_vector_ids=[],
             conversation_id="conv-1",
-            cumulative_summary_vector_id=uint32(1)
+            cumulative_summary_vector_id=uint32(1),
+            project_id="test_proj"
         )
         self.snapshot.add(
             snapshot_id="snap-2",
@@ -33,7 +34,8 @@ class TestSnapShotBugs(unittest.TestCase):
             len_of_the_summary=10,
             summary_vector_ids=[],
             conversation_id="conv-1",
-            cumulative_summary_vector_id=uint32(2)
+            cumulative_summary_vector_id=uint32(2),
+            project_id="test_proj"
         )
 
     def test_bug_1_1_cosine_similarity_crash(self):
@@ -59,7 +61,8 @@ class TestSnapShotBugs(unittest.TestCase):
             len_of_the_summary=10,
             summary_vector_ids=[],
             conversation_id="conv-1",
-            cumulative_summary_vector_id=uint32(3)
+            cumulative_summary_vector_id=uint32(3),
+            project_id="test_proj"
         )
         
         # Left cursor gets reset to 0 even though we set it to 1!

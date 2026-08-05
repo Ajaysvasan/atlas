@@ -33,7 +33,7 @@ A static namespace container that defines defaults and global settings used by t
 | `K_NEIGHBORS` | `int` | `9` | Default number of nearest neighbor results (`k`) returned during similarity search. |
 | `CONVERSATION_SNAPSHOT_DB` | `str` | `"memory/topic_pool/project_pool/conversation_pool/conversation_snapshot.db"` | Path to the SQLite database storing conversation snapshot metadata and vector ID mappings. |
 | `SUMMARY_PATH` | `str` | `"memory/topic_pool/project_pool/conversation_pool/conversation_vectors/summary_vectors/"` | Base directory for storing memory-mapped binary summary vectors. |
-| `CUMMULATIVE_VECTOR_PATH` | `str` | `"memory/topic_pool/project_pool/conversation_pool/conversation_vectors/cummulative_vector/"` | Base directory for storing memory-mapped binary cumulative summary vectors. |
+| `CUMMULATIVE_VECTOR_PATH` | `str` | `"memory/topic_pool/project_pool/conversation_pool/conversation_vectors/cumulative_vector/"` | Base directory for storing memory-mapped binary cumulative summary vectors. |
 
 ---
 
