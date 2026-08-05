@@ -12,4 +12,4 @@ Therefore, there is a need for a local, project-aware memory system capable of o
 
 This project proposes a local Project-Aware Hierarchical Memory and Retrieval System that extends traditional Retrieval-Augmented Generation by introducing structured project-specific memory management. The system enables users to build persistent knowledge bases for multiple projects while maintaining conversational continuity through hierarchical memory organization.
 
-##**Project components**
+##Project components
