@@ -49,9 +49,11 @@ The conversation pool stores the conversation in two ways
 
 ##### 2. Conversation summary :
 
-        this is futher sub divided into 2 buckets
-            1. Conversation summary , where each chunk of the summary generated is embedded and stored
-            2. cummulative summary , where the entire summary with out any summary gets embedded and stored
+this is futher sub divided into 2 buckets
+
+###### 1. Conversation summary , where each chunk of the summary generated is embedded and stored
+
+###### 2. cummulative summary , where the entire summary with out any summary gets embedded and stored
 
 This layer is responsible for generating appropirate answers and storing the context for that conversation and project.
 This layer mainly exists to prevent hallucinations and also to solve the problem of context rotting. We will see more about them in the working section
