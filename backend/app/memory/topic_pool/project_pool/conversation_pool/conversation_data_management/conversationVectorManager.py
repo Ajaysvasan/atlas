@@ -11,7 +11,7 @@ class ConversationVectorManager:
     def __init__(self, project_name: str, project_id: str):
         self.project_name = project_name
         self.project_id = project_id
-        self.repository = VectorRepository()
+        self.repository = VectorRepository(self.project_id)
 
     def insert(self, vector_id: uint32, vector: np.ndarray) -> np.uint32:
         """

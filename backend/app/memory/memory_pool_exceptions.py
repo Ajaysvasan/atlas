@@ -26,3 +26,7 @@ class InvalidVectorDimension(Exception):
 
     def __str__(self) -> str:
         return f"Got the dimension {self.dimension}. Expected the dimension {self.expected_dimension}"
+
+
+class MisMatchCount(Exception):
+    pass

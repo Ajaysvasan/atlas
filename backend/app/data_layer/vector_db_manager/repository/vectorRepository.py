@@ -25,7 +25,8 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
 
 
 class VectorRepository:
-    def __init__(self) -> None:
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
         load_dotenv()
         self.__db_name = os.getenv("DBNAME")
         self.__user = os.getenv("USER")
@@ -50,7 +51,7 @@ class VectorRepository:
 
     def __create_table(self, embedding_dimension=Config.EMBEDDING_DIMENSIONS):
         query = f"""
-        create table if not exists vectors(vector_id bigint primary key , embedding vector({embedding_dimension}))
+        create table if not exists vectors(project_id varchar, vector_id bigint, embedding vector({embedding_dimension}), primary key (project_id, vector_id))
         """
         self.curr.execute(query)
         self.conn.commit()
@@ -59,10 +60,10 @@ class VectorRepository:
         if len(vector) != Config.EMBEDDING_DIMENSIONS:
             raise InvalidVectorDimension(len(vector), Config.EMBEDDING_DIMENSIONS)
         query = """
-        insert into vectors (vector_id , embedding) values (%s , %s);
+        insert into vectors (project_id, vector_id, embedding) values (%s, %s, %s);
         """
         try:
-            self.curr.execute(query, (vector_id, vector))
+            self.curr.execute(query, (self.project_id, int(vector_id), vector))
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()
@@ -75,11 +76,11 @@ class VectorRepository:
             if len(vector) != Config.EMBEDDING_DIMENSIONS:
                 raise InvalidVectorDimension(len(vector), Config.EMBEDDING_DIMENSIONS)
         query = """
-        insert into vectors (vector_id , embedding) values (%s , %s) on conflict (vector_id) do nothing;
+        insert into vectors (project_id, vector_id, embedding) values (%s, %s, %s) on conflict (project_id, vector_id) do nothing;
         """
         try:
             rows = [
-                (int(id), vector.tolist()) for id, vector in zip(vector_ids, vectors)
+                (self.project_id, int(id), vector.tolist()) for id, vector in zip(vector_ids, vectors)
             ]
             self.curr.executemany(query, rows)
             self.conn.commit()
@@ -89,9 +90,9 @@ class VectorRepository:
 
     def __get_vector(self, vector_id: uint32) -> NDArray[float32]:
         query = """
-        select embedding from vectors where vector_id = %s;
+        select embedding from vectors where project_id = %s and vector_id = %s;
         """
-        self.curr.execute(query, (vector_id,))
+        self.curr.execute(query, (self.project_id, int(vector_id)))
         result = self.curr.fetchone()
         if result is None:
             raise VectorNotFoundEror(vector_id)
