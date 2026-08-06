@@ -40,7 +40,7 @@ class Config:
         )
     )
 
-    SUMMARY_VECTOR_DB_PATH = Path(
+    FULL_CONVERSATION = Path(
         os.path.join(
             DATA_DIR,
             "memory",
@@ -48,18 +48,7 @@ class Config:
             "project_pool",
             "conversation_pool",
             "conversation_vectors",
-            "summary_vectors",
-        )
-    )
-    CUMMULATIVE_VECTOR_DB_PATH = Path(
-        os.path.join(
-            DATA_DIR,
-            "memory",
-            "topic_pool",
-            "project_pool",
-            "conversation_pool",
-            "conversation_vectors",
-            "cumulative_vector",
+            "FULL_CONVERSATION",
         )
     )
     VECTOR_DIMENSIONS = 128

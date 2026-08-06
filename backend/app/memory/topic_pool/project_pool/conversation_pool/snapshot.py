@@ -12,10 +12,17 @@ A python dict would do I belive
 
 from typing import List
 
+from conversation_data_management.conversationVectorManager import (
+    ConversationVectorManager,
+)
+from conversation_data_management.conversationVectorMetaManager import (
+    ConversationVectorMetaDataRepository,
+)
 from memory_pool_exceptions import InvalidCursorException, NullPointerException
-from numpy import uint32
-from snapShotNodes import SnapShotNode
+from numpy import ndarray, uint32
 from torch import cosine_similarity, tensor
+
+from config import Config
 
 
 class SnapShot:
@@ -24,66 +31,103 @@ class SnapShot:
     ):
         self.__left_cursor: int = -1
         self.__right_cursor: int = -1
-        self.__snap_shot_list: List[SnapShotNode] = []
+
+    def __get_snap_shot(self, project_id: str):
+
+        conversationVectorMetaDataRepository = ConversationVectorMetaDataRepository(
+            Config.FULL_CONVERSATION, Config.CONVERSATION_SNAPSHOT_DB, project_id
+        )
+        return (
+            conversationVectorMetaDataRepository.get_cumulative_vector_meta_data_ids()
+        )
 
     def __add_snap_shot(
         self,
-        snapshot_id,
+        project_name: str,
+        project_id: str,
         time_of_snapshot: str,
-        size_of_the_summary: int,
         len_of_the_summary: int,
         summary_vector_ids: List,
-        conversation_id: str,
+        summary_vectors: ndarray,
+        chunk_ids: str,
+        summary: str,
         cumulative_summary_vector_id: uint32,
-        project_id: str,
+        cumulative_summary_vector: ndarray,
     ) -> None:
-        snap_shot = SnapShotNode(
-            snapshot_id,
-            time_of_snapshot,
-            size_of_the_summary,
-            len_of_the_summary,
-            summary_vector_ids,
-            conversation_id,
-            cumulative_summary_vector_id,
-            project_id,
+        if len(chunk_ids) != len(summary_vector_ids):
+            raise
+        conversationVectorManager = ConversationVectorManager(project_name, project_id)
+        conversationVectorMetaDataRepository = ConversationVectorMetaDataRepository(
+            Config.FULL_CONVERSATION, Config.CONVERSATION_SNAPSHOT_DB, project_id
         )
-        self.__snap_shot_list.append(snap_shot)
+        conversationVectorManager.batch_insert(summary_vector_ids, summary_vectors)
+        conversationVectorManager.insert(
+            cumulative_summary_vector_id, cumulative_summary_vector
+        )
+        summary_vector_tuple_list = []
+        for i in range(len(chunk_ids)):
+            summary_vector_tuple_list.append(
+                (summary_vector_ids[i], chunk_ids[i], project_id)
+            )
+        conversationVectorMetaDataRepository.insert_cumulative_vector_meta_data(
+            cumulative_summary_vector_id,
+            summary,
+            time_of_snapshot,
+            project_id,
+            len_of_the_summary,
+        )
+        conversationVectorMetaDataRepository.batch_insert_summary_vector_meta_data(
+            summary_vector_tuple_list
+        )
+
+        map_list = []
+        for i in range(len(summary_vector_ids)):
+            map_list.append((cumulative_summary_vector_id, summary_vector_ids[i]))
+
+        conversationVectorMetaDataRepository.batch_insert_map_table(map_list)
 
     def add(
         self,
-        snapshot_id: str,
+        project_name: str,
+        project_id: str,
         time_of_snapshot: str,
-        size_of_the_summary: int,
         len_of_the_summary: int,
         summary_vector_ids: List,
-        conversation_id: str,
-        project_id: str,
+        summary_vectors: ndarray,
+        chunk_ids: str,
+        summary: str,
         cumulative_summary_vector_id: uint32,
+        cumulative_summary_vector: ndarray,
         reset_right_pointer: bool = True,
         reset_left_pointer: bool = True,
     ):
+
         self.__add_snap_shot(
-            snapshot_id,
+            project_name,
+            project_id,
             time_of_snapshot,
-            size_of_the_summary,
             len_of_the_summary,
             summary_vector_ids,
-            conversation_id,
+            summary_vectors,
+            chunk_ids,
+            summary,
             cumulative_summary_vector_id,
-            project_id,
+            cumulative_summary_vector,
         )
+
         if self.__left_cursor == -1 and self.__right_cursor == -1:
             self.__left_cursor = self.__right_cursor = 0
 
         if reset_right_pointer:
-            self.__reset_right_pointer()
+            self.__reset_right_pointer(project_id)
 
         if reset_left_pointer:
-            self.__reset_left_pointer()
+            self.__reset_left_pointer(project_id)
 
-    def advance(self) -> None:
+    def advance(self, project_id: str) -> None:
         """Makes left cursor move"""
-        if self.__left_cursor + 1 < len(self.__snap_shot_list):
+        snap_shot_list = self.__get_snap_shot(project_id)
+        if self.__left_cursor + 1 < len(snap_shot_list):
             self.__left_cursor += 1
             return
         raise InvalidCursorException("left", self.__left_cursor + 1)
@@ -96,31 +140,42 @@ class SnapShot:
 
         raise InvalidCursorException("right", self.__right_cursor - 1)
 
-    def __reset_left_pointer(self) -> None:
-        if len(self.__snap_shot_list) != 0:
+    def __reset_left_pointer(self, project_id: str) -> None:
+
+        snap_shot_list = self.__get_snap_shot(project_id)
+        if len(snap_shot_list) != 0:
             self.__left_cursor = 0
             return
         raise NullPointerException("No snap shots found")
 
-    def __reset_right_pointer(self) -> None:
-        if len(self.__snap_shot_list) != 0:
-            self.__right_cursor = len(self.__snap_shot_list) - 1
+    def __reset_right_pointer(self, project_id: str) -> None:
+        snap_shot_list = self.__get_snap_shot(project_id)
+        if len(snap_shot_list) != 0:
+            self.__right_cursor = len(snap_shot_list) - 1
             return
         raise NullPointerException("No snap shots found")
 
-    def __find_best_snapshot(self, query: List) -> int:
-        if len(self.__snap_shot_list) == 0:
+    def __find_best_snapshot(
+        self, query: ndarray, project_id: str, project_name: str
+    ) -> int:
+        snap_shot_list = self.__get_snap_shot(project_id)
+        if len(snap_shot_list) == 0:
             raise NullPointerException("No snap shots found")
 
         best_snap_shot_idx = -1
         best_similarity = float("-inf")
+        conversationVectorManager = ConversationVectorManager(project_name, project_id)
         try:
             while self.__left_cursor <= self.__right_cursor:
-                left_snap = self.__snap_shot_list[self.__left_cursor]
-                right_snap = self.__snap_shot_list[self.__right_cursor]
+                left_snap = snap_shot_list[self.__left_cursor]
+                right_snap = snap_shot_list[self.__right_cursor]
                 # some logics
-                right_snap_vector_cumulative = tensor([])
-                left_snap_vector_cumulative = tensor([])
+                right_snap_vector_cumulative = tensor(
+                    conversationVectorManager.get_vector(left_snap)
+                )
+                left_snap_vector_cumulative = tensor(
+                    conversationVectorManager.get_vector(right_snap)
+                )
                 left_sim = cosine_similarity(left_snap_vector_cumulative, tensor(query))
                 right_sim = cosine_similarity(
                     right_snap_vector_cumulative, tensor(query)
@@ -137,9 +192,12 @@ class SnapShot:
                 self.__right_cursor -= 1
 
         finally:
-            self.__reset_right_pointer()
-            self.__reset_left_pointer()
+            self.__reset_right_pointer(project_id)
+            self.__reset_left_pointer(project_id)
         return best_snap_shot_idx
 
-    def search(self, query: List):
-        return self.__snap_shot_list[self.__find_best_snapshot(query)]
+    def search(self, query: ndarray, project_id: str, project_name: str):
+        snap_shot_list = self.__get_snap_shot(project_id)
+        return snap_shot_list[
+            self.__find_best_snapshot(query, project_id, project_name)
+        ]
