@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from typing import List
 
@@ -8,7 +9,12 @@ from data_layer.ingestion.nodes.nodes import Context, Document, HChunk, Section
 class Manager:
     def __init__(self, db_path: str, is_chunker_type_hierarchical: bool) -> None:
         self.is_chunker_type_hierarchical = is_chunker_type_hierarchical
-        self.connection = sqlite3.connect(db_path)
+        # Bug 1.3 fix: ensure parent directory exists before connecting
+        parent_dir = os.path.dirname(db_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        # Bug 1.2 fix: allow cross-thread usage of this connection
+        self.connection = sqlite3.connect(db_path, check_same_thread=False)
         self.connection.execute("PRAGMA foreign_keys = ON;")
         self.cursor = self.connection.cursor()
         self._create_table()

@@ -96,6 +96,40 @@ class TestConversationVectorMetaDataManager(unittest.TestCase):
         ids_202 = self.manager.get_summary_vector_ids_from_map(202)
         self.assertEqual(ids_202, [101])
 
+    def test_bug_2_1_numpy_uint32_type_coercion(self):
+        """
+        Bug 2.1 regression: Verifies that numpy.uint32 scalar values are properly
+        coerced to native Python int before being bound to SQLite INTEGER columns.
+        Previously, passing numpy.uint32 directly caused sqlite3.IntegrityError: datatype mismatch.
+        """
+        cum_id = np.uint32(501)
+        summary_vec_id = np.uint32(601)
+
+        # Insert cumulative with numpy.uint32 cumulative_vector_id and integer len
+        self.manager.insert_cumulative_vector_meta_data(
+            cum_id, "numpy uint32 summary", "2026-08-07", self.project_id, 42
+        )
+
+        # Read it back to verify
+        result = self.manager.get_cumulative_vector_meta_data(cum_id)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 501)
+
+        # Insert chunks + summary vector with numpy.uint32 summary_vector_id
+        self.manager.batch_insert_summary_chunks([("np_chunk", "text", "2026-08-07", "typeX")])
+        self.manager.batch_insert_summary_vector_meta_data([(int(summary_vec_id), "np_chunk", self.project_id)])
+
+        # Read back summary vector meta data with numpy.uint32
+        sv_result = self.manager.get_summary_vector_meta_data(summary_vec_id)
+        self.assertIsNotNone(sv_result)
+        self.assertEqual(sv_result[0], 601)
+
+        # Insert map entry with numpy.uint32 on both sides
+        self.manager.insert_map_table(cum_id, summary_vec_id)
+        map_ids = self.manager.get_summary_vector_ids_from_map(cum_id)
+        self.assertIn(601, map_ids)
+
+
 
 class TestConversationVectorManager(unittest.TestCase):
     @patch('memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager.VectorRepository')

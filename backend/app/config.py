@@ -15,7 +15,7 @@ class Config:
     DATASET_PATH = Path("dataset").resolve().parent / "dataset"
     DEBUG = False
     LOG_FILE = "log/app.log"
-    ABS_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ABS_PATH = Path(__file__).resolve().parent
     DATA_DIR = os.path.join(ABS_PATH, "data")
     DB_PATH = os.path.join(DATA_DIR, "hierarchical_db")
     EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"

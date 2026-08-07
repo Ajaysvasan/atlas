@@ -1,7 +1,7 @@
 import sqlite3
 from typing import List
 
-from datalayer_exceptions.datalayer_exceptions import (
+from data_layer.datalayer_exceptions.datalayer_exceptions import (
     InvalidBatchSize,
     InvalidColumnNameException,
     InvalidVectorID,
@@ -49,7 +49,7 @@ class VectorMetaDataRepository:
             values (? , ? , ? , ?) on conflict (vectorId) do nothing;
         """
         try:
-            self.cur.execute(query, (vectorId, chunkId, embeddingModelUsed, dimensions))
+            self.cur.execute(query, (int(vectorId), chunkId, embeddingModelUsed, dimensions))
             self.connection.commit()
 
         except Exception as e:
@@ -86,7 +86,7 @@ class VectorMetaDataRepository:
         if columnName not in self.__valid_column_name:
             raise InvalidColumnNameException(columnName)
         query = f"""select {columnName} from vector_meta_data where vectorId = ?"""
-        self.cur.execute(query, (vectorId,))
+        self.cur.execute(query, (int(vectorId),))
         result = self.cur.fetchone()
         if result == None:
             raise InvalidVectorID(vectorId)

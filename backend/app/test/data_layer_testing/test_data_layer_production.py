@@ -55,11 +55,13 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import VectorInsertion
 from data_layer.ingestion.TextFileProcessor.text_extractor import TextExtractor
 from data_layer.ingestion.normalizer.normalizer import TextNormalizer
 from data_layer.ingestion.ingestion_pipeline import IngestionPipeline
+from config import Config
 
 
 class TestDataLayerProduction(unittest.TestCase):
     
     def setUp(self):
+        os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)
         self.md_file_path = "test_doc.md"
         with open(self.md_file_path, "w") as f:
             f.write("Line 1\nLine 2\nLine 3\n")

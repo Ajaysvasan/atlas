@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Tuple
 
+
 from numpy import uint32
 
 
@@ -103,7 +104,7 @@ class ConversationVectorMetaDataRepository:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT summary_vector_id, chunk_id, project_id FROM summary_vector_meta_data WHERE summary_vector_id = ?",
-                (summary_vector_id,),
+                (int(summary_vector_id),),
             )
             return cursor.fetchone()
 
@@ -121,7 +122,7 @@ class ConversationVectorMetaDataRepository:
 
     def insert_cumulative_vector_meta_data(
         self,
-        cumulative_vector_id: uint32,
+        cumulative_vector_id: int,
         cumulative_summary: str,
         created_at: str,
         project_id: str,
@@ -133,11 +134,11 @@ class ConversationVectorMetaDataRepository:
                 cursor.execute(
                     "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?)",
                     (
-                        cumulative_vector_id,
+                        int(cumulative_vector_id),
                         cumulative_summary,
                         created_at,
                         project_id,
-                        len_of_the_summary,
+                        str(len_of_the_summary),
                     ),
                 )
                 conn.commit()
@@ -174,7 +175,7 @@ class ConversationVectorMetaDataRepository:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary FROM cumulative_vector_meta_data WHERE cumulative_vector_id = ? order by created_at desc",
-                (cumulative_vector_id,),
+                (int(cumulative_vector_id),),
             )
             return cursor.fetchone()
 
@@ -196,7 +197,7 @@ class ConversationVectorMetaDataRepository:
             try:
                 cursor.execute(
                     "INSERT INTO summary_snapshot_map (cumulative_vector_id, summary_vector_id) VALUES (?, ?)",
-                    (cumulative_vector_id, summary_vector_id),
+                    (int(cumulative_vector_id), int(summary_vector_id)),
                 )
                 conn.commit()
             except sqlite3.Error as e:
@@ -222,6 +223,6 @@ class ConversationVectorMetaDataRepository:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT summary_vector_id FROM summary_snapshot_map WHERE cumulative_vector_id = ?",
-                (cumulative_vector_id,),
+                (int(cumulative_vector_id),),
             )
             return [row[0] for row in cursor.fetchall()]
