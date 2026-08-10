@@ -54,19 +54,7 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Priority:** P2
 - **Explanation:** Several core memory management classes are completely empty (just containing `pass`), leaving the architecture unimplemented. These include `MemoryManager` (`memory_manager.py`), `ProjectManager` (`project_manager.py`), `TopicManager` (`topic_manager.py`), `ConversationPoolManager` (`conversation_pool_manager.py`), and `ConversationSummary` (`conversation_summary.py`).
 
-### Bug 4.2: Tuple Return Type Mismatch for Scalar Queries (`fullconversation_repository.py`)
-
-- **Criticality:** Medium
-- **Priority:** P2
-- **Explanation:** In `fullconversation_repository.py`, methods like `get_sequence_number()` (internally `__get_sequence_numer`) and `get_size()` are type-hinted and expected to return `int`, but they directly return the result of `cursor.fetchone()`, which yields a tuple like `(42,)`. This will cause type mismatch errors downstream for any component expecting an actual integer. Similarly, `__get_last_n_chunks` and other methods return a list of tuples instead of strings.
-
-### Bug 4.3: Typo in Method Name (`fullconversation_repository.py`)
-
-- **Criticality:** Low
-- **Priority:** P3
-- **Explanation:** The internal method `__get_sequence_numer` is misspelled and should be `__get_sequence_number`.
-
-### Bug 4.4: Inaccurate Docstrings in Vector Manager (`conversationVectorManager.py`)
+### Bug 4.2: Inaccurate Docstrings in Vector Manager (`conversationVectorManager.py`)
 
 - **Criticality:** Low
 - **Priority:** P3
