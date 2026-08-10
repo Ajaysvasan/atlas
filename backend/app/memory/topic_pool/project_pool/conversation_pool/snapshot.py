@@ -12,12 +12,6 @@ A python dict would do I belive
 
 from typing import List
 
-from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager import (
-    ConversationVectorManager,
-)
-from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
-    ConversationVectorMetaDataRepository,
-)
 from memory_pool_exceptions import (
     InvalidCursorException,
     MisMatchCount,
@@ -27,6 +21,12 @@ from numpy import ndarray, uint32
 from torch import cosine_similarity, tensor
 
 from config import Config
+from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager import (
+    ConversationVectorManager,
+)
+from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
+    ConversationVectorMetaDataRepository,
+)
 
 
 class SnapShot:
@@ -39,7 +39,7 @@ class SnapShot:
     def __get_snap_shot(self, project_id: str):
 
         conversationVectorMetaDataRepository = ConversationVectorMetaDataRepository(
-            Config.FULL_CONVERSATION, Config.CONVERSATION_SNAPSHOT_DB, project_id
+            Config.CONVERSATION, project_id
         )
         return (
             conversationVectorMetaDataRepository.get_cumulative_vector_meta_data_ids()
@@ -62,7 +62,7 @@ class SnapShot:
             raise MisMatchCount("Mis matched arguments recieved")
         conversationVectorManager = ConversationVectorManager(project_name, project_id)
         conversationVectorMetaDataRepository = ConversationVectorMetaDataRepository(
-            Config.FULL_CONVERSATION, Config.CONVERSATION_SNAPSHOT_DB, project_id
+            Config.CONVERSATION, project_id
         )
         conversationVectorManager.batch_insert(summary_vector_ids, summary_vectors)
         conversationVectorManager.insert(
@@ -173,7 +173,7 @@ class SnapShot:
             while self.__left_cursor <= self.__right_cursor:
                 if self.__left_cursor == self.__right_cursor:
                     snap = snap_shot_list[self.__left_cursor]
-                    vec = tensor(conversationVectorManager.get_vector(snap))
+                    vec = tensor(conversationVectorManager.get_vector(snap[0]))
                     sim = cosine_similarity(vec, tensor(query), dim=0)
                     if sim > best_similarity:
                         best_similarity = sim
@@ -182,15 +182,17 @@ class SnapShot:
 
                 left_snap = snap_shot_list[self.__left_cursor]
                 right_snap = snap_shot_list[self.__right_cursor]
-                
+
                 left_snap_vector_cumulative = tensor(
-                    conversationVectorManager.get_vector(left_snap)
+                    conversationVectorManager.get_vector(left_snap[0])
                 )
                 right_snap_vector_cumulative = tensor(
-                    conversationVectorManager.get_vector(right_snap)
+                    conversationVectorManager.get_vector(right_snap[0])
                 )
-                
-                left_sim = cosine_similarity(left_snap_vector_cumulative, tensor(query), dim=0)
+
+                left_sim = cosine_similarity(
+                    left_snap_vector_cumulative, tensor(query), dim=0
+                )
                 right_sim = cosine_similarity(
                     right_snap_vector_cumulative, tensor(query), dim=0
                 )
@@ -202,7 +204,7 @@ class SnapShot:
                 if right_sim > best_similarity:
                     best_similarity = right_sim
                     best_snap_shot_idx = self.__right_cursor
-                    
+
                 self.__left_cursor += 1
                 self.__right_cursor -= 1
 

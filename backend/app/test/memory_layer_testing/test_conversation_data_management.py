@@ -16,22 +16,17 @@ from memory.topic_pool.project_pool.conversation_pool.conversation_data_manageme
 class TestConversationVectorMetaDataManager(unittest.TestCase):
     def setUp(self):
         self.project_id = "test_project_123"
-        self.full_dir = Path("./test_full_conversation")
         self.summary_dir = Path("./test_summary")
         self.manager = ConversationVectorMetaDataRepository(
-            full_conversation_dir=self.full_dir,
-            summary_dir=self.summary_dir,
+            conversation_path=self.summary_dir,
             project_id=self.project_id
         )
 
     def tearDown(self):
-        if self.full_dir.exists():
-            shutil.rmtree(self.full_dir)
         if self.summary_dir.exists():
             shutil.rmtree(self.summary_dir)
 
     def test_initialization_creates_directories_and_dbs(self):
-        self.assertTrue(self.full_dir.exists())
         self.assertTrue(self.summary_dir.exists())
         self.assertTrue(self.manager.db_path.exists())
 

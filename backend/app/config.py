@@ -29,18 +29,10 @@ class Config:
     GRAPH_DEGREE = 120
     NUM_THREADS = 4
     K_NEIGHBORS = 9
-    CONVERSATION_SNAPSHOT_DB = Path(
-        os.path.join(
-            DATA_DIR,
-            "memory",
-            "topic_pool",
-            "project_pool",
-            "conversation_pool",
-            "conversation_snapshot.db",
-        )
-    )
 
-    FULL_CONVERSATION = Path(
+    PROJECT = Path("")
+
+    CONVERSATION = Path(
         os.path.join(
             DATA_DIR,
             "memory",
@@ -48,7 +40,7 @@ class Config:
             "project_pool",
             "conversation_pool",
             "conversation_vectors",
-            "FULL_CONVERSATION",
+            "Conversation",
         )
     )
     VECTOR_DIMENSIONS = 128

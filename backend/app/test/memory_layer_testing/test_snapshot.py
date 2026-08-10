@@ -31,8 +31,8 @@ class TestSnapShot(unittest.TestCase):
         self.project_name = "TestProject"
         
         # Setup mock return values for getting snapshot ids
-        self.mock_meta_repo.get_cumulative_vector_meta_data_ids = MagicMock(return_value=[1, 2, 3])
-        self.snapshot._SnapShot__get_snap_shot = MagicMock(return_value=[1, 2, 3])
+        self.mock_meta_repo.get_cumulative_vector_meta_data_ids = MagicMock(return_value=[(1,), (2,), (3,)])
+        self.snapshot._SnapShot__get_snap_shot = MagicMock(return_value=[(1,), (2,), (3,)])
         self.mock_vector_manager.get_vector = MagicMock(return_value=np.array([0.1, 0.2, 0.3]))
         
     def tearDown(self):

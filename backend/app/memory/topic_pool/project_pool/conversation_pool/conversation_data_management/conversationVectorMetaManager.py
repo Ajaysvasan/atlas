@@ -3,26 +3,20 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-from numpy import uint32
-
-
 class ConversationVectorMetaDataRepository:
     def __init__(
         self,
-        full_conversation_dir: str | Path,
-        summary_dir: str | Path,
+        conversation_path: str | Path,
         project_id: str,
     ) -> None:
         self.project_id = project_id
 
         # Ensure directories exist
-        self.full_conversation_dir = Path(full_conversation_dir)
-        self.summary_dir = Path(summary_dir)
-        self.full_conversation_dir.mkdir(parents=True, exist_ok=True)
+        self.summary_dir = Path(conversation_path)
         self.summary_dir.mkdir(parents=True, exist_ok=True)
 
         # Store all new schema tables in the summary DB
-        self.db_path = self.summary_dir / f"{project_id}_summary_metadata.db"
+        self.db_path = self.summary_dir / f"{project_id}_conversation.db"
         self._init_db()
 
     def _init_db(self):
@@ -87,12 +81,13 @@ class ConversationVectorMetaDataRepository:
         self, records: List[Tuple[int, str, str]]
     ):
         """records: [(summary_vector_id, chunk_id, project_id), ...]"""
+        new_records = [(int(r[0]), r[1], r[2]) for r in records]
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             try:
                 cursor.executemany(
                     "INSERT INTO summary_vector_meta_data (summary_vector_id, chunk_id, project_id) VALUES (?, ?, ?)",
-                    records,
+                    new_records,
                 )
                 conn.commit()
             except sqlite3.Error as e:
@@ -111,12 +106,14 @@ class ConversationVectorMetaDataRepository:
     def batch_get_summary_vector_meta_data(self, summary_vector_ids: List[int]):
         if not summary_vector_ids:
             return []
+        
+        int_ids = [int(i) for i in summary_vector_ids]
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            placeholders = ",".join(["?"] * len(summary_vector_ids))
+            placeholders = ",".join(["?"] * len(int_ids))
             cursor.execute(
                 f"SELECT summary_vector_id, chunk_id, project_id FROM summary_vector_meta_data WHERE summary_vector_id IN ({placeholders})",
-                tuple(summary_vector_ids),
+                tuple(int_ids),
             )
             return cursor.fetchall()
 
@@ -150,12 +147,13 @@ class ConversationVectorMetaDataRepository:
         self, records: List[Tuple[int, str, str, str, str]]
     ):
         """records: [(cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary), ...]"""
+        new_records = [(int(r[0]), r[1], r[2], r[3], str(r[4])) for r in records]
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             try:
                 cursor.executemany(
                     "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?)",
-                    records,
+                    new_records,
                 )
                 conn.commit()
             except sqlite3.Error as e:
@@ -166,7 +164,7 @@ class ConversationVectorMetaDataRepository:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary FROM cumulative_vector_meta_data order by created_at desc",
+                "SELECT cumulative_vector_id FROM cumulative_vector_meta_data order by created_at;",
             )
             return cursor.fetchall()
 
@@ -182,12 +180,14 @@ class ConversationVectorMetaDataRepository:
     def batch_get_cumulative_vector_meta_data(self, cumulative_vector_ids: List[int]):
         if not cumulative_vector_ids:
             return []
+        
+        int_ids = [int(i) for i in cumulative_vector_ids]
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            placeholders = ",".join(["?"] * len(cumulative_vector_ids))
+            placeholders = ",".join(["?"] * len(int_ids))
             cursor.execute(
                 f"SELECT cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary FROM cumulative_vector_meta_data WHERE cumulative_vector_id IN ({placeholders})",
-                tuple(cumulative_vector_ids),
+                tuple(int_ids),
             )
             return cursor.fetchall()
 
@@ -206,12 +206,15 @@ class ConversationVectorMetaDataRepository:
 
     def batch_insert_map_table(self, records: List[Tuple[int, int]]):
         """records: [(cumulative_vector_id, summary_vector_id), ...]"""
+        new_records = []
+        for i in range(len(records)):
+            new_records.append((int(records[i][0]), int(records[i][1])))
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             try:
                 cursor.executemany(
                     "INSERT INTO summary_snapshot_map (cumulative_vector_id, summary_vector_id) VALUES (?, ?)",
-                    records,
+                    new_records,
                 )
                 conn.commit()
             except sqlite3.Error as e:
