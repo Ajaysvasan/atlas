@@ -13,7 +13,7 @@ class FullConversation:
     ) -> None:
         self.fullConversationoRep = FullConversationRepository(
             project_id=project_id,
-            full_conversation_dir=full_conversation_dir,
+            conversation_path=full_conversation_dir,
             project_name=project_name,
         )
 

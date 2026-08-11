@@ -1,166 +1,433 @@
-import unittest
-import sys
-from unittest.mock import patch, MagicMock
-sys.modules["psycopg"] = MagicMock()
-sys.modules["dotenv"] = MagicMock()
-
+import sqlite3
+import threading
 from pathlib import Path
-import os
-import shutil
+from unittest.mock import patch
+
 import numpy as np
+import pytest
 
-from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import ConversationVectorMetaDataRepository
-from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager import ConversationVectorManager
+from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
+    ConversationVectorMetaDataRepository,
+)
+from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager import (
+    ConversationVectorManager,
+)
+
+PROJECT_ID = "unit_test_project"
+
+_MOCK_VECTOR_REPO = (
+    "memory.topic_pool.project_pool.conversation_pool"
+    ".conversation_data_management.conversationVectorManager.VectorRepository"
+)
 
 
-class TestConversationVectorMetaDataManager(unittest.TestCase):
-    def setUp(self):
-        self.project_id = "test_project_123"
-        self.summary_dir = Path("./test_summary")
-        self.manager = ConversationVectorMetaDataRepository(
-            conversation_path=self.summary_dir,
-            project_id=self.project_id
-        )
+@pytest.fixture
+def repo(tmp_path):
+    r = ConversationVectorMetaDataRepository(
+        conversation_path=tmp_path, project_id=PROJECT_ID
+    )
+    yield r
+    r.close()
 
-    def tearDown(self):
-        if self.summary_dir.exists():
-            shutil.rmtree(self.summary_dir)
 
-    def test_initialization_creates_directories_and_dbs(self):
-        self.assertTrue(self.summary_dir.exists())
-        self.assertTrue(self.manager.db_path.exists())
+@pytest.fixture
+def seeded_repo(repo):
+    repo.batch_insert_summary_chunks([
+        ("c1", "text one", "2026-08-01", "typeA"),
+        ("c2", "text two", "2026-08-02", "typeA"),
+    ])
+    repo.batch_insert_summary_vector_meta_data([
+        (101, "c1", PROJECT_ID),
+        (102, "c2", PROJECT_ID),
+    ])
+    repo.insert_cumulative_vector_meta_data(201, "summary A", "2026-08-01", PROJECT_ID, 10)
+    repo.insert_cumulative_vector_meta_data(202, "summary B", "2026-08-02", PROJECT_ID, 20)
+    return repo
 
-    def test_summary_chunks_batch_insert(self):
-        records = [
-            ("chunk_1", "text 1", "2026-08-01", "typeA"),
-            ("chunk_2", "text 2", "2026-08-01", "typeB"),
-        ]
-        self.manager.batch_insert_summary_chunks(records)
-        # Verify via manual query
-        import sqlite3
-        with sqlite3.connect(self.manager.db_path) as conn:
-            c = conn.cursor()
-            c.execute("SELECT * FROM summary_chunks")
-            self.assertEqual(len(c.fetchall()), 2)
 
-    def test_summary_vector_meta_data(self):
-        # Insert chunk first due to foreign key
-        self.manager.batch_insert_summary_chunks([("chunk_1", "text 1", "2026-08-01", "typeA")])
-        records = [
-            (101, "chunk_1", self.project_id),
-            (102, "chunk_1", self.project_id)
-        ]
-        self.manager.batch_insert_summary_vector_meta_data(records)
-        
-        single = self.manager.get_summary_vector_meta_data(101)
-        self.assertEqual(single[0], 101)
-        
-        batch = self.manager.batch_get_summary_vector_meta_data([101, 102])
-        self.assertEqual(len(batch), 2)
+def _row_count(db_path: Path, table: str) -> int:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
-    def test_cumulative_vector_meta_data(self):
-        self.manager.insert_cumulative_vector_meta_data(201, "cum summary 1", "2026-08-01", self.project_id, "13")
-        self.manager.batch_insert_cumulative_vector_meta_data([
-            (202, "cum summary 2", "2026-08-02", self.project_id, "13"),
-            (203, "cum summary 3", "2026-08-03", self.project_id, "13")
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+class TestSchema:
+    def test_all_four_tables_created(self, repo):
+        with sqlite3.connect(repo.db_path) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+        assert {"summary_chunks", "summary_vector_meta_data",
+                "cumulative_vector_meta_data", "summary_snapshot_map"} <= tables
+
+    def test_summary_vector_meta_fk_enforced(self, repo):
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.batch_insert_summary_vector_meta_data(
+                [(999, "nonexistent_chunk", PROJECT_ID)]
+            )
+
+    def test_map_fk_on_cumulative_enforced(self, repo):
+        repo.batch_insert_summary_chunks([("c1", "t", "2026-01-01", "x")])
+        repo.batch_insert_summary_vector_meta_data([(1, "c1", PROJECT_ID)])
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.insert_map_table(9999, 1)
+
+    def test_map_fk_on_summary_enforced(self, repo):
+        repo.insert_cumulative_vector_meta_data(300, "s", "2026-01-01", PROJECT_ID, 5)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.insert_map_table(300, 9999)
+
+    def test_map_unique_constraint_bug_4_16(self, repo):
+        """Regression guard: duplicate (cum_id, sum_id) pair must raise."""
+        repo.batch_insert_summary_chunks([("c1", "t", "2026-01-01", "x")])
+        repo.batch_insert_summary_vector_meta_data([(1, "c1", PROJECT_ID)])
+        repo.insert_cumulative_vector_meta_data(300, "s", "2026-01-01", PROJECT_ID, 5)
+        repo.insert_map_table(300, 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.insert_map_table(300, 1)
+
+
+# ---------------------------------------------------------------------------
+# summary_chunks
+# ---------------------------------------------------------------------------
+
+class TestSummaryChunks:
+    def test_basic_insert_and_count(self, repo):
+        repo.batch_insert_summary_chunks([
+            ("ch1", "hello", "2026-08-01", "typeA"),
+            ("ch2", "world", "2026-08-02", "typeB"),
         ])
-        
-        single = self.manager.get_cumulative_vector_meta_data(201)
-        self.assertEqual(single[0], 201)
-        
-        batch = self.manager.batch_get_cumulative_vector_meta_data([201, 202])
-        self.assertEqual(len(batch), 2)
+        assert _row_count(repo.db_path, "summary_chunks") == 2
 
-    def test_map_table(self):
-        # Insert parent records to satisfy foreign keys
-        self.manager.batch_insert_summary_chunks([("chunk_1", "text 1", "2026-08-01", "typeA")])
-        self.manager.batch_insert_summary_vector_meta_data([(101, "chunk_1", self.project_id), (102, "chunk_1", self.project_id)])
-        self.manager.insert_cumulative_vector_meta_data(201, "cum summary 1", "2026-08-01", self.project_id, "13")
-        self.manager.insert_cumulative_vector_meta_data(202, "cum summary 2", "2026-08-01", self.project_id, "13")
-        
-        # Test map table logic
-        self.manager.insert_map_table(201, 101)
-        self.manager.batch_insert_map_table([
-            (201, 102),
-            (202, 101)
+    def test_empty_batch_is_noop(self, repo):
+        repo.batch_insert_summary_chunks([])
+        assert _row_count(repo.db_path, "summary_chunks") == 0
+
+    def test_duplicate_chunk_id_raises(self, repo):
+        repo.batch_insert_summary_chunks([("dup", "text", "2026-01-01", "t")])
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.batch_insert_summary_chunks([("dup", "text2", "2026-01-02", "t")])
+
+    def test_unicode_text_roundtrip(self, repo):
+        text = "rocket: \U0001f680, earth: \U0001f30d"
+        repo.batch_insert_summary_chunks([("u1", text, "2026-08-01", "t")])
+        with sqlite3.connect(repo.db_path) as conn:
+            row = conn.execute(
+                "SELECT chunk FROM summary_chunks WHERE chunk_id='u1'"
+            ).fetchone()
+        assert row[0] == text
+
+    def test_long_text_insert(self, repo):
+        long_text = "x" * 100_000
+        repo.batch_insert_summary_chunks([("long1", long_text, "2026-08-01", "t")])
+        with sqlite3.connect(repo.db_path) as conn:
+            row = conn.execute(
+                "SELECT chunk FROM summary_chunks WHERE chunk_id='long1'"
+            ).fetchone()
+        assert len(row[0]) == 100_000
+
+    def test_thousand_record_batch(self, repo):
+        records = [(f"b{i}", f"text {i}", "2026-08-01", "typeA") for i in range(1000)]
+        repo.batch_insert_summary_chunks(records)
+        assert _row_count(repo.db_path, "summary_chunks") == 1000
+
+
+# ---------------------------------------------------------------------------
+# cumulative_vector_meta_data
+# ---------------------------------------------------------------------------
+
+class TestCumulativeVectorMetaData:
+    def test_single_insert_and_get(self, repo):
+        repo.insert_cumulative_vector_meta_data(1, "summary", "2026-08-01", PROJECT_ID, 42)
+        row = repo.get_cumulative_vector_meta_data(1)
+        assert row is not None
+        assert row[0] == 1
+
+    def test_batch_insert_and_batch_get(self, repo):
+        records = [
+            (1, "s1", "2026-08-01", PROJECT_ID, 10),
+            (2, "s2", "2026-08-02", PROJECT_ID, 20),
+            (3, "s3", "2026-08-03", PROJECT_ID, 30),
+        ]
+        repo.batch_insert_cumulative_vector_meta_data(records)
+        result = repo.batch_get_cumulative_vector_meta_data([1, 2, 3])
+        assert len(result) == 3
+
+    def test_get_nonexistent_returns_none(self, repo):
+        assert repo.get_cumulative_vector_meta_data(9999) is None
+
+    def test_numpy_uint32_coercion(self, repo):
+        vid = np.uint32(501)
+        repo.insert_cumulative_vector_meta_data(vid, "numpy summary", "2026-08-07", PROJECT_ID, 42)
+        row = repo.get_cumulative_vector_meta_data(vid)
+        assert row is not None
+        assert row[0] == 501
+
+    def test_chronological_order_bug_4_17(self, repo):
+        """Regression: IDs must come back sorted by datetime(created_at), not TEXT sort."""
+        repo.insert_cumulative_vector_meta_data(3, "s3", "2026-08-03", PROJECT_ID, 3)
+        repo.insert_cumulative_vector_meta_data(1, "s1", "2026-08-01", PROJECT_ID, 1)
+        repo.insert_cumulative_vector_meta_data(2, "s2", "2026-08-02", PROJECT_ID, 2)
+        ids = [row[0] for row in repo.get_cumulative_vector_meta_data_ids()]
+        assert ids == [1, 2, 3]
+
+    def test_empty_batch_get_returns_empty(self, repo):
+        assert repo.batch_get_cumulative_vector_meta_data([]) == []
+
+    def test_five_hundred_sequential_inserts(self, repo):
+        records = [(i, f"s{i}", "2026-08-01", PROJECT_ID, i) for i in range(1, 501)]
+        repo.batch_insert_cumulative_vector_meta_data(records)
+        ids = repo.get_cumulative_vector_meta_data_ids()
+        assert len(ids) == 500
+
+
+# ---------------------------------------------------------------------------
+# summary_vector_meta_data
+# ---------------------------------------------------------------------------
+
+class TestSummaryVectorMetaData:
+    def test_fk_violation_raises(self, repo):
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.batch_insert_summary_vector_meta_data(
+                [(1, "no_such_chunk", PROJECT_ID)]
+            )
+
+    def test_insert_and_retrieve(self, repo):
+        repo.batch_insert_summary_chunks([("c1", "text", "2026-08-01", "t")])
+        repo.batch_insert_summary_vector_meta_data([(10, "c1", PROJECT_ID)])
+        row = repo.get_summary_vector_meta_data(10)
+        assert row is not None
+        assert row[0] == 10
+        assert row[1] == "c1"
+
+    def test_batch_get(self, repo):
+        repo.batch_insert_summary_chunks([
+            ("c1", "t1", "2026-08-01", "t"),
+            ("c2", "t2", "2026-08-02", "t"),
         ])
-        
-        ids_201 = self.manager.get_summary_vector_ids_from_map(201)
-        self.assertEqual(set(ids_201), {101, 102})
-        
-        ids_202 = self.manager.get_summary_vector_ids_from_map(202)
-        self.assertEqual(ids_202, [101])
-
-    def test_bug_2_1_numpy_uint32_type_coercion(self):
-        """
-        Bug 2.1 regression: Verifies that numpy.uint32 scalar values are properly
-        coerced to native Python int before being bound to SQLite INTEGER columns.
-        Previously, passing numpy.uint32 directly caused sqlite3.IntegrityError: datatype mismatch.
-        """
-        cum_id = np.uint32(501)
-        summary_vec_id = np.uint32(601)
-
-        # Insert cumulative with numpy.uint32 cumulative_vector_id and integer len
-        self.manager.insert_cumulative_vector_meta_data(
-            cum_id, "numpy uint32 summary", "2026-08-07", self.project_id, 42
+        repo.batch_insert_summary_vector_meta_data(
+            [(1, "c1", PROJECT_ID), (2, "c2", PROJECT_ID)]
         )
+        result = repo.batch_get_summary_vector_meta_data([1, 2])
+        assert len(result) == 2
 
-        # Read it back to verify
-        result = self.manager.get_cumulative_vector_meta_data(cum_id)
-        self.assertIsNotNone(result)
-        self.assertEqual(result[0], 501)
+    def test_empty_batch_get_returns_empty(self, repo):
+        assert repo.batch_get_summary_vector_meta_data([]) == []
 
-        # Insert chunks + summary vector with numpy.uint32 summary_vector_id
-        self.manager.batch_insert_summary_chunks([("np_chunk", "text", "2026-08-07", "typeX")])
-        self.manager.batch_insert_summary_vector_meta_data([(int(summary_vec_id), "np_chunk", self.project_id)])
+    def test_get_nonexistent_returns_none(self, repo):
+        assert repo.get_summary_vector_meta_data(9999) is None
 
-        # Read back summary vector meta data with numpy.uint32
-        sv_result = self.manager.get_summary_vector_meta_data(summary_vec_id)
-        self.assertIsNotNone(sv_result)
-        self.assertEqual(sv_result[0], 601)
-
-        # Insert map entry with numpy.uint32 on both sides
-        self.manager.insert_map_table(cum_id, summary_vec_id)
-        map_ids = self.manager.get_summary_vector_ids_from_map(cum_id)
-        self.assertIn(601, map_ids)
+    def test_numpy_uint32_summary_vector_id(self, repo):
+        repo.batch_insert_summary_chunks([("np_c", "text", "2026-08-01", "t")])
+        repo.batch_insert_summary_vector_meta_data([(np.uint32(600), "np_c", PROJECT_ID)])
+        row = repo.get_summary_vector_meta_data(np.uint32(600))
+        assert row is not None
+        assert row[0] == 600
 
 
+# ---------------------------------------------------------------------------
+# summary_snapshot_map
+# ---------------------------------------------------------------------------
 
-class TestConversationVectorManager(unittest.TestCase):
-    @patch('memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager.VectorRepository')
-    def setUp(self, MockVectorRepository):
-        self.mock_repo = MockVectorRepository.return_value
-        self.manager = ConversationVectorManager(project_name="TestProject", project_id="proj123")
+class TestMapTable:
+    def test_batch_insert_exactly_n_rows_bug_4_26(self, repo):
+        """Regression: batch_insert_map_table(N records) must produce exactly N rows."""
+        repo.batch_insert_summary_chunks([
+            ("c1", "t", "2026-01-01", "x"), ("c2", "t", "2026-01-01", "x")
+        ])
+        repo.batch_insert_summary_vector_meta_data(
+            [(1, "c1", PROJECT_ID), (2, "c2", PROJECT_ID)]
+        )
+        repo.insert_cumulative_vector_meta_data(10, "s", "2026-01-01", PROJECT_ID, 1)
+        repo.insert_cumulative_vector_meta_data(20, "s", "2026-01-01", PROJECT_ID, 1)
 
-    def test_insert_vector(self):
+        records = [(10, 1), (10, 2), (20, 1), (20, 2)]
+        repo.batch_insert_map_table(records)
+
+        assert _row_count(repo.db_path, "summary_snapshot_map") == len(records)
+
+    def test_unique_constraint_on_duplicate_pair_bug_4_16(self, repo):
+        """Regression: inserting the same (cum_id, sum_id) pair twice must fail."""
+        repo.batch_insert_summary_chunks([("c1", "t", "2026-01-01", "x")])
+        repo.batch_insert_summary_vector_meta_data([(1, "c1", PROJECT_ID)])
+        repo.insert_cumulative_vector_meta_data(10, "s", "2026-01-01", PROJECT_ID, 1)
+        repo.insert_map_table(10, 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.insert_map_table(10, 1)
+
+    def test_get_summary_vector_ids_from_map(self, seeded_repo):
+        seeded_repo.insert_map_table(201, 101)
+        seeded_repo.insert_map_table(201, 102)
+        ids = seeded_repo.get_summary_vector_ids_from_map(201)
+        assert set(ids) == {101, 102}
+
+    def test_get_ids_returns_empty_for_unknown_cumulative(self, repo):
+        repo.insert_cumulative_vector_meta_data(10, "s", "2026-01-01", PROJECT_ID, 1)
+        assert repo.get_summary_vector_ids_from_map(10) == []
+
+    def test_numpy_uint32_in_map_insert(self, seeded_repo):
+        seeded_repo.insert_map_table(np.uint32(201), np.uint32(101))
+        ids = seeded_repo.get_summary_vector_ids_from_map(np.uint32(201))
+        assert 101 in ids
+
+    def test_batch_map_insert_with_numpy_ids(self, seeded_repo):
+        records = [(np.uint32(201), np.uint32(101)), (np.uint32(202), np.uint32(102))]
+        seeded_repo.batch_insert_map_table(records)
+        assert 101 in seeded_repo.get_summary_vector_ids_from_map(201)
+        assert 102 in seeded_repo.get_summary_vector_ids_from_map(202)
+
+    def test_mapping_correctness_separate_cumulatives(self, seeded_repo):
+        seeded_repo.insert_map_table(201, 101)
+        seeded_repo.insert_map_table(202, 102)
+        assert seeded_repo.get_summary_vector_ids_from_map(201) == [101]
+        assert seeded_repo.get_summary_vector_ids_from_map(202) == [102]
+
+
+# ---------------------------------------------------------------------------
+# Stress
+# ---------------------------------------------------------------------------
+
+class TestStress:
+    def test_five_hundred_snapshot_pipeline(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        chunk_recs = [(f"c{i}", f"text {i}", "2026-08-01", "typeA") for i in range(500)]
+        repo.batch_insert_summary_chunks(chunk_recs)
+        sv_recs = [(i, f"c{i}", PROJECT_ID) for i in range(500)]
+        repo.batch_insert_summary_vector_meta_data(sv_recs)
+        cum_recs = [(i + 1000, f"sum {i}", "2026-08-01", PROJECT_ID, i) for i in range(500)]
+        repo.batch_insert_cumulative_vector_meta_data(cum_recs)
+        assert len(repo.get_cumulative_vector_meta_data_ids()) == 500
+        repo.close()
+
+    def test_two_hundred_map_records_exact_count(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo.batch_insert_summary_chunks(
+            [(f"c{i}", "t", "2026-08-01", "t") for i in range(100)]
+        )
+        repo.batch_insert_summary_vector_meta_data(
+            [(i, f"c{i}", PROJECT_ID) for i in range(100)]
+        )
+        repo.batch_insert_cumulative_vector_meta_data(
+            [(i + 1000, "s", "2026-08-01", PROJECT_ID, 1) for i in range(100)]
+        )
+        repo.batch_insert_map_table([(i + 1000, i) for i in range(100)])
+        assert _row_count(repo.db_path, "summary_snapshot_map") == 100
+        repo.close()
+
+    def test_twenty_concurrent_read_threads(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo.batch_insert_cumulative_vector_meta_data(
+            [(i, f"s{i}", "2026-08-01", PROJECT_ID, i) for i in range(100)]
+        )
+        db_path = repo.db_path
+        repo.close()
+
+        errors: list = []
+
+        def reader():
+            try:
+                with sqlite3.connect(db_path) as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM cumulative_vector_meta_data"
+                    ).fetchone()[0]
+                assert count == 100
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == [], f"Thread errors: {errors}"
+
+    def test_full_pipeline_one_hundred_snapshots(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        for i in range(100):
+            cid = f"c{i}"
+            repo.batch_insert_summary_chunks([(cid, f"text {i}", "2026-08-01", "t")])
+            repo.batch_insert_summary_vector_meta_data([(i, cid, PROJECT_ID)])
+            repo.insert_cumulative_vector_meta_data(
+                i + 1000, f"sum {i}", "2026-08-01", PROJECT_ID, i
+            )
+            repo.insert_map_table(i + 1000, i)
+        with sqlite3.connect(repo.db_path) as conn:
+            counts = {
+                tbl: conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                for tbl in [
+                    "summary_chunks",
+                    "summary_vector_meta_data",
+                    "cumulative_vector_meta_data",
+                    "summary_snapshot_map",
+                ]
+            }
+        assert all(v == 100 for v in counts.values()), counts
+        repo.close()
+
+
+# ---------------------------------------------------------------------------
+# ConversationVectorManager (mocked VectorRepository)
+# ---------------------------------------------------------------------------
+
+class TestConversationVectorManager:
+    @pytest.fixture
+    def setup(self):
+        with patch(_MOCK_VECTOR_REPO) as MockVR:
+            mock_instance = MockVR.return_value
+            mgr = ConversationVectorManager(project_name="TestProject", project_id="proj123")
+            yield mgr, mock_instance
+
+    def test_insert_returns_vector_id(self, setup):
+        manager, _ = setup
         vid = np.uint32(101)
-        vector = np.array([0.1, 0.2, 0.3])
-        
-        result_vid = self.manager.insert(vid, vector)
-        self.assertEqual(result_vid, vid)
-        self.manager.repository.insert.assert_called_once_with(vid, vector)
+        vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        result = manager.insert(vid, vec)
+        assert result == vid
+        manager.repository.insert.assert_called_once_with(vid, vec)
 
-    def test_batch_insert(self):
-        vids = [np.uint32(101), np.uint32(102)]
-        vectors = np.array([[0.1], [0.2]])
-        
-        result_vids = self.manager.batch_insert(vids, vectors)
-        self.assertEqual(len(result_vids), 2)
-        self.manager.repository.batch_insert.assert_called_once_with(vids, vectors)
+    def test_batch_insert_returns_ids(self, setup):
+        manager, _ = setup
+        vids = [np.uint32(1), np.uint32(2)]
+        vecs = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
+        result = manager.batch_insert(vids, vecs)
+        assert len(result) == 2
+        manager.repository.batch_insert.assert_called_once_with(vids, vecs)
 
-    def test_get_vector(self):
-        self.mock_repo.search.return_value = np.array([1.0, 2.0])
-        result = self.manager.get_vector(np.uint32(100))
-        
-        self.manager.repository.search.assert_called_once_with(np.uint32(100))
-        self.assertTrue(np.array_equal(result, np.array([1.0, 2.0])))
+    def test_get_vector_calls_search(self, setup):
+        manager, mock_repo = setup
+        mock_repo.search.return_value = np.array([1.0, 2.0])
+        result = manager.get_vector(np.uint32(100))
+        manager.repository.search.assert_called_once_with(np.uint32(100))
+        assert np.array_equal(result, np.array([1.0, 2.0]))
 
-    def test_get_vectors(self):
-        self.mock_repo.batch_search.return_value = np.array([[1.0], [2.0]])
-        result = self.manager.get_vectors([np.uint32(100), np.uint32(200)])
-        
-        self.manager.repository.batch_search.assert_called_once_with([np.uint32(100), np.uint32(200)])
-        self.assertTrue(np.array_equal(result, np.array([[1.0], [2.0]])))
+    def test_get_vectors_calls_batch_search(self, setup):
+        manager, mock_repo = setup
+        mock_repo.batch_search.return_value = np.array([[1.0], [2.0]])
+        vids = [np.uint32(1), np.uint32(2)]
+        result = manager.get_vectors(vids)
+        manager.repository.batch_search.assert_called_once_with(vids)
+        assert np.array_equal(result, np.array([[1.0], [2.0]]))
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_uint32_zero_boundary(self, setup):
+        manager, _ = setup
+        manager.insert(np.uint32(0), np.zeros(128, dtype=np.float32))
+        manager.repository.insert.assert_called_once()
+
+    def test_uint32_max_boundary(self, setup):
+        manager, _ = setup
+        manager.insert(np.uint32(4294967295), np.ones(128, dtype=np.float32))
+        manager.repository.insert.assert_called_once()
+
+    def test_batch_insert_empty(self, setup):
+        manager, _ = setup
+        manager.batch_insert([], np.array([]))
+        manager.repository.batch_insert.assert_called_once()
+
+    def test_get_vectors_empty_list(self, setup):
+        manager, mock_repo = setup
+        mock_repo.batch_search.return_value = np.array([])
+        manager.get_vectors([])
+        manager.repository.batch_search.assert_called_once_with([])

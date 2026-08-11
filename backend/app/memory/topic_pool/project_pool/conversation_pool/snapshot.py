@@ -10,7 +10,7 @@ A python dict would do I belive
 
 """
 
-from typing import List
+from typing import List, Tuple
 
 from memory_pool_exceptions import (
     InvalidCursorException,
@@ -53,7 +53,8 @@ class SnapShot:
         len_of_the_summary: int,
         summary_vector_ids: List,
         summary_vectors: ndarray,
-        chunk_ids: str,
+        chunk_ids: List[str],
+        chunks: List[Tuple[str, str, str, str]],
         summary: str,
         cumulative_summary_vector_id: uint32,
         cumulative_summary_vector: ndarray,
@@ -68,13 +69,14 @@ class SnapShot:
         conversationVectorManager.insert(
             cumulative_summary_vector_id, cumulative_summary_vector
         )
+        conversationVectorMetaDataRepository.batch_insert_summary_chunks(chunks)
         summary_vector_tuple_list = []
         for i in range(len(chunk_ids)):
             summary_vector_tuple_list.append(
                 (summary_vector_ids[i], chunk_ids[i], project_id)
             )
         conversationVectorMetaDataRepository.insert_cumulative_vector_meta_data(
-            cumulative_summary_vector_id,
+            int(cumulative_summary_vector_id),
             summary,
             time_of_snapshot,
             project_id,
@@ -98,7 +100,8 @@ class SnapShot:
         len_of_the_summary: int,
         summary_vector_ids: List,
         summary_vectors: ndarray,
-        chunk_ids: str,
+        chunk_ids: List[str],
+        chunks: List[Tuple[str, str, str, str]],
         summary: str,
         cumulative_summary_vector_id: uint32,
         cumulative_summary_vector: ndarray,
@@ -114,13 +117,16 @@ class SnapShot:
             summary_vector_ids,
             summary_vectors,
             chunk_ids,
+            chunks,
             summary,
             cumulative_summary_vector_id,
             cumulative_summary_vector,
         )
-
         if self.__left_cursor == -1 and self.__right_cursor == -1:
-            self.__left_cursor = self.__right_cursor = 0
+            self.__left_cursor = 0
+            self.__right_cursor = 0
+        else:
+            self.__right_cursor += 1
 
         if reset_right_pointer:
             self.__reset_right_pointer(project_id)
@@ -131,14 +137,17 @@ class SnapShot:
     def advance(self, project_id: str) -> None:
         """Makes left cursor move"""
         snap_shot_list = self.__get_snap_shot(project_id)
-        if self.__left_cursor + 1 < len(snap_shot_list):
+        if (
+            self.__left_cursor + 1 < len(snap_shot_list)
+            and self.__left_cursor < self.__right_cursor
+        ):
             self.__left_cursor += 1
             return
         raise InvalidCursorException("left", self.__left_cursor + 1)
 
     def prev(self) -> None:
         """Makes the right curosr move"""
-        if self.__right_cursor - 1 >= 0:
+        if self.__right_cursor - 1 >= 0 and self.__right_cursor > self.__left_cursor:
             self.__right_cursor -= 1
             return
 
@@ -161,7 +170,7 @@ class SnapShot:
 
     def __find_best_snapshot(
         self, query: ndarray, project_id: str, project_name: str
-    ) -> int:
+    ) -> int | None:
         snap_shot_list = self.__get_snap_shot(project_id)
         if len(snap_shot_list) == 0:
             raise NullPointerException("No snap shots found")
@@ -169,52 +178,55 @@ class SnapShot:
         best_snap_shot_idx = -1
         best_similarity = float("-inf")
         conversationVectorManager = ConversationVectorManager(project_name, project_id)
-        try:
-            while self.__left_cursor <= self.__right_cursor:
-                if self.__left_cursor == self.__right_cursor:
-                    snap = snap_shot_list[self.__left_cursor]
-                    vec = tensor(conversationVectorManager.get_vector(snap[0]))
-                    sim = cosine_similarity(vec, tensor(query), dim=0)
-                    if sim > best_similarity:
-                        best_similarity = sim
-                        best_snap_shot_idx = self.__left_cursor
-                    break
+        left = self.__left_cursor
+        right = self.__right_cursor
+        while left <= right:
+            if left == right:
+                snap = snap_shot_list[left]
+                vec = tensor(conversationVectorManager.get_vector(snap[0]))
+                sim = cosine_similarity(vec, tensor(query), dim=0)
+                if sim > best_similarity:
+                    best_similarity = sim
+                    best_snap_shot_idx = left
+                break
 
-                left_snap = snap_shot_list[self.__left_cursor]
-                right_snap = snap_shot_list[self.__right_cursor]
+            left_snap = snap_shot_list[left]
+            right_snap = snap_shot_list[right]
 
-                left_snap_vector_cumulative = tensor(
-                    conversationVectorManager.get_vector(left_snap[0])
-                )
-                right_snap_vector_cumulative = tensor(
-                    conversationVectorManager.get_vector(right_snap[0])
-                )
+            left_snap_vector_cumulative = tensor(
+                conversationVectorManager.get_vector(left_snap[0])
+            )
+            right_snap_vector_cumulative = tensor(
+                conversationVectorManager.get_vector(right_snap[0])
+            )
 
-                left_sim = cosine_similarity(
-                    left_snap_vector_cumulative, tensor(query), dim=0
-                )
-                right_sim = cosine_similarity(
-                    right_snap_vector_cumulative, tensor(query), dim=0
-                )
+            left_sim = cosine_similarity(
+                left_snap_vector_cumulative, tensor(query), dim=0
+            )
+            right_sim = cosine_similarity(
+                right_snap_vector_cumulative, tensor(query), dim=0
+            )
 
-                if left_sim > best_similarity:
-                    best_similarity = left_sim
-                    best_snap_shot_idx = self.__left_cursor
+            if left_sim > best_similarity:
+                best_similarity = left_sim
+                best_snap_shot_idx = left
 
-                if right_sim > best_similarity:
-                    best_similarity = right_sim
-                    best_snap_shot_idx = self.__right_cursor
+            if right_sim > best_similarity:
+                best_similarity = right_sim
+                best_snap_shot_idx = right
 
-                self.__left_cursor += 1
-                self.__right_cursor -= 1
+            left += 1
+            right -= 1
 
-        finally:
-            self.__reset_right_pointer(project_id)
-            self.__reset_left_pointer(project_id)
-        return best_snap_shot_idx
+        return best_snap_shot_idx if best_snap_shot_idx > -1 else None
 
     def search(self, query: ndarray, project_id: str, project_name: str):
         snap_shot_list = self.__get_snap_shot(project_id)
-        return snap_shot_list[
-            self.__find_best_snapshot(query, project_id, project_name)
-        ]
+        best_snap_shot_idx: int | None = self.__find_best_snapshot(
+            query, project_id, project_name
+        )
+        return (
+            snap_shot_list[best_snap_shot_idx]
+            if best_snap_shot_idx is not None
+            else None
+        )

@@ -5,13 +5,13 @@ from typing import List, Tuple
 
 class FullConversationRepository:
     def __init__(
-        self, full_conversation_dir: str | Path, project_id: str, project_name: str
+        self, conversation_path: str | Path, project_id: str, project_name: str
     ):
         self.project_id = project_id
         self.project_name = project_name
-        self.full_conversation_dir = Path(full_conversation_dir)
-        self.full_conversation_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.full_conversation_dir / f"{project_id}_conversation.db"
+        self.conversation_dir = Path(conversation_path)
+        self.conversation_dir.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.conversation_dir / f"{project_id}_conversation.db"
         self.__init_db()
 
     def __init_db(self):
@@ -19,12 +19,20 @@ class FullConversationRepository:
             conn.execute("PRAGMA foreign_keys = ON;")
             cursor = conn.cursor()
             cursor.execute("""
+            create table if not exists summary_chunks (
+                chunk_id text primary key,
+                chunk text not null,
+                created_at date not null,
+                chunker_type text not null
+            )
+            """)
+            cursor.execute("""
             create table if not exists full_conversation(
-                project_id text not null, 
-                sequence_number int not null, 
+                project_id text not null,
+                sequence_number int primary key,
                 chunk_id text not null,
                 role text not null ,
-                created_at date not null , 
+                created_at date not null ,
                 foreign key (chunk_id) references summary_chunks (chunk_id)
             )
             """)
@@ -58,14 +66,15 @@ class FullConversationRepository:
                 conn.rollback()
                 raise e
 
-    def __get_sequence_number(self, chunk_id: str) -> int:
+    def __get_sequence_number(self, chunk_id: str) -> int | None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"""SELECT sequence_number from full_conversation where chunk_id = ?;""",
                 (chunk_id,),
             )
-            return cursor.fetchone()[0]
+            row = cursor.fetchone()
+            return row[0] if row is not None else None
 
     def __get_last_n_chunks(self, n: int):
         with sqlite3.connect(self.db_path) as conn:
@@ -76,7 +85,7 @@ class FullConversationRepository:
                 FROM summary_chunks as s
                 JOIN full_conversation AS f
                 ON f.chunk_id = s.chunk_id
-                ORDER BY f.created_at DESC
+                ORDER BY f.created_at
                 limit ?
             """,
                 (n,),
@@ -93,7 +102,7 @@ class FullConversationRepository:
                 join full_conversation as f
                 on s.chunk_id = f.chunk_id
                 where f.sequence_number >= ? and f.sequence_number <= ?
-                order by f.created_at DESC
+                order by f.created_at
             """,
                 (start, end),
             )
@@ -110,6 +119,7 @@ class FullConversationRepository:
             join full_conversation as f
             on f.chunk_id = s.chunk_id
             where f.sequence_number > ?
+            order by f.created_at;
             """,
                 (sequence_number,),
             )
@@ -120,10 +130,11 @@ class FullConversationRepository:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
-            select chunk 
+            select chunk
             from summary_chunks as s
             join full_conversation as f
             on f.chunk_id = s.chunk_id
+            order by f.sequence_number
             """)
             return cursor.fetchall()
 

@@ -1,9 +1,7 @@
-import os
-import shutil
 import sqlite3
-import unittest
 from pathlib import Path
-from typing import List, Tuple
+
+import pytest
 
 from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
@@ -12,184 +10,337 @@ from memory.topic_pool.project_pool.conversation_pool.full_conversation_bucket i
     FullConversation,
 )
 
+PROJECT_ID = "proj_123"
+PROJECT_NAME = "test_project"
 
-class TestFullConversationRepository(unittest.TestCase):
-    def setUp(self):
-        self.project_id = "proj_123"
-        self.project_name = "test_project"
-        self.test_dir = Path("test_full_conversation_dir")
-        
-        # Ensure clean state
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
-            
-        self.repo = FullConversationRepository(
-            full_conversation_dir=self.test_dir,
-            project_id=self.project_id,
-            project_name=self.project_name,
-        )
 
-    def tearDown(self):
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    def test_init_db_creates_file_and_schema(self):
-        """Test if the database file is created with the expected schema."""
-        db_path = self.test_dir / f"{self.project_id}_conversation.db"
-        self.assertTrue(db_path.exists())
-        
+def _make_meta(project_id, seq, chunk_id, role="user", created_at="2026-08-10"):
+    return (project_id, seq, chunk_id, role, created_at)
+
+
+def _make_chunk(chunk_id, text, created_at="2026-08-10", chunker_type="text"):
+    return (chunk_id, text, created_at, chunker_type)
+
+
+# ---------------------------------------------------------------------------
+# FullConversationRepository
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def repo(tmp_path):
+    return FullConversationRepository(
+        conversation_path=tmp_path,
+        project_id=PROJECT_ID,
+        project_name=PROJECT_NAME,
+    )
+
+
+class TestSchema:
+    def test_db_file_created(self, repo, tmp_path):
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        assert db_path.exists()
+
+    def test_both_tables_exist(self, repo, tmp_path):
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
         with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            # Check if tables exist
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = [row[0] for row in cursor.fetchall()]
-            self.assertIn("full_conversation", tables)
-            # summary_chunks is created implicitly or by other means in this repo
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+        assert "summary_chunks" in tables
+        assert "full_conversation" in tables
 
-    def test_add_and_fetch_all(self):
-        """Test adding chunks and fetching the full conversation."""
-        meta_datas = [
-            (self.project_id, 1, "chunk_1", "user", "2026-08-10"),
-            (self.project_id, 2, "chunk_2", "system", "2026-08-10"),
+    def test_summary_chunks_created_before_full_conversation(self, repo, tmp_path):
+        """Regression guard for Bug 4.5: summary_chunks must exist for FK to work."""
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='summary_chunks'"
+            ).fetchone()
+        assert row is not None
+
+
+class TestAddAndFetch:
+    def test_add_two_chunks_and_fetch_all(self, repo):
+        meta = [
+            _make_meta(PROJECT_ID, 1, "c1"),
+            _make_meta(PROJECT_ID, 2, "c2"),
         ]
         chunks = [
-            ("chunk_1", "Hello", "2026-08-10", "type_a"),
-            ("chunk_2", "Hi there", "2026-08-10", "type_a"),
+            _make_chunk("c1", "Hello"),
+            _make_chunk("c2", "World"),
         ]
-        
-        # We test based on the assumption that the code is production ready
-        try:
-            self.repo.add(meta_datas, chunks)
-            result = self.repo.fetch_all()
-            self.assertEqual(len(result), 2)
-            self.assertEqual(result[0][0], "Hello")
-            self.assertEqual(result[1][0], "Hi there")
-        except sqlite3.Error:
-            # Ignoring bugs since we assume production readiness
-            pass
+        repo.add(meta, chunks)
+        result = repo.fetch_all()
+        assert len(result) == 2
+        texts = [r[0] for r in result]
+        assert texts[0] == "Hello"
+        assert texts[1] == "World"
 
-    def test_get_sequence_number(self):
-        """Test fetching the sequence number for a given chunk_id."""
-        meta_datas = [(self.project_id, 42, "chunk_42", "user", "2026-08-10")]
-        chunks = [("chunk_42", "What is the meaning of life?", "2026-08-10", "type_a")]
-        
-        try:
-            self.repo.add(meta_datas, chunks)
-            seq_num = self.repo.get_sequence_number("chunk_42")
-            self.assertEqual(seq_num[0], 42)
-        except sqlite3.Error:
-            pass
-
-    def test_get_n_chunks(self):
-        """Test fetching the last N chunks from the repository."""
-        meta_datas = [
-            (self.project_id, 1, "chunk_1", "user", "2026-08-10 10:00:00"),
-            (self.project_id, 2, "chunk_2", "system", "2026-08-10 10:01:00"),
-            (self.project_id, 3, "chunk_3", "user", "2026-08-10 10:02:00"),
+    def test_fetch_all_ordered_by_sequence_number(self, repo):
+        """Regression guard for Bug 4.15: fetch_all must respect sequence order."""
+        meta = [
+            _make_meta(PROJECT_ID, 3, "c3"),
+            _make_meta(PROJECT_ID, 1, "c1"),
+            _make_meta(PROJECT_ID, 2, "c2"),
         ]
         chunks = [
-            ("chunk_1", "Msg 1", "2026-08-10 10:00:00", "text"),
-            ("chunk_2", "Msg 2", "2026-08-10 10:01:00", "text"),
-            ("chunk_3", "Msg 3", "2026-08-10 10:02:00", "text"),
+            _make_chunk("c3", "Third"),
+            _make_chunk("c1", "First"),
+            _make_chunk("c2", "Second"),
         ]
-        try:
-            self.repo.add(meta_datas, chunks)
-            last_2 = self.repo.get_n_chunks(2)
-            self.assertEqual(len(last_2), 2)
-        except sqlite3.Error:
-            pass
+        repo.add(meta, chunks)
+        result = repo.fetch_all()
+        assert [r[0] for r in result] == ["First", "Second", "Third"]
 
-    def test_get_ranged_chunks(self):
-        """Test fetching chunks within a specific sequence range."""
-        try:
-            # Add dummy data
-            self.repo.add(
-                [(self.project_id, i, f"chunk_{i}", "role", "date") for i in range(1, 6)],
-                [(f"chunk_{i}", f"Text {i}", "date", "text") for i in range(1, 6)]
+    def test_add_empty_lists_is_noop(self, repo):
+        repo.add([], [])
+        assert repo.fetch_all() == []
+
+    def test_add_unicode_chunk(self, repo):
+        text = "unicode: éàü\U0001f680"
+        repo.add(
+            [_make_meta(PROJECT_ID, 1, "u1")],
+            [_make_chunk("u1", text)],
+        )
+        result = repo.fetch_all()
+        assert result[0][0] == text
+
+    def test_add_raises_on_duplicate_sequence_number(self, repo):
+        repo.add(
+            [_make_meta(PROJECT_ID, 1, "c1")],
+            [_make_chunk("c1", "First")],
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add(
+                [_make_meta(PROJECT_ID, 1, "c2")],
+                [_make_chunk("c2", "Duplicate seq")],
             )
-            ranged = self.repo.get_ranged_chunks(2, 4)
-            self.assertEqual(len(ranged), 3)
-        except sqlite3.Error:
-            pass
-
-    def test_get_sequence_after(self):
-        """Test fetching messages after a certain sequence number."""
-        try:
-            self.repo.add(
-                [(self.project_id, i, f"chunk_{i}", "role", "date") for i in range(1, 6)],
-                [(f"chunk_{i}", f"Text {i}", "date", "text") for i in range(1, 6)]
-            )
-            after_2 = self.repo.get_sequence_after(2)
-            self.assertEqual(len(after_2), 3)
-        except sqlite3.Error:
-            pass
-
-    def test_get_size(self):
-        """Test getting the total count of chunks."""
-        try:
-            self.repo.add(
-                [(self.project_id, 1, "chunk_1", "user", "date")],
-                [("chunk_1", "Hello", "date", "type")]
-            )
-            size = self.repo.get_size()
-            self.assertEqual(size[0], 1)
-        except sqlite3.Error:
-            pass
 
 
-class TestFullConversationBucket(unittest.TestCase):
-    def setUp(self):
-        self.project_id = "proj_bucket"
-        self.project_name = "test_bucket"
-        self.test_dir = Path("test_bucket_dir")
-        
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
-            
-        # Initialize the bucket
-        try:
-            self.bucket = FullConversation(
-                full_conversation_dir=self.test_dir,
-                project_id=self.project_id,
-                project_name=self.project_name,
-            )
-        except ModuleNotFoundError:
-            self.skipTest("Broken import in full_conversation_bucket.py skipped for testing purposes")
+class TestGetSequenceNumber:
+    def test_returns_correct_int(self, repo):
+        """Regression guard for Bug 4.11: get_sequence_number must return int, not tuple."""
+        repo.add(
+            [_make_meta(PROJECT_ID, 42, "c42")],
+            [_make_chunk("c42", "Life")],
+        )
+        seq = repo.get_sequence_number("c42")
+        assert seq == 42
+        assert isinstance(seq, int)
 
-    def tearDown(self):
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+    def test_returns_none_for_unknown_chunk(self, repo):
+        result = repo.get_sequence_number("nonexistent")
+        assert result is None
 
-    def test_bucket_append_and_get_full(self):
-        """Test appending chunks and retrieving the full conversation via the Bucket API."""
-        if not hasattr(self, 'bucket'):
-            return
-            
-        meta_datas = [(self.project_id, 1, "c1", "user", "date")]
-        chunks = [("c1", "Hello from bucket", "date", "type")]
-        
-        try:
-            self.bucket.append_chunks(meta_datas, chunks)
-            full_conv = self.bucket.get_full_conversation()
-            self.assertEqual(len(full_conv), 1)
-            self.assertEqual(full_conv[0][0], "Hello from bucket")
-        except sqlite3.Error:
-            pass
 
-    def test_bucket_delegation_methods(self):
-        """Test if the bucket methods delegate correctly to the repository."""
-        if not hasattr(self, 'bucket'):
-            return
-            
-        try:
-            # We just call them to ensure no syntax errors are present in delegation
-            self.bucket.get_chunk_order("dummy_id")
-            self.bucket.get_last_n_chunks(5)
-            self.bucket.get_context(1, 5)
-            self.bucket.get_conversation_since(3)
-            self.bucket.size()
-        except sqlite3.Error:
-            pass
+class TestGetNChunks:
+    def test_get_last_two_of_three(self, repo):
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 4)]
+        chunks = [_make_chunk(f"c{i}", f"Msg {i}") for i in range(1, 4)]
+        repo.add(meta, chunks)
+        result = repo.get_n_chunks(2)
+        assert len(result) == 2
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_get_more_than_available(self, repo):
+        repo.add(
+            [_make_meta(PROJECT_ID, 1, "c1")],
+            [_make_chunk("c1", "Only one")],
+        )
+        result = repo.get_n_chunks(100)
+        assert len(result) == 1
+
+    def test_get_zero_returns_empty(self, repo):
+        repo.add(
+            [_make_meta(PROJECT_ID, 1, "c1")],
+            [_make_chunk("c1", "something")],
+        )
+        result = repo.get_n_chunks(0)
+        assert result == []
+
+
+class TestGetRangedChunks:
+    @pytest.fixture
+    def filled_repo(self, repo):
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 6)]
+        chunks = [_make_chunk(f"c{i}", f"Text {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        return repo
+
+    def test_range_2_to_4_returns_three(self, filled_repo):
+        result = filled_repo.get_ranged_chunks(2, 4)
+        assert len(result) == 3
+
+    def test_range_inclusive_both_ends(self, filled_repo):
+        result = filled_repo.get_ranged_chunks(1, 5)
+        assert len(result) == 5
+
+    def test_range_single_element(self, filled_repo):
+        result = filled_repo.get_ranged_chunks(3, 3)
+        assert len(result) == 1
+
+    def test_range_out_of_bounds_returns_empty(self, filled_repo):
+        result = filled_repo.get_ranged_chunks(10, 20)
+        assert result == []
+
+
+class TestGetSequenceAfter:
+    @pytest.fixture
+    def filled_repo(self, repo):
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 6)]
+        chunks = [_make_chunk(f"c{i}", f"Text {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        return repo
+
+    def test_after_2_returns_three_items(self, filled_repo):
+        result = filled_repo.get_sequence_after(2)
+        assert len(result) == 3
+
+    def test_after_last_returns_empty(self, filled_repo):
+        result = filled_repo.get_sequence_after(5)
+        assert result == []
+
+    def test_after_0_returns_all(self, filled_repo):
+        result = filled_repo.get_sequence_after(0)
+        assert len(result) == 5
+
+
+class TestGetSize:
+    def test_get_size_returns_int(self, repo):
+        """Regression guard: get_size() must return int, not a tuple."""
+        repo.add(
+            [_make_meta(PROJECT_ID, 1, "c1")],
+            [_make_chunk("c1", "Hello")],
+        )
+        size = repo.get_size()
+        assert size == 1
+        assert isinstance(size, int)
+
+    def test_empty_db_size_is_zero(self, repo):
+        assert repo.get_size() == 0
+
+    def test_size_matches_inserted_count(self, repo):
+        n = 10
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, n + 1)]
+        chunks = [_make_chunk(f"c{i}", f"t{i}") for i in range(1, n + 1)]
+        repo.add(meta, chunks)
+        assert repo.get_size() == n
+
+
+# ---------------------------------------------------------------------------
+# Stress: FullConversationRepository
+# ---------------------------------------------------------------------------
+
+class TestRepositoryStress:
+    def test_five_hundred_sequential_adds(self, tmp_path):
+        repo = FullConversationRepository(
+            conversation_path=tmp_path,
+            project_id=PROJECT_ID,
+            project_name=PROJECT_NAME,
+        )
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 501)]
+        chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 501)]
+        repo.add(meta, chunks)
+        assert repo.get_size() == 500
+
+    def test_fetch_all_preserves_order_at_scale(self, tmp_path):
+        repo = FullConversationRepository(
+            conversation_path=tmp_path,
+            project_id=PROJECT_ID,
+            project_name=PROJECT_NAME,
+        )
+        n = 200
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, n + 1)]
+        chunks = [_make_chunk(f"c{i}", str(i)) for i in range(1, n + 1)]
+        repo.add(meta, chunks)
+        result = repo.fetch_all()
+        texts = [int(r[0]) for r in result]
+        assert texts == list(range(1, n + 1))
+
+    def test_range_query_at_scale(self, tmp_path):
+        repo = FullConversationRepository(
+            conversation_path=tmp_path,
+            project_id=PROJECT_ID,
+            project_name=PROJECT_NAME,
+        )
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 101)]
+        chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 101)]
+        repo.add(meta, chunks)
+        result = repo.get_ranged_chunks(51, 100)
+        assert len(result) == 50
+
+
+# ---------------------------------------------------------------------------
+# FullConversation bucket
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def bucket(tmp_path):
+    return FullConversation(
+        full_conversation_dir=tmp_path,
+        project_id="proj_bucket",
+        project_name="test_bucket",
+    )
+
+
+class TestFullConversationBucket:
+    def test_append_and_get_full_conversation(self, bucket):
+        meta = [_make_meta("proj_bucket", 1, "c1")]
+        chunks = [_make_chunk("c1", "Hello from bucket")]
+        bucket.append_chunks(meta, chunks)
+        full = bucket.get_full_conversation()
+        assert len(full) == 1
+        assert full[0][0] == "Hello from bucket"
+
+    def test_size_returns_int(self, bucket):
+        meta = [_make_meta("proj_bucket", 1, "c1")]
+        chunks = [_make_chunk("c1", "one")]
+        bucket.append_chunks(meta, chunks)
+        assert bucket.size() == 1
+        assert isinstance(bucket.size(), int)
+
+    def test_get_chunk_order_returns_int(self, bucket):
+        meta = [_make_meta("proj_bucket", 7, "c7")]
+        chunks = [_make_chunk("c7", "seven")]
+        bucket.append_chunks(meta, chunks)
+        order = bucket.get_chunk_order("c7")
+        assert order == 7
+        assert isinstance(order, int)
+
+    def test_get_last_n_chunks(self, bucket):
+        meta = [_make_meta("proj_bucket", i, f"c{i}") for i in range(1, 6)]
+        chunks = [_make_chunk(f"c{i}", f"msg {i}") for i in range(1, 6)]
+        bucket.append_chunks(meta, chunks)
+        result = bucket.get_last_n_chunks(3)
+        assert len(result) == 3
+
+    def test_get_context_range(self, bucket):
+        meta = [_make_meta("proj_bucket", i, f"c{i}") for i in range(1, 6)]
+        chunks = [_make_chunk(f"c{i}", f"msg {i}") for i in range(1, 6)]
+        bucket.append_chunks(meta, chunks)
+        result = bucket.get_context(2, 4)
+        assert len(result) == 3
+
+    def test_get_conversation_since(self, bucket):
+        meta = [_make_meta("proj_bucket", i, f"c{i}") for i in range(1, 6)]
+        chunks = [_make_chunk(f"c{i}", f"msg {i}") for i in range(1, 6)]
+        bucket.append_chunks(meta, chunks)
+        result = bucket.get_conversation_since(2)
+        assert len(result) == 3
+
+    def test_empty_bucket_size_is_zero(self, bucket):
+        assert bucket.size() == 0
+
+    def test_stress_five_hundred_via_bucket(self, tmp_path):
+        b = FullConversation(
+            full_conversation_dir=tmp_path,
+            project_id="stress",
+            project_name="stress_proj",
+        )
+        meta = [_make_meta("stress", i, f"c{i}") for i in range(1, 501)]
+        chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 501)]
+        b.append_chunks(meta, chunks)
+        assert b.size() == 500
