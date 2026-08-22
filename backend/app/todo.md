@@ -1,7 +1,4 @@
-1. Do Conversation Memory (High Priority)
-2. Fix the vector DB bug logic (very high Priority)
+# Todo
 
-Post MVP Works:
-
-1. Custom Vector DB (Highest Priority)
-2. Lazy loading of conversation memory
+1. Write the manager for the conversation layer
+2. Complete the conversation layer
