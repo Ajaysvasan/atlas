@@ -16,6 +16,16 @@ from unittest.mock import MagicMock
 for _mod in ["psycopg", "dotenv", "dotenv.main"]:
     sys.modules.setdefault(_mod, MagicMock())
 
+# llama_cpp — not installed in the test environment; lazy-imported only inside
+# ConversationSummary.__load_model, so a top-level stub is enough for import
+# resolution. Tests that exercise __load_model patch it directly.
+_llama_cpp_mock = MagicMock()
+sys.modules.setdefault("llama_cpp", _llama_cpp_mock)
+
+# torch IS installed (snapshot.py uses it for cosine_similarity); do NOT mock it
+# here — mocking would replace the real tensor/cosine_similarity with MagicMocks
+# that cannot be compared with `>`, breaking all search tests.
+
 # --------------------------------------------------------------------------- #
 # Ensure the app root is on sys.path so package-style imports work:
 #   from memory.topic_pool... import ...

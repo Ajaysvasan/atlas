@@ -7,3 +7,4 @@ dataset
 *.log
 *.db
 disk_ann_index
+models/

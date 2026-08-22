@@ -20,6 +20,10 @@ class Config:
     DB_PATH = os.path.join(DATA_DIR, "hierarchical_db")
     EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
     MODEL_PATH = None
+    DRAFT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct-GGUF"
+    DRAFT_MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
+    DRAFT_MODEL_PATH = os.path.join(ABS_PATH, "models", "draft_model")
+    DRAFT_MODEL_CONTEXT_WINDOW = 131072  # 128K tokens
     INDEX_PATH = os.path.join(DATA_DIR, "disk_ann_index")
     DISTANCE_METRIC = "l2"
     VECTOR_DTYPE = np.float32

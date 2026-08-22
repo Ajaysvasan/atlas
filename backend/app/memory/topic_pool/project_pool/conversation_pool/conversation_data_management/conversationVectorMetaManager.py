@@ -170,6 +170,17 @@ class ConversationVectorMetaDataRepository:
         )
         return cursor.fetchone()
 
+    def get_latest_summary(self) -> str | None:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+        SELECT cumulative_summary
+        FROM cumulative_vector_meta_data
+        ORDER BY datetime(created_at) DESC
+        LIMIT 1
+        """)
+        row = cursor.fetchone()
+        return row[0] if row is not None else None
+
     def batch_get_cumulative_vector_meta_data(self, cumulative_vector_ids: List[int]):
         if not cumulative_vector_ids:
             return []

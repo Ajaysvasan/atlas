@@ -54,7 +54,7 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 - **Criticality:** Medium
 - **Priority:** P2
-- **Explanation:** Several core memory management classes are completely empty (just containing `pass`), leaving the architecture unimplemented. These include `MemoryManager` (`memory_manager.py`), `ProjectManager` (`project_manager.py`), `TopicManager` (`topic_manager.py`), `ConversationPoolManager` (`conversation_pool_manager.py`), and `ConversationSummary` (`conversation_summary.py`).
+- **Explanation:** Four core memory management classes are completely empty (just containing `pass`), leaving the architecture unimplemented: `MemoryManager` (`memory_manager.py`), `ProjectManager` (`project_manager.py`), `TopicManager` (`topic_manager.py`), and `ConversationPoolManager` (`conversation_pool_manager.py`). Note: `ConversationSummary` is NOT an empty stub — it has partial implementation but is broken due to a non-existent method call (Bug 4.27) and an unimplemented core method (Bug 4.28).
 
 ---
 
@@ -111,3 +111,36 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Criticality:** Low
 - **Priority:** P3
 - **Explanation:** `search()` calls `self.__get_snap_shot(project_id)` to obtain `snap_shot_list`, then immediately calls `__find_best_snapshot()` which calls `self.__get_snap_shot(project_id)` again internally. This issues two separate database queries for identical data. If a new snapshot is inserted between the two queries, the index returned by `__find_best_snapshot` (computed against the newer list) is applied to the older `snap_shot_list` in `search()`, producing a wrong-row access with no error raised.
+
+---
+
+
+### Bug 4.30: `__get_last_n_chunks` Returns Oldest N Chunks, Not Most Recent N (`fullconversation_repository.py`)
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `__get_last_n_chunks` executes `ORDER BY f.created_at LIMIT n` with no `DESC`. SQLite ascending order with `LIMIT n` returns the **oldest** n rows, not the most recent. The method is named `get_last_n_chunks` and is intended to retrieve the most recent n conversation turns for context assembly, but it consistently returns the first n turns instead. The correct query requires either `ORDER BY f.sequence_number DESC LIMIT n` (then reverse in Python) or a subquery approach.
+
+---
+
+### Bug 4.31: `__get_ranged_chunks` and `__get_messages_after` Order by `created_at` Instead of `sequence_number` (`fullconversation_repository.py`)
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** Both `__get_ranged_chunks` and `__get_messages_after` use `ORDER BY f.created_at` for result ordering, while the canonical conversation ordering key is `sequence_number`. Since `created_at` is a caller-supplied TEXT field with no format enforcement, multiple messages inserted in the same batch can share identical timestamps, producing non-deterministic ordering within that group. `__get_all` (fixed as part of Bug 4.15) already uses `ORDER BY f.sequence_number` — these two methods were not updated consistently.
+
+---
+
+### Bug 4.32: `hashlib` Imported but Never Used (`conversationVectorManager.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `import hashlib` appears at the top of `conversationVectorManager.py` but `hashlib` is not referenced anywhere in the file. It is a dead import, likely left over from an earlier version where vector IDs were generated via MD5 hashing. It adds noise and misleads readers into thinking ID generation happens inside this class.
+
+---
+
+### Bug 4.33: Typo `context_window_lenght` Throughout `ConversationSummary` (`conversation_summary.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** The parameter `context_window_lenght` in `ConversationSummary.__init__` misspells "length" as "lenght" (missing the second 't'). The typo propagates to `self.context_window_lenght` and its usage in `__get_current_conversation`. While consistent and therefore not a runtime error, it is a public API parameter name that any caller must also misspell to use correctly, making the interface confusing.

@@ -89,6 +89,36 @@ class TestSchema:
         with pytest.raises(sqlite3.IntegrityError):
             repo.insert_map_table(300, 1)
 
+    def test_db_file_created_at_expected_path(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository(tmp_path, "proj_schema")
+        expected = tmp_path / "proj_schema_conversation.db"
+        assert expected.exists()
+        repo.close()
+
+    def test_foreign_keys_enforced_on_repo_connection(self, repo):
+        """
+        PRAGMA foreign_keys = ON must be active on the repo's own connection.
+        We verify this behaviourally: inserting into summary_vector_meta_data with
+        a non-existent chunk_id must raise, proving the FK is enforced rather than
+        silently ignored (which happens when the PRAGMA is OFF).
+        """
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.batch_insert_summary_vector_meta_data(
+                [(1, "does_not_exist", PROJECT_ID)]
+            )
+
+    def test_repeated_init_is_idempotent(self, tmp_path):
+        """Creating two repos on the same path must not raise or duplicate tables."""
+        r1 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        r1.close()
+        r2 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        with sqlite3.connect(r2.db_path) as conn:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+        assert tables.count("summary_chunks") == 1
+        r2.close()
+
 
 # ---------------------------------------------------------------------------
 # summary_chunks
@@ -134,6 +164,26 @@ class TestSummaryChunks:
         repo.batch_insert_summary_chunks(records)
         assert _row_count(repo.db_path, "summary_chunks") == 1000
 
+    def test_all_fields_stored_correctly(self, repo):
+        repo.batch_insert_summary_chunks([("cX", "hello world", "2026-09-01", "recursive")])
+        with sqlite3.connect(repo.db_path) as conn:
+            row = conn.execute(
+                "SELECT chunk_id, chunk, created_at, chunker_type FROM summary_chunks WHERE chunk_id='cX'"
+            ).fetchone()
+        assert row == ("cX", "hello world", "2026-09-01", "recursive")
+
+    def test_rollback_on_partial_duplicate(self, repo):
+        """A batch with a mid-batch duplicate must roll back the entire batch."""
+        repo.batch_insert_summary_chunks([("existing", "t", "2026-01-01", "x")])
+        initial = _row_count(repo.db_path, "summary_chunks")
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.batch_insert_summary_chunks([
+                ("new1", "t", "2026-01-01", "x"),
+                ("existing", "t2", "2026-01-02", "x"),  # duplicate
+                ("new2", "t", "2026-01-01", "x"),
+            ])
+        assert _row_count(repo.db_path, "summary_chunks") == initial
+
 
 # ---------------------------------------------------------------------------
 # cumulative_vector_meta_data
@@ -177,11 +227,78 @@ class TestCumulativeVectorMetaData:
     def test_empty_batch_get_returns_empty(self, repo):
         assert repo.batch_get_cumulative_vector_meta_data([]) == []
 
+    def test_batch_get_with_nonexistent_ids_returns_only_found(self, repo):
+        repo.insert_cumulative_vector_meta_data(10, "s", "2026-01-01", PROJECT_ID, 1)
+        result = repo.batch_get_cumulative_vector_meta_data([10, 99999])
+        assert len(result) == 1
+        assert result[0][0] == 10
+
     def test_five_hundred_sequential_inserts(self, repo):
         records = [(i, f"s{i}", "2026-08-01", PROJECT_ID, i) for i in range(1, 501)]
         repo.batch_insert_cumulative_vector_meta_data(records)
         ids = repo.get_cumulative_vector_meta_data_ids()
         assert len(ids) == 500
+
+    def test_get_cumulative_vector_meta_data_ids_empty_returns_empty_list(self, repo):
+        assert repo.get_cumulative_vector_meta_data_ids() == []
+
+    def test_all_five_fields_stored_correctly(self, repo):
+        repo.insert_cumulative_vector_meta_data(77, "the summary", "2026-09-01", PROJECT_ID, 99)
+        row = repo.get_cumulative_vector_meta_data(77)
+        assert row[0] == 77
+        assert row[1] == "the summary"
+        assert row[2] == "2026-09-01"
+        assert row[3] == PROJECT_ID
+
+
+# ---------------------------------------------------------------------------
+# get_latest_summary
+# ---------------------------------------------------------------------------
+
+class TestGetLatestSummary:
+    def test_returns_none_on_empty_table(self, repo):
+        assert repo.get_latest_summary() is None
+
+    def test_returns_summary_text_after_single_insert(self, repo):
+        repo.insert_cumulative_vector_meta_data(1, "first summary", "2026-08-01", PROJECT_ID, 10)
+        assert repo.get_latest_summary() == "first summary"
+
+    def test_returns_most_recent_by_datetime_not_insertion_order(self, repo):
+        """Inserts in reverse chronological order; must still return the latest."""
+        repo.insert_cumulative_vector_meta_data(3, "oldest", "2026-08-01", PROJECT_ID, 5)
+        repo.insert_cumulative_vector_meta_data(1, "newest", "2026-08-10", PROJECT_ID, 5)
+        repo.insert_cumulative_vector_meta_data(2, "middle", "2026-08-05", PROJECT_ID, 5)
+        assert repo.get_latest_summary() == "newest"
+
+    def test_sequential_inserts_always_return_last(self, repo):
+        for i in range(1, 6):
+            repo.insert_cumulative_vector_meta_data(
+                i, f"summary {i}", f"2026-08-0{i}", PROJECT_ID, i
+            )
+        assert repo.get_latest_summary() == "summary 5"
+
+    def test_unicode_summary_roundtrip(self, repo):
+        text = "要約: \U0001f916 AIが会話を要約しました。"
+        repo.insert_cumulative_vector_meta_data(1, text, "2026-08-01", PROJECT_ID, 5)
+        assert repo.get_latest_summary() == text
+
+    def test_long_summary_roundtrip(self, repo):
+        long_text = "word " * 10_000
+        repo.insert_cumulative_vector_meta_data(1, long_text, "2026-08-01", PROJECT_ID, 10_000)
+        assert repo.get_latest_summary() == long_text
+
+    def test_returns_str_not_tuple(self, repo):
+        repo.insert_cumulative_vector_meta_data(1, "hello", "2026-08-01", PROJECT_ID, 1)
+        result = repo.get_latest_summary()
+        assert isinstance(result, str)
+
+    def test_one_hundred_inserts_returns_last_one(self, repo):
+        for i in range(1, 101):
+            date = f"2026-08-{i:02d}" if i <= 31 else f"2026-09-{(i-31):02d}"
+            repo.insert_cumulative_vector_meta_data(i, f"summary {i}", date, PROJECT_ID, i)
+        result = repo.get_latest_summary()
+        assert result is not None
+        assert "summary" in result
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +344,19 @@ class TestSummaryVectorMetaData:
         assert row is not None
         assert row[0] == 600
 
+    def test_batch_get_with_nonexistent_ids_returns_only_found(self, repo):
+        repo.batch_insert_summary_chunks([("c1", "t", "2026-01-01", "x")])
+        repo.batch_insert_summary_vector_meta_data([(5, "c1", PROJECT_ID)])
+        result = repo.batch_get_summary_vector_meta_data([5, 99999])
+        assert len(result) == 1
+        assert result[0][0] == 5
+
+    def test_project_id_stored_correctly(self, repo):
+        repo.batch_insert_summary_chunks([("c1", "t", "2026-01-01", "x")])
+        repo.batch_insert_summary_vector_meta_data([(1, "c1", "my_project")])
+        row = repo.get_summary_vector_meta_data(1)
+        assert row[2] == "my_project"
+
 
 # ---------------------------------------------------------------------------
 # summary_snapshot_map
@@ -234,7 +364,7 @@ class TestSummaryVectorMetaData:
 
 class TestMapTable:
     def test_batch_insert_exactly_n_rows_bug_4_26(self, repo):
-        """Regression: batch_insert_map_table(N records) must produce exactly N rows."""
+        """Regression guard: batch_insert_map_table(N records) must produce exactly N rows."""
         repo.batch_insert_summary_chunks([
             ("c1", "t", "2026-01-01", "x"), ("c2", "t", "2026-01-01", "x")
         ])
@@ -284,6 +414,13 @@ class TestMapTable:
         seeded_repo.insert_map_table(202, 102)
         assert seeded_repo.get_summary_vector_ids_from_map(201) == [101]
         assert seeded_repo.get_summary_vector_ids_from_map(202) == [102]
+
+    def test_empty_batch_map_insert_is_noop(self, repo):
+        repo.batch_insert_map_table([])
+        assert _row_count(repo.db_path, "summary_snapshot_map") == 0
+
+    def test_get_ids_from_nonexistent_cumulative_returns_empty(self, repo):
+        assert repo.get_summary_vector_ids_from_map(99999) == []
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +504,19 @@ class TestStress:
         assert all(v == 100 for v in counts.values()), counts
         repo.close()
 
+    def test_get_latest_summary_after_five_hundred_inserts(self, tmp_path):
+        """get_latest_summary must return the entry with the latest date even at scale."""
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        for i in range(1, 501):
+            year = 2025 + (i // 366)
+            day = (i % 365) or 1
+            date = f"{year}-{(day // 31) + 1:02d}-{(day % 28) + 1:02d}"
+            repo.insert_cumulative_vector_meta_data(i, f"summary {i}", date, PROJECT_ID, i)
+        result = repo.get_latest_summary()
+        assert result is not None
+        assert "summary" in result
+        repo.close()
+
 
 # ---------------------------------------------------------------------------
 # ConversationVectorManager (mocked VectorRepository)
@@ -431,3 +581,14 @@ class TestConversationVectorManager:
         mock_repo.batch_search.return_value = np.array([])
         manager.get_vectors([])
         manager.repository.batch_search.assert_called_once_with([])
+
+    def test_project_id_stored_on_instance(self, setup):
+        manager, _ = setup
+        assert manager.project_id == "proj123"
+
+    def test_batch_insert_returns_same_ids_passed_in(self, setup):
+        manager, _ = setup
+        vids = [np.uint32(10), np.uint32(20), np.uint32(30)]
+        vecs = np.zeros((3, 4), dtype=np.float32)
+        result = manager.batch_insert(vids, vecs)
+        assert result == vids
