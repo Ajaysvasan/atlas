@@ -105,8 +105,30 @@ class VectorRepository:
 
         return np.array(vectors)
 
+    def __delete_vectors(self, vector_ids: List[uint32]) -> None:
+        query = """
+        delete from vectors where project_id = %s and vector_id = %s;
+        """
+        try:
+            self.curr.executemany(
+                query, [(self.project_id, int(vid)) for vid in vector_ids]
+            )
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            raise VectorInsertionError(e)
+
     def insert(self, vector_id: uint32, vector: ndarray) -> None:
         self.__insert_vector(vector, vector_id)
+
+    def delete(self, vector_id: uint32) -> None:
+        self.__delete_vectors([vector_id])
+
+    def batch_delete(self, vector_ids: List[uint32]) -> None:
+        """Used to undo vectors written for a snapshot whose metadata failed."""
+        if not vector_ids:
+            return
+        self.__delete_vectors(vector_ids)
 
     def batch_insert(self, vector_ids: List[uint32], vectors: ndarray) -> None:
         self.__insert_batch_vector(vectors, vector_ids)

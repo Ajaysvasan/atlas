@@ -9,6 +9,7 @@ touched. torch.cosine_similarity and torch.tensor are the real implementations
 Regression guards are annotated with their bug ID.
 """
 
+import sqlite3
 from typing import List, Tuple
 from unittest.mock import MagicMock, call, patch
 
@@ -16,7 +17,11 @@ import numpy as np
 import pytest
 
 from memory.topic_pool.project_pool.conversation_pool.snapshot import SnapShot
-from memory_pool_exceptions import InvalidCursorException, MisMatchCount, NullPointerException
+from memory.memory_pool_exceptions import (
+    InvalidCursorException,
+    MisMatchCount,
+    NullPointerException,
+)
 
 _META_REPO = "memory.topic_pool.project_pool.conversation_pool.snapshot.ConversationVectorMetaDataRepository"
 _VEC_MGR   = "memory.topic_pool.project_pool.conversation_pool.snapshot.ConversationVectorManager"
@@ -35,8 +40,6 @@ _SNAP_LIST = [(1,), (2,), (3,)]
 
 def _dummy_add_kwargs(**overrides):
     defaults = dict(
-        project_name="TestProject",
-        project_id="test_proj",
         time_of_snapshot="2026-08-01",
         len_of_the_summary=100,
         summary_vector_ids=[np.uint32(101), np.uint32(102)],
@@ -58,7 +61,7 @@ def patched():
         mock_vec  = MockVec.return_value
         mock_meta.get_cumulative_vector_meta_data_ids.return_value = _SNAP_LIST
         mock_vec.get_vector.return_value = _VEC.copy()
-        snap = SnapShot()
+        snap = SnapShot(conversation_dir="/tmp/snap_test", project_id="test_proj", project_name="TestProject")
         yield snap, mock_meta, mock_vec
 
 
@@ -68,7 +71,7 @@ def patched():
 
 class TestCursorInit:
     def test_cursors_start_at_minus_one_before_any_add(self):
-        snap = SnapShot()
+        snap = SnapShot(conversation_dir="/tmp/snap_test", project_id="test_proj", project_name="TestProject")
         assert snap._SnapShot__left_cursor == -1
         assert snap._SnapShot__right_cursor == -1
 
@@ -148,14 +151,14 @@ class TestSearchDoesNotMutateCursors:
         snap, _, _ = patched
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
-        snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+        snap.search(query=_QUERY)
         assert snap._SnapShot__left_cursor == 0
 
     def test_search_leaves_right_cursor_unchanged(self, patched):
         snap, _, _ = patched
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
-        snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+        snap.search(query=_QUERY)
         assert snap._SnapShot__right_cursor == 2
 
     def test_repeated_search_does_not_drift_cursors(self, patched):
@@ -163,7 +166,7 @@ class TestSearchDoesNotMutateCursors:
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
         for _ in range(10):
-            snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+            snap.search(query=_QUERY)
         assert snap._SnapShot__left_cursor == 0
         assert snap._SnapShot__right_cursor == 2
 
@@ -171,7 +174,7 @@ class TestSearchDoesNotMutateCursors:
         snap, _, _ = patched
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
-        result = snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+        result = snap.search(query=_QUERY)
         assert result is not None
         assert result in _SNAP_LIST
 
@@ -180,7 +183,7 @@ class TestSearchDoesNotMutateCursors:
         mock_meta.get_cumulative_vector_meta_data_ids.return_value = [(42,)]
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 0
-        result = snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+        result = snap.search(query=_QUERY)
         assert result == (42,)
         assert snap._SnapShot__left_cursor == 0
         assert snap._SnapShot__right_cursor == 0
@@ -199,11 +202,7 @@ class TestSearchDoesNotMutateCursors:
         mock_vec.get_vector.side_effect = [orthogonal, identical]
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 1
-        result = snap.search(
-            query=np.array([0.1, 0.2, 0.3], dtype=np.float32),
-            project_id="test_proj",
-            project_name="TestProject",
-        )
+        result = snap.search(query=np.array([0.1, 0.2, 0.3], dtype=np.float32))
         assert result == (2,)
 
 
@@ -216,7 +215,7 @@ class TestCursorNavigation:
         snap, _, _ = patched
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
-        snap.advance("test_proj")
+        snap.advance()
         assert snap._SnapShot__left_cursor == 1
 
     def test_prev_decrements_right_cursor(self, patched):
@@ -231,7 +230,7 @@ class TestCursorNavigation:
         snap._SnapShot__left_cursor = 2
         snap._SnapShot__right_cursor = 2
         with pytest.raises(InvalidCursorException):
-            snap.advance("test_proj")
+            snap.advance()
 
     def test_prev_beyond_left_raises(self, patched):
         snap, _, _ = patched
@@ -244,7 +243,7 @@ class TestCursorNavigation:
         snap, _, _ = patched
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
-        snap.advance("test_proj")
+        snap.advance()
         snap.prev()
         assert snap._SnapShot__left_cursor == 1
         assert snap._SnapShot__right_cursor == 1
@@ -254,9 +253,9 @@ class TestCursorNavigation:
         mock_meta.get_cumulative_vector_meta_data_ids.return_value = [(1,), (2,)]
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 1
-        snap.advance("test_proj")
+        snap.advance()
         with pytest.raises(InvalidCursorException):
-            snap.advance("test_proj")
+            snap.advance()
 
     def test_prev_to_min_then_raises(self, patched):
         snap, _, _ = patched
@@ -275,7 +274,7 @@ class TestCursorNavigation:
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 9
         for _ in range(5):
-            snap.advance("test_proj")
+            snap.advance()
         assert snap._SnapShot__left_cursor == 5
         assert snap._SnapShot__right_cursor == 9
 
@@ -301,7 +300,7 @@ class TestSearchEdgeCases:
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 0
         with pytest.raises(NullPointerException):
-            snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+            snap.search(query=_QUERY)
 
     def test_search_full_window_returns_best_match(self, patched):
         snap, mock_meta, mock_vec = patched
@@ -310,11 +309,7 @@ class TestSearchEdgeCases:
         mock_vec.get_vector.return_value = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 4
-        result = snap.search(
-            query=np.array([1.0, 1.0, 1.0], dtype=np.float32),
-            project_id="test_proj",
-            project_name="TestProject",
-        )
+        result = snap.search(query=np.array([1.0, 1.0, 1.0], dtype=np.float32))
         assert result is not None
         assert result in snap_list
 
@@ -330,9 +325,7 @@ class TestSearchEdgeCases:
         snap._SnapShot__right_cursor = 0
         # cosine_similarity(zero, query) is 0 but best_snap_shot_idx will be set to 0
         # (not -1), so result should be (1,)
-        result = snap.search(
-            query=_QUERY, project_id="test_proj", project_name="TestProject"
-        )
+        result = snap.search(query=_QUERY)
         # A valid tuple is returned (zero vector still wins because it's the only candidate)
         assert result == (1,) or result is None  # result depends on sim score; no crash
 
@@ -354,7 +347,7 @@ class TestSnapShotStress:
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 2
         for _ in range(100):
-            snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+            snap.search(query=_QUERY)
         assert snap._SnapShot__left_cursor == 0
         assert snap._SnapShot__right_cursor == 2
 
@@ -363,25 +356,66 @@ class TestSnapShotStress:
         snap.add(**_dummy_add_kwargs())
         mock_vec.batch_insert.assert_called_once()
         mock_vec.insert.assert_called_once()
-        mock_meta.batch_insert_summary_chunks.assert_called_once_with(_CHUNKS)
-        mock_meta.batch_insert_summary_vector_meta_data.assert_called_once()
-        mock_meta.insert_cumulative_vector_meta_data.assert_called_once()
-        mock_meta.batch_insert_map_table.assert_called_once()
+        # Bug 4.38: the metadata side is now one transactional call, not four
+        # independently committing ones.
+        mock_meta.insert_snapshot.assert_called_once()
 
-    def test_chunks_inserted_before_summary_vectors(self, patched):
-        """Regression guard Bug 4.6: summary_chunks must be inserted before FK-dependent tables."""
+    def test_metadata_is_written_in_a_single_transaction(self, patched):
+        """
+        Regression guard Bug 4.38. The four inserts used to commit separately,
+        so a failure partway through left a snapshot that half-existed.
+        """
         snap, mock_meta, _ = patched
-        call_order = []
-        mock_meta.batch_insert_summary_chunks.side_effect = (
-            lambda *a, **kw: call_order.append("chunks")
-        )
-        mock_meta.batch_insert_summary_vector_meta_data.side_effect = (
-            lambda *a, **kw: call_order.append("summary_vectors")
-        )
         snap.add(**_dummy_add_kwargs())
-        chunks_idx = call_order.index("chunks")
-        sv_idx = call_order.index("summary_vectors")
-        assert chunks_idx < sv_idx, "summary_chunks must be inserted before summary_vector_meta_data"
+        kwargs = mock_meta.insert_snapshot.call_args.kwargs
+        assert kwargs["chunks"] == _CHUNKS
+        assert len(kwargs["summary_vector_rows"]) == len(_CHUNK_IDS)
+        assert len(kwargs["map_rows"]) == len(_CHUNK_IDS)
+        assert kwargs["cumulative_row"][1] == "This is a test summary"
+        # the per-table entry points must no longer be used by add()
+        mock_meta.batch_insert_summary_chunks.assert_not_called()
+        mock_meta.batch_insert_summary_vector_meta_data.assert_not_called()
+        mock_meta.insert_cumulative_vector_meta_data.assert_not_called()
+        mock_meta.batch_insert_map_table.assert_not_called()
+
+    def test_vectors_are_written_before_metadata(self, patched):
+        """
+        Bug 4.38: this order means a metadata failure leaves only unreachable
+        vectors. The reverse would leave metadata pointing at missing vectors,
+        which breaks search().
+        """
+        snap, mock_meta, mock_vec = patched
+        order = []
+        mock_vec.batch_insert.side_effect = lambda *a, **k: order.append("vectors")
+        mock_meta.insert_snapshot.side_effect = lambda *a, **k: order.append("meta")
+        snap.add(**_dummy_add_kwargs())
+        assert order.index("vectors") < order.index("meta")
+
+    def test_vectors_are_deleted_when_metadata_fails(self, patched):
+        """Bug 4.38: the compensating delete stops orphans accumulating."""
+        snap, mock_meta, mock_vec = patched
+        mock_meta.insert_snapshot.side_effect = sqlite3.IntegrityError("boom")
+        with pytest.raises(sqlite3.IntegrityError):
+            snap.add(**_dummy_add_kwargs())
+        mock_vec.batch_delete.assert_called_once()
+        deleted = mock_vec.batch_delete.call_args[0][0]
+        assert len(deleted) == len(_CHUNK_IDS) + 1  # summary vectors + cumulative
+
+    def test_original_error_survives_a_failing_compensation(self, patched):
+        """A failure while cleaning up must not mask the real cause."""
+        snap, mock_meta, mock_vec = patched
+        mock_meta.insert_snapshot.side_effect = sqlite3.IntegrityError("real cause")
+        mock_vec.batch_delete.side_effect = RuntimeError("cleanup also failed")
+        with pytest.raises(sqlite3.IntegrityError, match="real cause"):
+            snap.add(**_dummy_add_kwargs())
+
+    def test_cursors_unchanged_when_add_fails(self, patched):
+        snap, mock_meta, _ = patched
+        mock_meta.insert_snapshot.side_effect = sqlite3.IntegrityError("boom")
+        with pytest.raises(sqlite3.IntegrityError):
+            snap.add(**_dummy_add_kwargs())
+        assert snap._SnapShot__left_cursor == -1
+        assert snap._SnapShot__right_cursor == -1
 
     def test_advance_and_search_interleaved_no_drift(self, patched):
         """Advancing left cursor must not affect search cursor isolation."""
@@ -391,8 +425,8 @@ class TestSnapShotStress:
         ]
         snap._SnapShot__left_cursor = 0
         snap._SnapShot__right_cursor = 4
-        snap.advance("test_proj")
-        snap.search(query=_QUERY, project_id="test_proj", project_name="TestProject")
+        snap.advance()
+        snap.search(query=_QUERY)
         # advance moved left to 1, search must NOT change it back or forward
         assert snap._SnapShot__left_cursor == 1
         assert snap._SnapShot__right_cursor == 4
@@ -403,3 +437,82 @@ class TestSnapShotStress:
             snap.add(**_dummy_add_kwargs(cumulative_summary_vector_id=np.uint32(i + 1)))
         assert snap._SnapShot__left_cursor == 0
         assert snap._SnapShot__right_cursor == 499
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.37 — cursors must be opened onto stored history before searching
+# ---------------------------------------------------------------------------
+
+class TestUnsyncedCursors:
+    def test_search_finds_a_snapshot_without_an_explicit_sync(self, patched):
+        """
+        With cursors at -1/-1 the search used to evaluate snap_shot_list[-1] —
+        Python negative indexing quietly selecting the LAST snapshot instead of
+        signalling an empty range — and then return None no matter what.
+        """
+        snap, _, _ = patched
+        assert snap._SnapShot__left_cursor == -1
+        assert snap._SnapShot__right_cursor == -1
+        assert snap.search(query=_QUERY) is not None
+
+    def test_search_opens_cursors_over_the_whole_history(self, patched):
+        snap, _, _ = patched
+        snap.search(query=_QUERY)
+        assert snap._SnapShot__left_cursor == 0
+        assert snap._SnapShot__right_cursor == len(_SNAP_LIST) - 1
+
+    def test_no_negative_index_is_ever_read(self, patched):
+        """The failing row was fetched by negative index before returning None."""
+        snap, mock_meta, mock_vec = patched
+        seen = []
+        mock_vec.get_vector.side_effect = lambda vid: seen.append(vid) or _VEC.copy()
+        snap.search(query=_QUERY)
+        assert all(v in [row[0] for row in _SNAP_LIST] for v in seen)
+
+    def test_empty_history_still_raises(self, patched):
+        snap, mock_meta, _ = patched
+        mock_meta.get_cumulative_vector_meta_data_ids.return_value = []
+        with pytest.raises(NullPointerException):
+            snap.search(query=_QUERY)
+
+    def test_existing_cursors_are_not_widened(self, patched):
+        """A caller that narrowed the range must keep it."""
+        snap, _, _ = patched
+        snap._SnapShot__left_cursor = 1
+        snap._SnapShot__right_cursor = 1
+        snap.search(query=_QUERY)
+        assert snap._SnapShot__left_cursor == 1
+        assert snap._SnapShot__right_cursor == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.40 — repository ownership
+# ---------------------------------------------------------------------------
+
+class TestRepositoryOwnership:
+    def test_builds_its_own_repository_when_none_is_given(self, tmp_path):
+        with patch(_META_REPO) as MockMeta, patch(_VEC_MGR):
+            snap = SnapShot(tmp_path, "p", "P")
+        assert snap._owns_meta_repo is True
+        MockMeta.assert_called_once()
+
+    def test_reuses_an_injected_repository(self, tmp_path):
+        with patch(_META_REPO) as MockMeta, patch(_VEC_MGR):
+            borrowed = MagicMock()
+            snap = SnapShot(tmp_path, "p", "P", meta_repo=borrowed)
+        assert snap.meta_repo is borrowed
+        assert snap._owns_meta_repo is False
+        MockMeta.assert_not_called()
+
+    def test_close_releases_only_an_owned_repository(self, tmp_path):
+        with patch(_META_REPO) as MockMeta, patch(_VEC_MGR):
+            snap = SnapShot(tmp_path, "p", "P")
+            snap.close()
+        MockMeta.return_value.close.assert_called_once()
+
+    def test_close_leaves_a_borrowed_repository_open(self, tmp_path):
+        with patch(_META_REPO), patch(_VEC_MGR):
+            borrowed = MagicMock()
+            snap = SnapShot(tmp_path, "p", "P", meta_repo=borrowed)
+            snap.close()
+        borrowed.close.assert_not_called()

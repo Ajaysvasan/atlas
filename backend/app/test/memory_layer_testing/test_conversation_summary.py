@@ -11,11 +11,15 @@ Naming convention for private method access (Python name-mangling):
     _ConversationSummary__<method>
 """
 
+import random
+import string
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, call, patch
 
+import numpy as np
 import pytest
 
 from memory.topic_pool.project_pool.conversation_pool.conversation_summary_pipeline.conversation_summary import (
@@ -73,6 +77,7 @@ def cs(tmp_path):
         mock_fc = MockFC.return_value
         mock_mr = MockMR.return_value
         mock_mr.get_latest_summary.return_value = None
+        mock_mr.get_highest_summarised_sequence.return_value = None
         mock_fc.get_context.return_value = []
         instance = _make_cs(tmp_path, mock_fc, mock_mr)
         yield instance, mock_fc, mock_mr
@@ -85,6 +90,7 @@ def cs_with_summary(tmp_path):
         mock_fc = MockFC.return_value
         mock_mr = MockMR.return_value
         mock_mr.get_latest_summary.return_value = "Prior summary text."
+        mock_mr.get_highest_summarised_sequence.return_value = None
         mock_fc.get_context.return_value = [_row("Hello"), _row("World")]
         instance = _make_cs(tmp_path, mock_fc, mock_mr)
         yield instance, mock_fc, mock_mr
@@ -95,12 +101,36 @@ def cs_with_summary(tmp_path):
 # ---------------------------------------------------------------------------
 
 class TestGetCurrentConversation:
-    def test_normal_sequence_passes_correct_start_to_db(self, cs):
-        instance, mock_fc, _ = cs
-        # seq=200, window=100 → start = max(0, 200 - 100 - 50) = 50
+    def test_look_back_applies_once_a_watermark_exists(self, cs):
+        instance, mock_fc, mock_mr = cs
+        # watermark=180, seq=200, window=100 → look_back = 200-100-50 = 50,
+        # which is earlier than watermark+1, so the look-back wins.
+        mock_mr.get_highest_summarised_sequence.return_value = 180
         mock_fc.get_context.return_value = [_row("A")]
         instance.get_current_conversation(200)
         mock_fc.get_context.assert_called_once_with(50, 200)
+
+    def test_backlog_is_covered_when_nothing_is_summarised(self, cs):
+        """
+        Bug 4.36 regression: with no watermark the window must reach back to the
+        first turn. The look-back alone would have started at 50 and abandoned
+        turns 1-49 while still advancing the watermark past them.
+        """
+        instance, mock_fc, mock_mr = cs
+        mock_mr.get_highest_summarised_sequence.return_value = None
+        mock_fc.get_context.return_value = [_row("A")]
+        instance.get_current_conversation(200)
+        mock_fc.get_context.assert_called_once_with(1, 200)
+
+    def test_window_never_starts_after_the_first_unsummarised_turn(self, cs):
+        """Bug 4.36 regression: no gap may open between watermark and window."""
+        instance, mock_fc, mock_mr = cs
+        # watermark=10 but the look-back would start at 850 — 839 turns would
+        # be skipped and then declared summarised.
+        mock_mr.get_highest_summarised_sequence.return_value = 10
+        mock_fc.get_context.return_value = []
+        instance.get_current_conversation(1000)
+        mock_fc.get_context.assert_called_once_with(11, 1000)
 
     def test_sequence_shorter_than_window_clamps_start_to_zero(self, cs):
         """Bug 4.29 regression: start must never go negative."""
@@ -118,8 +148,10 @@ class TestGetCurrentConversation:
 
     def test_overlap_extends_lookback_by_50_chunks(self, cs):
         """Overlap constant _WINDOW_OVERLAP_CHUNKS=50 must widen the window."""
-        instance, mock_fc, _ = cs
+        instance, mock_fc, mock_mr = cs
+        # watermark well ahead of the look-back so the look-back is what applies:
         # seq=160, window=100 → start = 160 - 100 - 50 = 10
+        mock_mr.get_highest_summarised_sequence.return_value = 150
         mock_fc.get_context.return_value = []
         instance.get_current_conversation(160)
         mock_fc.get_context.assert_called_once_with(10, 160)
@@ -158,7 +190,9 @@ class TestGetCurrentConversation:
 
     def test_very_large_sequence_number(self, cs):
         """No overflow or incorrect clamping at large seq numbers."""
-        instance, mock_fc, _ = cs
+        instance, mock_fc, mock_mr = cs
+        # watermark ahead of the look-back, so the look-back is what applies
+        mock_mr.get_highest_summarised_sequence.return_value = 999_900
         mock_fc.get_context.return_value = []
         instance.get_current_conversation(1_000_000)
         start, end = mock_fc.get_context.call_args[0]
@@ -180,11 +214,13 @@ class TestGetCurrentSummary:
     def test_returns_none_when_no_summary(self, cs):
         instance, _, mock_mr = cs
         mock_mr.get_latest_summary.return_value = None
+        mock_mr.get_highest_summarised_sequence.return_value = None
         assert instance.get_current_summary() is None
 
     def test_returns_summary_string(self, cs):
         instance, _, mock_mr = cs
         mock_mr.get_latest_summary.return_value = "A prior summary."
+        mock_mr.get_highest_summarised_sequence.return_value = None
         assert instance.get_current_summary() == "A prior summary."
 
     def test_delegates_to_repo_get_latest_summary(self, cs):
@@ -349,6 +385,7 @@ class TestMakeSummary:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             mock_fc.get_context.return_value = [_row("Hello"), _row("World")]
 
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
@@ -404,6 +441,7 @@ class TestMakeSummary:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             mock_fc.get_context.return_value = [_row("Hello")]
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
@@ -422,6 +460,7 @@ class TestMakeSummary:
     def test_no_previous_summary_single_inference_call(self, llm_cs):
         instance, mock_fc, mock_mr, mock_llama, *_ = llm_cs
         mock_mr.get_latest_summary.return_value = None
+        mock_mr.get_highest_summarised_sequence.return_value = None
         mock_fc.get_context.return_value = [_row("A"), _row("B")]
         instance.make_summary(chunk_sequence_number=200)
         mock_llama.create_chat_completion.assert_called_once()
@@ -431,6 +470,7 @@ class TestMakeSummary:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = "Previous summary."
+            mock_mr.get_highest_summarised_sequence.return_value = None
             mock_fc.get_context.return_value = [_row("New chat.")]
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
@@ -460,6 +500,7 @@ class TestMultiBatchRollingSummary:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             # 600-char conversation, will be batched
             mock_fc.get_context.return_value = [_row("x" * 600)]
             instance = ConversationSummary(
@@ -508,6 +549,7 @@ class TestMultiBatchRollingSummary:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             mock_fc.get_context.return_value = [_row("conversation")]
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
@@ -550,6 +592,7 @@ class TestStress:
             mock_mr = MockMR.return_value
             mock_fc.get_context.return_value = [_row("chat")]
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
             mock_llama = MagicMock()
@@ -590,6 +633,7 @@ class TestStress:
             mock_mr = MockMR.return_value
             mock_fc.get_context.return_value = [_row("concurrent")]
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
             errors: List[Exception] = []
@@ -637,6 +681,7 @@ class TestStress:
             mock_mr = MockMR.return_value
             mock_fc.get_context.return_value = []
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr, window=100)
 
             for seq in range(10, 510, 10):
@@ -656,6 +701,7 @@ class TestStress:
             mock_mr = MockMR.return_value
             mock_fc.get_context.return_value = [_row("x")]
             mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
         # Do NOT patch __load_model — let it run against a missing file path
@@ -669,3 +715,425 @@ class TestStress:
             MockConfig.DRAFT_MODEL_CONTEXT_WINDOW = 131072
             with pytest.raises(FileNotFoundError):
                 instance._ConversationSummary__load_model()
+
+
+# ---------------------------------------------------------------------------
+# take_snapshot — the round trip make_summary() alone never completed
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT = f"{_MOD}.SnapShot"
+
+_COVERED = [
+    ("chunk_a", "How does DiskANN work?", "2026-08-23T00:00:00+00:00", "turn"),
+    ("chunk_b", "It builds a Vamana graph.", "2026-08-23T00:00:01+00:00", "turn"),
+]
+
+
+def _fake_embedder(dim=128):
+    """embed_text/embed_texts stand-in returning predictable ids and vectors."""
+    embedder = MagicMock()
+
+    def one(text, chunk_id=None):
+        result = MagicMock()
+        result.vector = np.full(dim, 0.5, dtype=np.float32)
+        result.vector_id = abs(hash(text)) % (2**63 - 1)
+        result.meta_data.chunk_id = chunk_id
+        return result
+
+    embedder.embed_text.side_effect = one
+    embedder.embed_texts.side_effect = lambda texts, ids=None: [
+        one(t, i) for t, i in zip(texts, ids or [None] * len(texts))
+    ]
+    return embedder
+
+
+@pytest.fixture
+def snapshotting(tmp_path):
+    """Yields (instance, mock_fc, mock_mr, mock_snap) with the LLM stubbed out."""
+    with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR, patch(
+        _SNAPSHOT
+    ) as MockSnap:
+        mock_fc = MockFC.return_value
+        mock_mr = MockMR.return_value
+        mock_snap = MockSnap.return_value
+        mock_mr.get_latest_summary.return_value = None
+        mock_mr.get_highest_summarised_sequence.return_value = None
+        mock_fc.get_context_rows.return_value = list(_COVERED)
+        instance = _make_cs(tmp_path, mock_fc, mock_mr)
+        instance._embedder = _fake_embedder()
+        with patch.object(
+            ConversationSummary,
+            "_ConversationSummary__generate_summary",
+            lambda self, prev, conv: "A generated summary.",
+        ):
+            yield instance, mock_fc, mock_mr, mock_snap
+
+
+class TestTakeSnapshot:
+    def test_returns_the_generated_summary(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        assert instance.take_snapshot(10) == "A generated summary."
+
+    def test_persists_through_snapshot_add(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        mock_snap.add.assert_called_once()
+
+    def test_empty_window_returns_none_without_writing(self, snapshotting):
+        instance, mock_fc, _, mock_snap = snapshotting
+        mock_fc.get_context_rows.return_value = []
+        assert instance.take_snapshot(10) is None
+        mock_snap.add.assert_not_called()
+
+    def test_covered_window_uses_overlap_and_clamps(self, snapshotting):
+        instance, mock_fc, mock_mr, _ = snapshotting
+        mock_mr.get_highest_summarised_sequence.return_value = 180
+        instance.take_snapshot(200)  # window=100, overlap=50 -> start 50
+        mock_fc.get_context_rows.assert_called_once_with(50, 200)
+
+    def test_covered_window_reaches_back_over_a_backlog(self, snapshotting):
+        """Bug 4.36 regression: the snapshot must not skip unsummarised turns."""
+        instance, mock_fc, mock_mr, _ = snapshotting
+        mock_mr.get_highest_summarised_sequence.return_value = None
+        instance.take_snapshot(200)
+        mock_fc.get_context_rows.assert_called_once_with(1, 200)
+
+    def test_short_conversation_clamps_start_to_zero(self, snapshotting):
+        instance, mock_fc, _, _ = snapshotting
+        instance.take_snapshot(10)
+        assert mock_fc.get_context_rows.call_args[0][0] == 0
+
+    def test_chunk_ids_match_the_covered_rows(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        assert mock_snap.add.call_args.kwargs["chunk_ids"] == ["chunk_a", "chunk_b"]
+
+    def test_chunks_are_passed_through_whole(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        assert mock_snap.add.call_args.kwargs["chunks"] == _COVERED
+
+    def test_one_summary_vector_per_covered_chunk(self, snapshotting):
+        """SnapShot.add raises MisMatchCount unless these line up."""
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        kwargs = mock_snap.add.call_args.kwargs
+        assert len(kwargs["summary_vector_ids"]) == len(kwargs["chunk_ids"])
+        assert len(kwargs["summary_vectors"]) == len(kwargs["chunk_ids"])
+
+    def test_summary_vectors_are_float32(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        assert mock_snap.add.call_args.kwargs["summary_vectors"].dtype == np.float32
+
+    def test_cumulative_vector_comes_from_the_summary_text(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        instance.embedder.embed_text.assert_called_once_with("A generated summary.")
+
+    def test_chunk_vectors_are_embedded_with_their_chunk_ids(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        instance.take_snapshot(10)
+        instance.embedder.embed_texts.assert_called_once_with(
+            ["How does DiskANN work?", "It builds a Vamana graph."],
+            ["chunk_a", "chunk_b"],
+        )
+
+    def test_summary_length_is_recorded(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        assert mock_snap.add.call_args.kwargs["len_of_the_summary"] == len(
+            "A generated summary."
+        )
+
+    def test_snapshot_time_is_iso_utc(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        stamp = mock_snap.add.call_args.kwargs["time_of_snapshot"]
+        parsed = datetime.fromisoformat(stamp)
+        assert parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
+
+    def test_previous_summary_is_read_before_generating(self, snapshotting):
+        """The rolling summary depends on this being the stored predecessor."""
+        instance, _, mock_mr, _ = snapshotting
+        mock_mr.get_latest_summary.return_value = "Earlier summary."
+        mock_mr.get_highest_summarised_sequence.return_value = None
+        instance.take_snapshot(10)
+        mock_mr.get_latest_summary.assert_called()
+
+    def test_blank_summary_is_not_persisted(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        with patch.object(
+            ConversationSummary,
+            "_ConversationSummary__generate_summary",
+            lambda self, prev, conv: "",
+        ):
+            assert instance.take_snapshot(10) is None
+        mock_snap.add.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Snapshot wiring: ConversationSummary and SnapShot must share one database
+# ---------------------------------------------------------------------------
+
+class TestSnapshotSharesDatabase:
+    def test_snapshot_built_against_the_same_directory(self, tmp_path):
+        """
+        SnapShot used to hardcode Config.CONVERSATION while ConversationSummary
+        used the directory it was given. Writing the summary to one database and
+        reading it from another left the rolling summary blind to its own output.
+        """
+        with patch(_FULL_CONV), patch(_META_REPO), patch(_SNAPSHOT) as MockSnap:
+            _make_cs(tmp_path, None, None)
+        assert MockSnap.call_args.kwargs["conversation_dir"] == tmp_path
+
+    def test_snapshot_receives_project_identity(self, tmp_path):
+        with patch(_FULL_CONV), patch(_META_REPO), patch(_SNAPSHOT) as MockSnap:
+            _make_cs(tmp_path, None, None)
+        assert MockSnap.call_args.kwargs["project_id"] == _PROJ_ID
+        assert MockSnap.call_args.kwargs["project_name"] == _PROJ_NAME
+
+    def test_embedder_is_not_loaded_until_used(self, tmp_path):
+        """SentenceTransformer weights are ~100MB — construction must stay cheap."""
+        with patch(_FULL_CONV), patch(_META_REPO), patch(_SNAPSHOT):
+            instance = _make_cs(tmp_path, None, None)
+        assert instance._embedder is None
+
+
+class TestCumulativeVectorIdUniqueness:
+    """
+    cumulative_vector_id is a PRIMARY KEY, but the embedder derives ids from
+    content — and two snapshots can legitimately produce identical summary text
+    once a conversation's gist stops changing. Binding the timestamp keeps each
+    snapshot distinct.
+    """
+
+    def test_identical_summaries_get_different_ids(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        instance.take_snapshot(20)
+        ids = [c.kwargs["cumulative_summary_vector_id"] for c in mock_snap.add.call_args_list]
+        assert len(ids) == 2
+        assert ids[0] != ids[1], "identical summaries collided on the primary key"
+
+    def test_id_is_not_the_content_derived_embedding_id(self, snapshotting):
+        """It must not simply reuse embed_text()'s content hash."""
+        instance, _, _, mock_snap = snapshotting
+        instance.take_snapshot(10)
+        embedded = instance.embedder.embed_text.return_value
+        assert (
+            mock_snap.add.call_args.kwargs["cumulative_summary_vector_id"]
+            != embedded.vector_id
+        )
+
+    def test_id_fits_signed_64_bit(self, snapshotting):
+        instance, _, _, mock_snap = snapshotting
+        for seq in range(10, 200, 10):
+            instance.take_snapshot(seq)
+        for call_ in mock_snap.add.call_args_list:
+            vid = call_.kwargs["cumulative_summary_vector_id"]
+            assert 0 <= vid <= 2**63 - 1
+
+    def test_id_is_deterministic_for_a_fixed_timestamp(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        make_id = instance._ConversationSummary__cumulative_vector_id
+        stamp = "2026-08-23T05:51:05.280183+00:00"
+        assert make_id("same summary", stamp) == make_id("same summary", stamp)
+
+    def test_different_timestamps_diverge(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        make_id = instance._ConversationSummary__cumulative_vector_id
+        assert make_id("s", "2026-08-23T05:51:05.280183+00:00") != make_id(
+            "s", "2026-08-23T05:51:05.940217+00:00"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.34 — batch splitter must always make forward progress
+# ---------------------------------------------------------------------------
+
+class TestSplitterTermination:
+    def _split(self, cs_instance, text, max_chars, overlap):
+        return cs_instance._ConversationSummary__split_into_batches(
+            text, max_chars, overlap
+        )
+
+    @pytest.mark.parametrize("max_chars,overlap", [
+        (200, 200),   # equal — cursor never advances
+        (100, 200),   # overlap larger — cursor moves backwards
+        (1, 200),     # degenerate budget
+        (1, 1),
+        (50, 10_000),
+    ])
+    def test_terminates_when_overlap_meets_or_exceeds_batch(self, cs, max_chars, overlap):
+        """
+        Bug 4.34: start = end - overlap_chars stopped advancing (or reversed)
+        whenever overlap >= max_chars, appending a batch every pass. It hung and
+        consumed memory instead of raising, so nothing upstream could catch it.
+        """
+        instance, _, _ = cs
+        batches = self._split(instance, "x" * 5000, max_chars, overlap)
+        assert len(batches) < 20_000
+        assert "".join(b[:1] for b in batches)  # non-empty batches
+
+    @pytest.mark.parametrize("max_chars,overlap", [(100, 200), (1000, 200), (100, 0)])
+    def test_batches_cover_the_text_with_no_gaps(self, cs, max_chars, overlap):
+        """Clamping the overlap must not start dropping characters instead."""
+        instance, _, _ = cs
+        # Non-repeating: cyclic text would let find() match a batch at several
+        # positions and the walk below would follow the wrong one.
+        rng = random.Random(20260823)
+        alphabet = string.ascii_letters + string.digits
+        text = "".join(rng.choice(alphabet) for _ in range(3000))
+        batches = self._split(instance, text, max_chars, overlap)
+
+        assert text.startswith(batches[0])
+        assert text.endswith(batches[-1])
+
+        # Walk the batches through the text: each must begin at or before the
+        # previous one ended, otherwise characters between them were skipped.
+        position = 0
+        for batch in batches:
+            index = text.find(batch, max(0, position - len(batch)))
+            assert index != -1 and index <= position, "gap between batches"
+            position = index + len(batch)
+        assert position == len(text), "tail of the text was never emitted"
+
+    def test_normal_overlap_is_left_alone(self, cs):
+        instance, _, _ = cs
+        batches = self._split(instance, "x" * 5000, 1000, 200)
+        assert len(batches) == 6
+
+    def test_short_text_returns_one_batch(self, cs):
+        instance, _, _ = cs
+        assert self._split(instance, "short", 1000, 200) == ["short"]
+
+    def test_zero_max_chars_does_not_hang(self, cs):
+        instance, _, _ = cs
+        assert len(self._split(instance, "x" * 500, 0, 0)) < 10_000
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.35 — the injected draft window must actually be used
+# ---------------------------------------------------------------------------
+
+class TestDraftWindowIsHonoured:
+    def test_token_budget_uses_the_injected_window(self, tmp_path):
+        """
+        Both call sites previously read Config.DRAFT_MODEL_CONTEXT_WINDOW, so
+        the constructor parameter was inert.
+        """
+        with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
+            mock_fc = MockFC.return_value
+            mock_mr = MockMR.return_value
+            mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
+            instance = ConversationSummary(
+                full_conversation_dir=tmp_path,
+                project_id=_PROJ_ID,
+                project_name=_PROJ_NAME,
+                main_model_context_window_length=_WINDOW,
+                draft_model_context_window_length=4096,
+            )
+
+        captured = {}
+        model = MagicMock()
+        model.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "s"}}]
+        }
+        original = instance._ConversationSummary__split_into_batches
+
+        def spy(text, max_chars, overlap):
+            captured["max_chars"] = max_chars
+            return original(text, max_chars, overlap)
+
+        with patch.object(instance, "_ConversationSummary__load_model", lambda: model), \
+             patch.object(instance, "_ConversationSummary__unload_model", lambda m: None), \
+             patch.object(instance, "_ConversationSummary__split_into_batches", spy):
+            instance._ConversationSummary__generate_summary(None, "some conversation")
+
+        # (4096 - 200 - 512) * 4
+        assert captured["max_chars"] == (4096 - 200 - 512) * 4
+
+    def test_model_is_loaded_with_the_injected_window(self, tmp_path):
+        with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
+            mock_fc = MockFC.return_value
+            mock_mr = MockMR.return_value
+            mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
+            instance = ConversationSummary(
+                full_conversation_dir=tmp_path,
+                project_id=_PROJ_ID,
+                project_name=_PROJ_NAME,
+                main_model_context_window_length=_WINDOW,
+                draft_model_context_window_length=8192,
+            )
+
+        import llama_cpp
+
+        model_file = Path(str(tmp_path)) / "m.gguf"
+        model_file.write_text("stub")
+        with patch(f"{_MOD}.Config") as MockConfig, patch.object(
+            llama_cpp, "Llama"
+        ) as MockLlama:
+            MockConfig.DRAFT_MODEL_PATH = str(tmp_path)
+            MockConfig.DRAFT_MODEL_FILE = "m.gguf"
+            instance._ConversationSummary__load_model()
+        assert MockLlama.call_args.kwargs["n_ctx"] == 8192
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.39 — the model must be released even if batching fails
+# ---------------------------------------------------------------------------
+
+class TestModelIsAlwaysReleased:
+    def test_model_unloaded_when_batching_raises(self, cs):
+        instance, _, _ = cs
+        unloaded = []
+        model = MagicMock()
+        with patch.object(instance, "_ConversationSummary__load_model", lambda: model), \
+             patch.object(instance, "_ConversationSummary__unload_model",
+                          lambda m: unloaded.append(m)), \
+             patch.object(instance, "_ConversationSummary__split_into_batches",
+                          MagicMock(side_effect=ValueError("splitter blew up"))):
+            with pytest.raises(ValueError, match="splitter blew up"):
+                instance._ConversationSummary__generate_summary(None, "text")
+        assert unloaded == [model], "model leaked when batch splitting failed"
+
+    def test_model_unloaded_when_inference_raises(self, cs):
+        instance, _, _ = cs
+        unloaded = []
+        model = MagicMock()
+        model.create_chat_completion.side_effect = RuntimeError("inference failed")
+        with patch.object(instance, "_ConversationSummary__load_model", lambda: model), \
+             patch.object(instance, "_ConversationSummary__unload_model",
+                          lambda m: unloaded.append(m)):
+            with pytest.raises(RuntimeError):
+                instance._ConversationSummary__generate_summary(None, "text")
+        assert unloaded == [model]
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.40 — one metadata repository, explicitly closed
+# ---------------------------------------------------------------------------
+
+class TestRepositorySharing:
+    def test_snapshot_reuses_the_summarisers_repository(self, tmp_path):
+        with patch(_FULL_CONV), patch(_META_REPO) as MockMR:
+            MockMR.return_value.get_cumulative_vector_meta_data_ids.return_value = []
+            instance = _make_cs(tmp_path, None, None)
+        assert instance.snap_shot.meta_repo is instance.summary_repo
+        assert MockMR.call_count == 1, "a second repository was opened on the same file"
+
+    def test_close_releases_the_connection(self, tmp_path):
+        with patch(_FULL_CONV), patch(_META_REPO) as MockMR:
+            instance = _make_cs(tmp_path, None, None)
+            instance.close()
+        MockMR.return_value.close.assert_called_once()
+
+    def test_snapshot_does_not_close_a_borrowed_repository(self, tmp_path):
+        """Closing a repo it did not open would pull it out from under the owner."""
+        with patch(_FULL_CONV), patch(_META_REPO) as MockMR:
+            instance = _make_cs(tmp_path, None, None)
+            instance.snap_shot.close()
+        MockMR.return_value.close.assert_not_called()

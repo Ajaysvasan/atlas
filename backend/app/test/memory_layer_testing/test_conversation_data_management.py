@@ -136,10 +136,25 @@ class TestSummaryChunks:
         repo.batch_insert_summary_chunks([])
         assert _row_count(repo.db_path, "summary_chunks") == 0
 
-    def test_duplicate_chunk_id_raises(self, repo):
+    def test_duplicate_chunk_id_is_ignored(self, repo):
+        """
+        Idempotent by design: this table is shared with FullConversationRepository
+        in the same DB file, so the chunks a snapshot covers are already present.
+        Raising here aborted every snapshot taken over stored turns.
+        """
         repo.batch_insert_summary_chunks([("dup", "text", "2026-01-01", "t")])
-        with pytest.raises(sqlite3.IntegrityError):
-            repo.batch_insert_summary_chunks([("dup", "text2", "2026-01-02", "t")])
+        repo.batch_insert_summary_chunks([("dup", "text2", "2026-01-02", "t")])
+        assert _row_count(repo.db_path, "summary_chunks") == 1
+
+    def test_duplicate_insert_preserves_the_original_row(self, repo):
+        """IGNORE, not REPLACE — the stored turn is authoritative."""
+        repo.batch_insert_summary_chunks([("dup", "original", "2026-01-01", "t")])
+        repo.batch_insert_summary_chunks([("dup", "overwritten", "2026-01-02", "t")])
+        with sqlite3.connect(repo.db_path) as conn:
+            row = conn.execute(
+                "SELECT chunk, created_at FROM summary_chunks WHERE chunk_id='dup'"
+            ).fetchone()
+        assert row == ("original", "2026-01-01")
 
     def test_unicode_text_roundtrip(self, repo):
         text = "rocket: \U0001f680, earth: \U0001f30d"
@@ -172,17 +187,24 @@ class TestSummaryChunks:
             ).fetchone()
         assert row == ("cX", "hello world", "2026-09-01", "recursive")
 
-    def test_rollback_on_partial_duplicate(self, repo):
-        """A batch with a mid-batch duplicate must roll back the entire batch."""
+    def test_partial_duplicate_still_inserts_the_new_rows(self, repo):
+        """
+        A snapshot window overlaps the previous one by design, so a batch is
+        normally part-old part-new. The duplicate must be skipped without
+        taking the genuinely new rows down with it.
+        """
         repo.batch_insert_summary_chunks([("existing", "t", "2026-01-01", "x")])
-        initial = _row_count(repo.db_path, "summary_chunks")
-        with pytest.raises(sqlite3.IntegrityError):
-            repo.batch_insert_summary_chunks([
-                ("new1", "t", "2026-01-01", "x"),
-                ("existing", "t2", "2026-01-02", "x"),  # duplicate
-                ("new2", "t", "2026-01-01", "x"),
-            ])
-        assert _row_count(repo.db_path, "summary_chunks") == initial
+        repo.batch_insert_summary_chunks([
+            ("new1", "t", "2026-01-01", "x"),
+            ("existing", "t2", "2026-01-02", "x"),  # already stored
+            ("new2", "t", "2026-01-01", "x"),
+        ])
+        assert _row_count(repo.db_path, "summary_chunks") == 3
+        with sqlite3.connect(repo.db_path) as conn:
+            ids = {
+                r[0] for r in conn.execute("SELECT chunk_id FROM summary_chunks")
+            }
+        assert ids == {"existing", "new1", "new2"}
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +280,47 @@ class TestCumulativeVectorMetaData:
 class TestGetLatestSummary:
     def test_returns_none_on_empty_table(self, repo):
         assert repo.get_latest_summary() is None
+
+    def test_sub_second_timestamps_are_ordered(self, repo):
+        """
+        SQLite datetime() truncates to whole seconds. Two snapshots taken in the
+        same second tie under datetime() alone, making "latest" arbitrary — the
+        rolling summary would then feed the wrong predecessor into the next
+        prompt. The raw TEXT tiebreaker recovers the microseconds.
+        """
+        repo.insert_cumulative_vector_meta_data(
+            1, "first", "2026-08-23T05:51:05.280183+00:00", "p", 5
+        )
+        repo.insert_cumulative_vector_meta_data(
+            2, "second", "2026-08-23T05:51:05.940217+00:00", "p", 6
+        )
+        assert repo.get_latest_summary() == "second"
+
+    def test_sub_second_ordering_independent_of_insert_order(self, repo):
+        """The later timestamp wins even when it is inserted first."""
+        repo.insert_cumulative_vector_meta_data(
+            1, "second", "2026-08-23T05:51:05.940217+00:00", "p", 6
+        )
+        repo.insert_cumulative_vector_meta_data(
+            2, "first", "2026-08-23T05:51:05.280183+00:00", "p", 5
+        )
+        assert repo.get_latest_summary() == "second"
+
+    def test_snapshot_ids_ordered_by_sub_second_timestamp(self, repo):
+        """
+        SnapShot's cursors index into this list, so an unstable order silently
+        points them at the wrong snapshots.
+        """
+        repo.insert_cumulative_vector_meta_data(
+            30, "c", "2026-08-23T05:51:05.900000+00:00", "p", 1
+        )
+        repo.insert_cumulative_vector_meta_data(
+            10, "a", "2026-08-23T05:51:05.100000+00:00", "p", 1
+        )
+        repo.insert_cumulative_vector_meta_data(
+            20, "b", "2026-08-23T05:51:05.500000+00:00", "p", 1
+        )
+        assert repo.get_cumulative_vector_meta_data_ids() == [(10,), (20,), (30,)]
 
     def test_returns_summary_text_after_single_insert(self, repo):
         repo.insert_cumulative_vector_meta_data(1, "first summary", "2026-08-01", PROJECT_ID, 10)

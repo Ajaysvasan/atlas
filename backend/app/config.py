@@ -34,6 +34,15 @@ class Config:
     NUM_THREADS = 4
     K_NEIGHBORS = 9
 
+    # How many conversation turns the summariser feeds the draft model in one
+    # window. Measured in turns, not tokens: the window is addressed by
+    # sequence_number, and _WINDOW_OVERLAP_CHUNKS extends it further back.
+    MAIN_MODEL_CONTEXT_WINDOW_TURNS = 100
+
+    # Unsummarised turns that must accumulate before ConversationPoolManager
+    # takes a snapshot on its own.
+    SNAPSHOT_EVERY_N_TURNS = 20
+
     PROJECT = Path("")
 
     CONVERSATION = Path(
@@ -48,6 +57,11 @@ class Config:
         )
     )
     VECTOR_DIMENSIONS = 128
+
+    # Vector ids are stored in signed 64-bit columns (SQLite INTEGER, Postgres
+    # bigint). Hash-derived ids are unsigned and overflow both for roughly half
+    # of all inputs, so they are masked into the non-negative signed range.
+    VECTOR_ID_MASK = (1 << 63) - 1
 
 
 config = Config()

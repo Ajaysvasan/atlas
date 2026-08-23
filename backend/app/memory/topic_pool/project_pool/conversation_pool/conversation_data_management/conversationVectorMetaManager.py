@@ -65,11 +65,18 @@ class ConversationVectorMetaDataRepository:
         self.conn.commit()
 
     def batch_insert_summary_chunks(self, records: List[Tuple[str, str, str, str]]):
-        """records: [(chunk_id, chunk, created_at, chunker_type), ...]"""
+        """records: [(chunk_id, chunk, created_at, chunker_type), ...]
+
+        Idempotent. This repository shares its database file — and this table —
+        with FullConversationRepository, so the chunks a snapshot covers are
+        normally already present, written by append_turn(). Re-inserting them
+        raised UNIQUE constraint failed and aborted every snapshot taken over
+        stored turns; the existing rows are already correct, so ignore the clash.
+        """
         cursor = self.conn.cursor()
         try:
             cursor.executemany(
-                "INSERT INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
                 records,
             )
             self.conn.commit()
@@ -80,12 +87,17 @@ class ConversationVectorMetaDataRepository:
     def batch_insert_summary_vector_meta_data(
         self, records: List[Tuple[int, str, str]]
     ):
-        """records: [(summary_vector_id, chunk_id, project_id), ...]"""
+        """records: [(summary_vector_id, chunk_id, project_id), ...]
+
+        Idempotent. summary_vector_id is derived from chunk content, and
+        consecutive snapshot windows overlap by design, so the same chunk
+        legitimately reappears in a later snapshot with the same id.
+        """
         new_records = [(int(r[0]), r[1], r[2]) for r in records]
         cursor = self.conn.cursor()
         try:
             cursor.executemany(
-                "INSERT INTO summary_vector_meta_data (summary_vector_id, chunk_id, project_id) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO summary_vector_meta_data (summary_vector_id, chunk_id, project_id) VALUES (?, ?, ?)",
                 new_records,
             )
             self.conn.commit()
@@ -157,8 +169,14 @@ class ConversationVectorMetaDataRepository:
 
     def get_cumulative_vector_meta_data_ids(self):
         cursor = self.conn.cursor()
+        # datetime() truncates to whole seconds, so snapshots taken in the same
+        # second tie and their order becomes arbitrary — which matters because
+        # SnapShot's cursors index into this list. The raw TEXT tiebreaker
+        # recovers sub-second precision from the ISO-8601 timestamps we write,
+        # while datetime() stays the primary key for robustness to older rows
+        # stored in looser formats.
         cursor.execute(
-            "SELECT cumulative_vector_id FROM cumulative_vector_meta_data ORDER BY datetime(created_at);",
+            "SELECT cumulative_vector_id FROM cumulative_vector_meta_data ORDER BY datetime(created_at), created_at;",
         )
         return cursor.fetchall()
 
@@ -172,10 +190,13 @@ class ConversationVectorMetaDataRepository:
 
     def get_latest_summary(self) -> str | None:
         cursor = self.conn.cursor()
+        # See get_cumulative_vector_meta_data_ids: datetime() alone truncates to
+        # seconds, so two snapshots in the same second would make "latest"
+        # arbitrary and the rolling summary could pick up the wrong predecessor.
         cursor.execute("""
         SELECT cumulative_summary
         FROM cumulative_vector_meta_data
-        ORDER BY datetime(created_at) DESC
+        ORDER BY datetime(created_at) DESC, created_at DESC
         LIMIT 1
         """)
         row = cursor.fetchone()
@@ -207,20 +228,102 @@ class ConversationVectorMetaDataRepository:
             raise e
 
     def batch_insert_map_table(self, records: List[Tuple[int, int]]):
-        """records: [(cumulative_vector_id, summary_vector_id), ...]"""
+        """records: [(cumulative_vector_id, summary_vector_id), ...]
+
+        Idempotent against the UNIQUE (cumulative_vector_id, summary_vector_id)
+        constraint, so re-mapping an overlapping chunk is a no-op.
+        """
         new_records = []
         for i in range(len(records)):
             new_records.append((int(records[i][0]), int(records[i][1])))
         cursor = self.conn.cursor()
         try:
             cursor.executemany(
-                "INSERT INTO summary_snapshot_map (cumulative_vector_id, summary_vector_id) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO summary_snapshot_map (cumulative_vector_id, summary_vector_id) VALUES (?, ?)",
                 new_records,
             )
             self.conn.commit()
         except sqlite3.Error as e:
             self.conn.rollback()
             raise e
+
+    def insert_snapshot(
+        self,
+        chunks: List[Tuple[str, str, str, str]],
+        cumulative_row: Tuple[int, str, str, str, int],
+        summary_vector_rows: List[Tuple[int, str, str]],
+        map_rows: List[Tuple[int, int]],
+    ):
+        """Write one complete snapshot in a single transaction.
+
+        The four inserts used to be separate public calls, each committing on
+        its own. A failure partway through left a snapshot that half-existed —
+        chunks and vector metadata committed with no cumulative row to reach
+        them by — and every retry added more orphans. Batched here, the whole
+        snapshot lands or none of it does.
+
+        Ordering matters within the transaction: summary_chunks is the FK parent
+        of summary_vector_meta_data, which is in turn referenced by
+        summary_snapshot_map along with cumulative_vector_meta_data.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(
+                "INSERT OR IGNORE INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
+                chunks,
+            )
+            cursor.execute(
+                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?)",
+                (
+                    int(cumulative_row[0]),
+                    cumulative_row[1],
+                    cumulative_row[2],
+                    cumulative_row[3],
+                    int(cumulative_row[4]),
+                ),
+            )
+            cursor.executemany(
+                "INSERT OR IGNORE INTO summary_vector_meta_data (summary_vector_id, chunk_id, project_id) VALUES (?, ?, ?)",
+                [(int(r[0]), r[1], r[2]) for r in summary_vector_rows],
+            )
+            cursor.executemany(
+                "INSERT OR IGNORE INTO summary_snapshot_map (cumulative_vector_id, summary_vector_id) VALUES (?, ?)",
+                [(int(r[0]), int(r[1])) for r in map_rows],
+            )
+            self.conn.commit()
+        except sqlite3.Error:
+            self.conn.rollback()
+            raise
+
+    def get_highest_summarised_sequence(self) -> int | None:
+        """Highest conversation sequence_number any snapshot has covered.
+
+        No column records a snapshot's range, but summary_vector_meta_data holds
+        one row per covered chunk and full_conversation lives in this same
+        database file, so the watermark is a single join. Returns None when
+        nothing has been summarised yet.
+
+        The table check keeps this usable when the metadata repository is
+        constructed on its own, before any conversation rows exist.
+        """
+        cursor = self.conn.cursor()
+        has_conversation = cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='full_conversation'"
+        ).fetchone()
+        if has_conversation is None:
+            return None
+
+        cursor.execute(
+            """
+            SELECT MAX(f.sequence_number)
+            FROM summary_vector_meta_data AS s
+            JOIN full_conversation AS f ON f.chunk_id = s.chunk_id
+            WHERE s.project_id = ?
+            """,
+            (self.project_id,),
+        )
+        row = cursor.fetchone()
+        return row[0] if row is not None and row[0] is not None else None
 
     def get_summary_vector_ids_from_map(self, cumulative_vector_id: int) -> List[int]:
         cursor = self.conn.cursor()
@@ -231,7 +334,13 @@ class ConversationVectorMetaDataRepository:
         return [row[0] for row in cursor.fetchall()]
 
     def close(self):
-        self.conn.close()
+        # getattr, not self.conn: if sqlite3.connect failed inside _init_db the
+        # attribute never existed, and __del__ would then raise AttributeError
+        # and bury the real construction error under "Exception ignored in".
+        # Safe to call more than once — the repository may be shared.
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            conn.close()
 
     def __del__(self):
         self.close()

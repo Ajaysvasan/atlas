@@ -1,5 +1,4 @@
-import hashlib
-from typing import List, Union
+from typing import List
 
 import numpy as np
 from numpy import uint32
@@ -28,6 +27,13 @@ class ConversationVectorManager:
         """
         self.repository.batch_insert(vector_ids, vectors)
         return vector_ids
+
+    def batch_delete(self, vector_ids: List[np.uint32]) -> None:
+        """
+        Removes vectors from the repository. Used to undo a partially written
+        snapshot when its metadata transaction fails.
+        """
+        self.repository.batch_delete(vector_ids)
 
     def get_vector(self, vector_id: uint32) -> np.ndarray:
         """

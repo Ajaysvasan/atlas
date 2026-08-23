@@ -1,22 +1,24 @@
 """
 Production-grade tests for FullConversationRepository and FullConversation.
 
-Known bugs in current code (P2 — not yet fixed):
-  Bug 4.30: __get_last_n_chunks uses ORDER BY f.created_at ASC LIMIT n, returning
-            the OLDEST n rows instead of the most recent n. Tests that call
-            get_n_chunks document current behaviour and are marked accordingly.
-  Bug 4.31: __get_ranged_chunks and __get_messages_after order by f.created_at
-            instead of f.sequence_number. In tests using a uniform created_at
-            timestamp the order is deterministic (SQLite rowid order equals
-            insertion order), so ordering assertions still pass incidentally.
-
 Regression guards for fixed bugs are annotated with their bug ID.
+
+Note on the ordering guards (Bugs 4.30 / 4.31): created_at is a caller-supplied
+TEXT column with no format enforcement, so it is not a reliable sort key. The
+guards below deliberately insert rows whose created_at order CONTRADICTS their
+sequence_number order — under the old `ORDER BY f.created_at` queries those
+tests fail, which is what makes them real guards rather than incidental passes.
 """
 
+import hashlib
 import sqlite3
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+from memory.memory_pool_exceptions import EmptyTurnContent, InvalidRole
 
 from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
@@ -104,6 +106,169 @@ class TestSchema:
             ).fetchall()]
         assert tables.count("summary_chunks") == 1
         assert tables.count("full_conversation") == 1
+
+
+# ---------------------------------------------------------------------------
+# Foreign key enforcement on the write path
+#
+# full_conversation.chunk_id references summary_chunks.chunk_id. The PRAGMA in
+# __init_db applies only to that connection, so the write connection has to set
+# it too — otherwise an orphan meta row is accepted, every reader's JOIN drops
+# it, and its sequence_number is consumed for good.
+# ---------------------------------------------------------------------------
+
+class TestForeignKeyEnforcement:
+    def test_orphan_meta_row_rejected(self, repo):
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add([_make_meta(PROJECT_ID, 1, "GHOST")], [])
+
+    def test_orphan_insert_leaves_no_rows_behind(self, repo, tmp_path):
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add([_make_meta(PROJECT_ID, 1, "GHOST")], [])
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM full_conversation"
+            ).fetchone()[0]
+        assert count == 0
+
+    def test_orphan_insert_does_not_consume_a_sequence_number(self, repo):
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add([_make_meta(PROJECT_ID, 1, "GHOST")], [])
+        assert repo.next_sequence_number() == 1
+
+    def test_chunks_are_inserted_before_meta_rows(self, repo):
+        """A valid pair must succeed despite the FK dependency ordering."""
+        repo.add([_make_meta(PROJECT_ID, 1, "c1")], [_make_chunk("c1", "hi")])
+        assert [r[0] for r in repo.fetch_all()] == ["hi"]
+
+
+# ---------------------------------------------------------------------------
+# next_sequence_number
+# ---------------------------------------------------------------------------
+
+class TestNextSequenceNumber:
+    def test_empty_db_starts_at_one(self, repo):
+        assert repo.next_sequence_number() == 1
+
+    def test_advances_past_highest_existing(self, repo):
+        repo.add([_make_meta(PROJECT_ID, 1, "c1")], [_make_chunk("c1", "a")])
+        assert repo.next_sequence_number() == 2
+
+    def test_accounts_for_gaps(self, repo):
+        """Allocation follows MAX(), so a gap must never be re-issued."""
+        repo.add([_make_meta(PROJECT_ID, 50, "c50")], [_make_chunk("c50", "a")])
+        assert repo.next_sequence_number() == 51
+
+
+# ---------------------------------------------------------------------------
+# append_turns (repository level)
+# ---------------------------------------------------------------------------
+
+class TestAppendTurns:
+    def test_returns_allocated_sequence_numbers(self, repo):
+        assert repo.append_turns([("user", "a"), ("assistant", "b")]) == [1, 2]
+
+    def test_sequences_continue_across_calls(self, repo):
+        repo.append_turns([("user", "a")])
+        assert repo.append_turns([("assistant", "b")]) == [2]
+
+    def test_empty_list_is_a_noop(self, repo):
+        assert repo.append_turns([]) == []
+        assert repo.get_size() == 0
+
+    def test_rows_are_readable_in_order(self, repo):
+        repo.append_turns([("user", "one"), ("assistant", "two"), ("user", "three")])
+        assert [r[0] for r in repo.fetch_all()] == ["one", "two", "three"]
+
+    def test_repeated_text_does_not_collide_on_chunk_id(self, repo):
+        """
+        chunk_id is a PRIMARY KEY. Hashing content alone would abort the batch
+        the second time a speaker says "ok"; the id binds sequence_number too.
+        """
+        repo.append_turns([("user", "ok"), ("assistant", "ok"), ("user", "ok")])
+        assert [r[0] for r in repo.fetch_all()] == ["ok", "ok", "ok"]
+
+    def test_repeated_text_across_separate_calls(self, repo):
+        repo.append_turns([("user", "ok")])
+        repo.append_turns([("user", "ok")])
+        assert repo.get_size() == 2
+
+    def test_role_is_persisted(self, repo, tmp_path):
+        repo.append_turns([("user", "a"), ("assistant", "b")])
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            roles = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT role FROM full_conversation ORDER BY sequence_number"
+                )
+            ]
+        assert roles == ["user", "assistant"]
+
+    def test_chunker_type_marks_whole_turns(self, repo, tmp_path):
+        """One turn -> one chunk; chunker_type records that provenance."""
+        repo.append_turns([("user", "a")])
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            types = conn.execute(
+                "SELECT DISTINCT chunker_type FROM summary_chunks"
+            ).fetchall()
+        assert types == [("turn",)]
+
+    def test_created_at_is_iso_utc(self, repo, tmp_path):
+        """Bug 4.31 class fix: the repository stamps time, not the caller."""
+        repo.append_turns([("user", "a")])
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            stamp = conn.execute("SELECT created_at FROM summary_chunks").fetchone()[0]
+        parsed = datetime.fromisoformat(stamp)
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timedelta(0)
+
+    def test_chunk_id_is_deterministic(self, repo, tmp_path):
+        """Same project, sequence and text must reproduce the same id."""
+        repo.append_turns([("user", "hello")])
+        expected = hashlib.sha256(
+            f"{PROJECT_ID}\x00{1}\x00hello".encode("utf-8")
+        ).hexdigest()
+        assert repo.get_sequence_number(expected) == 1
+
+    def test_concurrent_appends_allocate_unique_sequences(self, tmp_path):
+        """
+        BEGIN IMMEDIATE must serialise the MAX() read with the INSERT, or two
+        writers hand out the same sequence_number.
+        """
+        repo = FullConversationRepository(
+            conversation_path=tmp_path,
+            project_id=PROJECT_ID,
+            project_name=PROJECT_NAME,
+        )
+        errors = []
+
+        def worker(worker_id):
+            try:
+                for turn in range(20):
+                    repo.append_turns([("user", f"w{worker_id}-t{turn}")])
+            except Exception as exc:  # noqa: BLE001 - surfaced via assertion
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            sequences = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT sequence_number FROM full_conversation ORDER BY sequence_number"
+                )
+            ]
+        assert errors == []
+        assert sequences == list(range(1, 161))
 
 
 # ---------------------------------------------------------------------------
@@ -218,9 +383,8 @@ class TestGetSequenceNumber:
 
 # ---------------------------------------------------------------------------
 # get_n_chunks
-# Known Bug 4.30: returns OLDEST n chunks (ORDER BY created_at ASC), not newest.
-# Tests document current behaviour; when Bug 4.30 is fixed, the ordering
-# assertions in test_get_n_chunks_returns_oldest_n will need inverting.
+# Bug 4.30 (fixed): must return the most recent n by sequence_number, handed
+# back in ascending conversation order.
 # ---------------------------------------------------------------------------
 
 class TestGetNChunks:
@@ -247,22 +411,43 @@ class TestGetNChunks:
         result = repo.get_n_chunks(0)
         assert result == []
 
-    def test_get_n_chunks_returns_oldest_n_known_bug_4_30(self, repo):
-        """
-        Known Bug 4.30: get_n_chunks returns the OLDEST n entries (ascending
-        created_at + LIMIT), not the most recent n.
-        Documenting current behaviour as a regression guard.
-        All messages share the same created_at so SQLite returns them in rowid
-        (insertion) order — first n rows == oldest n.
-        """
+    def test_get_n_chunks_returns_most_recent_n(self, repo):
+        """Regression guard Bug 4.30: the newest n, not the oldest n."""
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 6)]
         chunks = [_make_chunk(f"c{i}", f"Msg {i}") for i in range(1, 6)]
         repo.add(meta, chunks)
         result = repo.get_n_chunks(2)
-        texts = [r[0] for r in result]
-        # Current (buggy) behaviour: returns first 2 inserted rows
-        assert "Msg 1" in texts
-        assert "Msg 2" in texts
+        assert [r[0] for r in result] == ["Msg 4", "Msg 5"]
+
+    def test_get_n_chunks_returns_ascending_conversation_order(self, repo):
+        """The newest n are still handed back oldest-first, ready for a prompt."""
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 11)]
+        chunks = [_make_chunk(f"c{i}", f"Msg {i}") for i in range(1, 11)]
+        repo.add(meta, chunks)
+        result = repo.get_n_chunks(3)
+        assert [r[0] for r in result] == ["Msg 8", "Msg 9", "Msg 10"]
+
+    def test_get_n_chunks_ignores_created_at_ordering(self, repo):
+        """
+        Regression guard Bug 4.30/4.31: created_at deliberately runs backwards
+        relative to sequence_number. Sorting by created_at would return the
+        sequence_number-lowest rows; only sequence_number ordering is correct.
+        """
+        meta = [
+            _make_meta(PROJECT_ID, i, f"c{i}", created_at=f"2026-08-{20 - i:02d}")
+            for i in range(1, 6)
+        ]
+        chunks = [_make_chunk(f"c{i}", f"Msg {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        result = repo.get_n_chunks(2)
+        assert [r[0] for r in result] == ["Msg 4", "Msg 5"]
+
+    def test_get_negative_n_returns_empty(self, repo):
+        """A raw LIMIT -1 means 'no limit' in SQLite — must not leak all rows."""
+        meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 6)]
+        chunks = [_make_chunk(f"c{i}", f"Msg {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        assert repo.get_n_chunks(-1) == []
 
     def test_get_n_chunks_empty_db_returns_empty(self, repo):
         assert repo.get_n_chunks(5) == []
@@ -270,8 +455,7 @@ class TestGetNChunks:
 
 # ---------------------------------------------------------------------------
 # get_ranged_chunks
-# Note (Bug 4.31): ordered by f.created_at instead of f.sequence_number.
-# Tests use a uniform created_at so SQLite insertion order is deterministic.
+# Bug 4.31 (fixed): must order by f.sequence_number, not f.created_at.
 # ---------------------------------------------------------------------------
 
 class TestGetRangedChunks:
@@ -316,10 +500,43 @@ class TestGetRangedChunks:
         result = filled_repo.get_ranged_chunks(5, 1)
         assert result == []
 
+    def test_range_ordered_by_sequence_number(self, filled_repo):
+        """Uniform timestamps: results must still come back in sequence order."""
+        result = filled_repo.get_ranged_chunks(1, 5)
+        assert [r[0] for r in result] == [f"Text {i}" for i in range(1, 6)]
+
+    def test_range_ignores_created_at_ordering(self, repo):
+        """
+        Regression guard Bug 4.31: created_at runs backwards relative to
+        sequence_number. `ORDER BY f.created_at` would reverse the result.
+        """
+        meta = [
+            _make_meta(PROJECT_ID, i, f"c{i}", created_at=f"2026-08-{20 - i:02d}")
+            for i in range(1, 6)
+        ]
+        chunks = [_make_chunk(f"c{i}", f"Text {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        result = repo.get_ranged_chunks(1, 5)
+        assert [r[0] for r in result] == [f"Text {i}" for i in range(1, 6)]
+
+    def test_range_ordered_when_timestamps_identical(self, repo):
+        """
+        Same-batch inserts commonly share one timestamp, which makes created_at
+        ordering non-deterministic. sequence_number always breaks the tie.
+        """
+        meta = [
+            _make_meta(PROJECT_ID, i, f"c{i}", created_at="2026-08-10T00:00:00")
+            for i in range(1, 6)
+        ]
+        chunks = [_make_chunk(f"c{i}", f"Text {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        result = repo.get_ranged_chunks(2, 5)
+        assert [r[0] for r in result] == [f"Text {i}" for i in range(2, 6)]
+
 
 # ---------------------------------------------------------------------------
 # get_sequence_after
-# Note (Bug 4.31): ordered by f.created_at — uniform timestamp keeps tests stable.
+# Bug 4.31 (fixed): must order by f.sequence_number, not f.created_at.
 # ---------------------------------------------------------------------------
 
 class TestGetSequenceAfter:
@@ -352,6 +569,24 @@ class TestGetSequenceAfter:
     def test_after_negative_sequence_returns_all(self, filled_repo):
         result = filled_repo.get_sequence_after(-1)
         assert len(result) == 5
+
+    def test_after_ordered_by_sequence_number(self, filled_repo):
+        result = filled_repo.get_sequence_after(0)
+        assert [r[0] for r in result] == [f"Text {i}" for i in range(1, 6)]
+
+    def test_after_ignores_created_at_ordering(self, repo):
+        """
+        Regression guard Bug 4.31: created_at runs backwards relative to
+        sequence_number. `ORDER BY f.created_at` would reverse the result.
+        """
+        meta = [
+            _make_meta(PROJECT_ID, i, f"c{i}", created_at=f"2026-08-{20 - i:02d}")
+            for i in range(1, 6)
+        ]
+        chunks = [_make_chunk(f"c{i}", f"Text {i}") for i in range(1, 6)]
+        repo.add(meta, chunks)
+        result = repo.get_sequence_after(2)
+        assert [r[0] for r in result] == ["Text 3", "Text 4", "Text 5"]
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +736,8 @@ class TestFullConversationBucket:
         bucket.append_chunks(meta, chunks)
         result = bucket.get_last_n_chunks(3)
         assert len(result) == 3
+        # Bug 4.30: the bucket must surface the newest turns, oldest-first.
+        assert [r[0] for r in result] == ["msg 3", "msg 4", "msg 5"]
 
     def test_get_context_range(self, bucket):
         meta = [_make_meta("proj_bucket", i, f"c{i}") for i in range(1, 6)]
@@ -538,6 +775,77 @@ class TestFullConversationBucket:
 
     def test_empty_bucket_size_is_zero(self, bucket):
         assert bucket.size() == 0
+
+    # -- append_turn / append_turns -------------------------------------------
+
+    def test_append_turn_returns_sequence_number(self, bucket):
+        assert bucket.append_turn("user", "hello") == 1
+        assert bucket.append_turn("assistant", "hi") == 2
+
+    def test_append_turn_is_readable(self, bucket):
+        bucket.append_turn("user", "What is DiskANN?")
+        bucket.append_turn("assistant", "A graph index.")
+        assert [r[0] for r in bucket.get_full_conversation()] == [
+            "What is DiskANN?",
+            "A graph index.",
+        ]
+
+    def test_append_turns_batch(self, bucket):
+        assert bucket.append_turns([("user", "a"), ("assistant", "b")]) == [1, 2]
+
+    def test_next_sequence_number_tracks_appends(self, bucket):
+        assert bucket.next_sequence_number() == 1
+        bucket.append_turn("user", "a")
+        assert bucket.next_sequence_number() == 2
+
+    def test_system_role_accepted(self, bucket):
+        assert bucket.append_turn("system", "You are helpful.") == 1
+
+    def test_role_is_normalised(self, bucket):
+        """Case and surrounding whitespace should not create a new role."""
+        bucket.append_turn("  USER  ", "a")
+        assert bucket.size() == 1
+
+    @pytest.mark.parametrize("bad_role", ["assistent", "bot", "", "   ", None, 7])
+    def test_invalid_role_rejected(self, bucket, bad_role):
+        with pytest.raises(InvalidRole):
+            bucket.append_turn(bad_role, "text")
+
+    @pytest.mark.parametrize("bad_text", ["", "   ", "\n\t", None, 42])
+    def test_empty_or_non_string_text_rejected(self, bucket, bad_text):
+        with pytest.raises(EmptyTurnContent):
+            bucket.append_turn("user", bad_text)
+
+    def test_rejected_turn_writes_nothing(self, bucket):
+        with pytest.raises(InvalidRole):
+            bucket.append_turn("bogus", "text")
+        assert bucket.size() == 0
+        assert bucket.next_sequence_number() == 1
+
+    def test_batch_is_all_or_nothing(self, bucket):
+        """
+        Validation runs over the whole batch before any write, so a bad role at
+        the end cannot leave the earlier turns committed.
+        """
+        bucket.append_turn("user", "existing")
+        with pytest.raises(InvalidRole):
+            bucket.append_turns([("user", "good"), ("bogus", "bad")])
+        assert [r[0] for r in bucket.get_full_conversation()] == ["existing"]
+
+    def test_append_turns_empty_batch(self, bucket):
+        assert bucket.append_turns([]) == []
+        assert bucket.size() == 0
+
+    def test_get_last_n_after_append_turns(self, bucket):
+        """The write path and the Bug 4.30 read path must agree."""
+        for i in range(1, 6):
+            bucket.append_turn("user", f"msg {i}")
+        assert [r[0] for r in bucket.get_last_n_chunks(2)] == ["msg 4", "msg 5"]
+
+    def test_get_context_after_append_turns(self, bucket):
+        for i in range(1, 6):
+            bucket.append_turn("user", f"msg {i}")
+        assert [r[0] for r in bucket.get_context(2, 4)] == ["msg 2", "msg 3", "msg 4"]
 
     def test_get_context_empty_range_returns_empty(self, bucket):
         meta = [_make_meta("proj_bucket", i, f"c{i}") for i in range(1, 4)]

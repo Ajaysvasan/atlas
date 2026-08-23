@@ -30,3 +30,23 @@ class InvalidVectorDimension(Exception):
 
 class MisMatchCount(Exception):
     pass
+
+
+class InvalidRole(Exception):
+    def __init__(self, role, allowed_roles) -> None:
+        self.role = role
+        self.allowed_roles = allowed_roles
+        super().__init__(self.role, self.allowed_roles)
+
+    def __str__(self) -> str:
+        allowed = ", ".join(sorted(self.allowed_roles))
+        return f"Got the role {self.role!r}. Expected one of: {allowed}"
+
+
+class EmptyTurnContent(Exception):
+    def __init__(self, role) -> None:
+        self.role = role
+        super().__init__(self.role)
+
+    def __str__(self) -> str:
+        return f"The {self.role!r} turn carries no text. A turn must have content."
