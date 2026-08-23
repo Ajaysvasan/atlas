@@ -1,0 +1,44 @@
+# Versions below are the ones this project is verified against.
+# Install:  pip install -r requirements.txt
+# Then:     python download_models/install_llama_cpp.py   (see "Local LLM" below)
+
+# --- Numerical / ML -----------------------------------------------------------
+numpy==1.25.0
+sentence-transformers==5.6.0     # all-MiniLM-L6-v2, truncated to 128 dims
+huggingface-hub==1.21.0          # download_models/download_draft_model.py
+
+# torch is left unpinned: the CUDA build is not on the default PyPI index and
+# the correct wheel depends on your driver. Verified against 2.12.1 (cu130).
+# For a specific CUDA version see https://pytorch.org/get-started/locally/
+torch>=2.6
+
+# --- Vector stores ------------------------------------------------------------
+diskannpy==0.7.0                 # data layer: on-disk ANN index
+psycopg[binary]==3.3.4           # memory layer: pgvector store (needs PostgreSQL
+                                 # with the `vector` extension; see .env)
+
+# --- Document ingestion -------------------------------------------------------
+python-docx==1.2.0               # .docx
+PyPDF2==3.0.1                    # .pdf
+textract==2.0.0                  # .doc and assorted fallbacks
+
+# --- Configuration ------------------------------------------------------------
+python-dotenv==1.2.2             # DBNAME / USER / PASSWORD / HOST / PORT
+
+# --- HTTP surface -------------------------------------------------------------
+# Declared ahead of use: no routes exist yet (see todo.md section 3).
+fastapi==0.136.3
+uvicorn==0.48.0
+
+# --- Local LLM: install separately, NOT from this file ------------------------
+# llama-cpp-python must be compiled with backend-specific CMAKE_ARGS (CUDA,
+# ROCm, Metal or CPU). Installing it as a plain requirement silently produces a
+# CPU-only build even on a GPU machine, so it is deliberately left out here.
+#
+#     python download_models/install_llama_cpp.py
+#
+# That script detects the GPU and sets the flags. Verified with 0.3.35.
+
+# --- Tests --------------------------------------------------------------------
+# PYTHONPATH=. pytest test/ -v
+pytest>=8.0

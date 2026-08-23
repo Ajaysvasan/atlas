@@ -47,4 +47,4 @@ PYTHONPATH=. pytest test/memory_layer_testing/test_snapshot_bugs.py -v
 
 - **`ModuleNotFoundError` (e.g., `No module named 'memory'`)**: This happens when Python's import paths aren't correctly resolving the root folder. Make sure you are in the `app/` directory and are prepending `PYTHONPATH=.` before calling `pytest`.
 - **`sqlite3.OperationalError: unable to open database file`**: Ensure that the `data/` directory (or wherever local DBs are initialized) exists on your filesystem.
-- **`ModuleNotFoundError: No module named 'psycopg'`**: Tests may try to connect to the external PostgreSQL database. The memory tests mock this internally, but if it fails, ensure dependencies in `.env` and `requirements.txt` are fulfilled.
+- **`ModuleNotFoundError: No module named 'psycopg'`**: Tests may try to connect to the external PostgreSQL database. The memory tests mock this internally, but if it fails, ensure dependencies in `requirements.txt` are installed and `.env` is populated.
