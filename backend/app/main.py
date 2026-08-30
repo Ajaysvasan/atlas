@@ -5,8 +5,8 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import Config, get_logger
 from cli.cli_interface import cli_interface
+from config import Config, get_logger
 
 logger = get_logger("backend_main")
 

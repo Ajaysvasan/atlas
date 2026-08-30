@@ -1,6 +1,6 @@
 """
 
-vector data
+vector data table
 vector_id
 vector
 
@@ -19,6 +19,7 @@ from config import Config
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
     InvalidBatchSize,
     InvalidVectorDimension,
+    MissingDatabaseConfiguration,
     VectorInsertionError,
     VectorNotFoundEror,
 )
@@ -29,10 +30,34 @@ class VectorRepository:
         self.project_id = project_id
         load_dotenv()
         self.__db_name = os.getenv("DBNAME")
-        self.__user = os.getenv("USER")
+        # DB_USER, not USER: every login shell on Linux and macOS exports USER,
+        # and load_dotenv() does not override a variable already in the
+        # environment — so the USER= line in .env was ignored and the connection
+        # was made as whoever happened to run the process. It only looked
+        # correct because that name matched a real Postgres role.
+        self.__user = os.getenv("DB_USER")
         self.__password = os.getenv("PASSWORD")
         self.__host = os.getenv("HOST")
         self.__port = os.getenv("PORT")
+
+        # psycopg substitutes libpq's defaults for anything passed as None —
+        # the OS username among them — which is the same silent misconnection
+        # the rename above exists to prevent. Fail here instead, where the
+        # missing setting is named, rather than at a confusing "role does not
+        # exist" from the server.
+        missing = [
+            name
+            for name, value in (
+                ("DBNAME", self.__db_name),
+                ("DB_USER", self.__user),
+                ("PASSWORD", self.__password),
+                ("HOST", self.__host),
+                ("PORT", self.__port),
+            )
+            if value is None
+        ]
+        if missing:
+            raise MissingDatabaseConfiguration(missing)
 
         self.conn = psycopg.connect(
             dbname=self.__db_name,
@@ -80,10 +105,32 @@ class VectorRepository:
         """
         try:
             rows = [
-                (self.project_id, int(id), vector.tolist()) for id, vector in zip(vector_ids, vectors)
+                (self.project_id, int(id), vector.tolist())
+                for id, vector in zip(vector_ids, vectors)
             ]
             self.curr.executemany(query, rows)
             self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            raise VectorInsertionError(e)
+
+    def __update_vector(self, vector: ndarray, vector_id: uint32) -> None:
+        if len(vector) != Config.EMBEDDING_DIMENSIONS:
+            raise InvalidVectorDimension(len(vector), Config.EMBEDDING_DIMENSIONS)
+        query = """
+        update vectors set embedding = %s where project_id = %s and vector_id = %s;
+        """
+        try:
+            self.curr.execute(query, (vector, self.project_id, int(vector_id)))
+            # An UPDATE that matches nothing is not an error to psycopg, so an
+            # id that was never inserted would silently succeed and leave the
+            # caller believing the new embedding is stored.
+            if self.curr.rowcount == 0:
+                self.conn.rollback()
+                raise VectorNotFoundEror(vector_id)
+            self.conn.commit()
+        except VectorNotFoundEror:
+            raise
         except Exception as e:
             self.conn.rollback()
             raise VectorInsertionError(e)
@@ -120,6 +167,14 @@ class VectorRepository:
 
     def insert(self, vector_id: uint32, vector: ndarray) -> None:
         self.__insert_vector(vector, vector_id)
+
+    def update(self, vector_id: uint32, vector: ndarray) -> None:
+        """Replace an existing embedding in place.
+
+        A single statement rather than delete-then-insert: the pair is two
+        commits, and a failure between them loses the vector entirely.
+        """
+        self.__update_vector(vector, vector_id)
 
     def delete(self, vector_id: uint32) -> None:
         self.__delete_vectors([vector_id])

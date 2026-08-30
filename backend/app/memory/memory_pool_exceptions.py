@@ -50,3 +50,17 @@ class EmptyTurnContent(Exception):
 
     def __str__(self) -> str:
         return f"The {self.role!r} turn carries no text. A turn must have content."
+
+
+class InvalidVectorId(Exception):
+    def __init__(self, vector_id, max_vector_id) -> None:
+        self.vector_id = vector_id
+        self.max_vector_id = max_vector_id
+        super().__init__(self.vector_id, self.max_vector_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Got the vector id {self.vector_id!r}. Expected a whole number in "
+            f"0..{self.max_vector_id} — the range a signed 64-bit column holds. "
+            "Ids outside it wrap or overflow; mask them with Config.VECTOR_ID_MASK."
+        )

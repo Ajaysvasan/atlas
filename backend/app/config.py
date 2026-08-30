@@ -56,6 +56,7 @@ class Config:
             "Conversation",
         )
     )
+    PROJECT = Path(os.path.join(DATA_DIR, "memory", "topic_pool", "project_pool"))
     VECTOR_DIMENSIONS = 128
 
     # Vector ids are stored in signed 64-bit columns (SQLite INTEGER, Postgres

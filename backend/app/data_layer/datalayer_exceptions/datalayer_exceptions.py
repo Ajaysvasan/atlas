@@ -103,3 +103,18 @@ class InvalidColumnNameException(Exception):
 
     def __str__(self):
         return f"Got invalid column name : {self.columnName}"
+
+
+class MissingDatabaseConfiguration(Exception):
+    def __init__(self, missing_keys) -> None:
+        self.missing_keys = list(missing_keys)
+        super().__init__(self.missing_keys)
+
+    def __str__(self) -> str:
+        keys = ", ".join(self.missing_keys)
+        return (
+            f"Missing PostgreSQL settings: {keys}. Copy .env.example to .env and "
+            "fill them in. They are not optional: psycopg substitutes libpq's "
+            "defaults for anything left unset — including the OS username — and "
+            "the connection then silently goes somewhere unintended."
+        )

@@ -88,10 +88,19 @@ it is a coding task.
 `MemoryManager`, `TopicManager`, `ProjectManager` are still `pass`.
 `ConversationPoolManager` is done and is what they should hand back.
 
+`ProjectMetaData` (`project_data_repo/project_meta_data.py`) is done: it is the
+storage half of the project layer — the vector, the `project_table` row and the
+`project_mapping_table` row written together, vectors-first with a compensating
+delete, same rule as snapshots. 67 tests. `ProjectManager` is the domain object
+that should sit on top of it.
+
 Mostly path and identity resolution now that the layer below is settled.
 
 - [ ] Decide the on-disk scheme: topic → project → conversation directories,
       and how ids map to paths
+- [ ] `ProjectMetaData.__project_db` is a single shared registry file, which is
+      right for "list all projects" but is the only global path left. Confirm it
+      when the scheme is decided.
 - [ ] `TopicManager`: create/load a topic
 - [ ] `ProjectManager`: create/load a project under a topic
 - [ ] `MemoryManager`: top-level entry point returning a

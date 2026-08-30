@@ -57,7 +57,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 | SQLite (memory) | `data/memory/topic_pool/.../conversation_pool/{project_id}_conversation.db` | Conversation snapshot metadata |
 | PostgreSQL | localhost:5432, DB `Vectors` | Vector repository via pgvector (`vectorRepository.py`) |
 
-PostgreSQL credentials are in `.env` (not committed): `DBNAME`, `USER`, `PASSWORD`, `HOST`, `PORT`.
+PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DBNAME`, `DB_USER`, `PASSWORD`, `HOST`, `PORT`. `DB_USER` is deliberately not `USER` — login shells export `USER`, and `load_dotenv()` will not override it.
 
 ### Key Data Models
 

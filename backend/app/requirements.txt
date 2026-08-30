@@ -23,7 +23,7 @@ PyPDF2==3.0.1                    # .pdf
 textract==2.0.0                  # .doc and assorted fallbacks
 
 # --- Configuration ------------------------------------------------------------
-python-dotenv==1.2.2             # DBNAME / USER / PASSWORD / HOST / PORT
+python-dotenv==1.2.2             # DBNAME / DB_USER / PASSWORD / HOST / PORT
 
 # --- HTTP surface -------------------------------------------------------------
 # Declared ahead of use: no routes exist yet (see todo.md section 3).
