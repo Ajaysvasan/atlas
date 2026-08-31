@@ -12,6 +12,13 @@ from memory.topic_pool.project_pool.conversation_pool.conversation_data_manageme
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorManager import (
     ConversationVectorManager,
 )
+from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
+    FullConversationRepository,
+)
+from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
+    connect,
+    enable_wal,
+)
 
 PROJECT_ID = "unit_test_project"
 
@@ -518,22 +525,22 @@ class TestStress:
         repo.close()
 
     def test_twenty_concurrent_read_threads(self, tmp_path):
+        """Twenty threads reading through the shared repository itself.
+
+        This used to close the repository and open its own sqlite3 connections,
+        which tested SQLite rather than anything in this module.
+        """
         repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
         repo.batch_insert_cumulative_vector_meta_data(
             [(i, f"s{i}", "2026-08-01", PROJECT_ID, i) for i in range(100)]
         )
-        db_path = repo.db_path
-        repo.close()
 
         errors: list = []
 
         def reader():
             try:
-                with sqlite3.connect(db_path) as conn:
-                    count = conn.execute(
-                        "SELECT COUNT(*) FROM cumulative_vector_meta_data"
-                    ).fetchone()[0]
-                assert count == 100
+                assert len(repo.get_cumulative_vector_meta_data_ids()) == 100
+                assert repo.get_latest_summary() is not None
             except Exception as exc:
                 errors.append(exc)
 
@@ -543,6 +550,7 @@ class TestStress:
         for t in threads:
             t.join()
         assert errors == [], f"Thread errors: {errors}"
+        repo.close()
 
     def test_full_pipeline_one_hundred_snapshots(self, tmp_path):
         repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
@@ -578,6 +586,251 @@ class TestStress:
         result = repo.get_latest_summary()
         assert result is not None
         assert "summary" in result
+        repo.close()
+
+
+# ---------------------------------------------------------------------------
+# Journal mode
+# ---------------------------------------------------------------------------
+
+
+class TestJournalMode:
+    """The conversation database runs in WAL.
+
+    Both repositories share one file, so under the default rollback journal a
+    reader and a writer lock each other out — and a reader with a transaction
+    open is exactly what SnapShot.search() is while a turn is being appended.
+    """
+
+    def _mode(self, db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            return conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_metadata_repository_opens_in_wal(self, repo):
+        assert repo.journal_mode == "wal"
+        assert self._mode(repo.db_path) == "wal"
+
+    def test_full_conversation_repository_opens_in_wal(self, tmp_path):
+        full = FullConversationRepository(tmp_path, PROJECT_ID, "project")
+        assert full.journal_mode == "wal"
+
+    def test_both_repositories_share_the_one_file_and_its_mode(self, tmp_path):
+        full = FullConversationRepository(tmp_path, PROJECT_ID, "project")
+        meta = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        assert Path(full.db_path) == Path(meta.db_path)
+        assert meta.journal_mode == "wal"
+        meta.close()
+
+    def test_a_write_is_not_blocked_by_an_open_read(self, repo):
+        """The behaviour WAL is here for.
+
+        Under a rollback journal this raises `database is locked`: a reader
+        holding a transaction open blocks every writer until it finishes.
+        """
+        reader = sqlite3.connect(repo.db_path, timeout=0.3)
+        reader.execute("BEGIN;")
+        reader.execute("SELECT count(*) FROM cumulative_vector_meta_data").fetchone()
+        try:
+            repo.insert_cumulative_vector_meta_data(
+                1, "written while a reader was open", "2026-08-01", PROJECT_ID, 1
+            )
+        finally:
+            reader.rollback()
+            reader.close()
+        assert len(repo.get_cumulative_vector_meta_data_ids()) == 1
+
+    def test_an_existing_rollback_journal_database_is_converted(self, tmp_path):
+        """Databases written before this change convert on the next open."""
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        legacy = sqlite3.connect(db_path)
+        legacy.execute("PRAGMA journal_mode = DELETE;").fetchone()
+        legacy.execute(
+            "CREATE TABLE summary_chunks (chunk_id TEXT PRIMARY KEY, chunk TEXT NOT NULL,"
+            " created_at DATE NOT NULL, chunker_type TEXT NOT NULL)"
+        )
+        legacy.execute("INSERT INTO summary_chunks VALUES ('c', 't', '2026-08-01', 'turn')")
+        legacy.commit()
+        legacy.close()
+        assert self._mode(db_path) == "delete"
+
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        assert repo.journal_mode == "wal"
+        assert _row_count(db_path, "summary_chunks") == 1
+        repo.close()
+
+    def test_synchronous_is_normal_on_the_repository_connection(self, repo):
+        assert repo.conn.execute("PRAGMA synchronous;").fetchone()[0] == 1
+
+    def test_connect_applies_both_per_connection_pragmas(self, tmp_path):
+        """Unlike journal_mode, these reset to their defaults on every open."""
+        conn = connect(tmp_path / "t.db")
+        try:
+            assert conn.execute("PRAGMA synchronous;").fetchone()[0] == 1
+            assert conn.execute("PRAGMA foreign_keys;").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+        plain = sqlite3.connect(tmp_path / "t.db")
+        try:
+            assert plain.execute("PRAGMA synchronous;").fetchone()[0] == 2
+            assert plain.execute("PRAGMA foreign_keys;").fetchone()[0] == 0
+        finally:
+            plain.close()
+
+    def test_every_conversation_connection_goes_through_connect(self):
+        """A raw sqlite3.connect() would silently get FULL and no foreign keys.
+
+        FullConversationRepository opens a connection per call, so this is not a
+        one-time setup that can be checked at construction — a new method with a
+        raw connect is the way the pragmas would come apart again.
+        """
+        import inspect
+
+        from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository import (
+            fullconversation_repository as full_module,
+        )
+        from memory.topic_pool.project_pool.conversation_pool.conversation_data_management import (
+            conversationVectorMetaManager as meta_module,
+        )
+
+        for module in (full_module, meta_module):
+            source = inspect.getsource(module)
+            offenders = [
+                line.strip()
+                for line in source.splitlines()
+                if "sqlite3.connect(" in line and not line.strip().startswith("#")
+            ]
+            assert offenders == [], f"{module.__name__}: {offenders}"
+
+    def test_enable_wal_reports_the_mode_rather_than_raising(self, tmp_path):
+        """A database it cannot convert is not an error — it stays as it is."""
+        db_path = tmp_path / "locked.db"
+        holder = sqlite3.connect(db_path)
+        holder.execute("PRAGMA journal_mode = DELETE;").fetchone()
+        holder.execute("CREATE TABLE t (i INTEGER PRIMARY KEY)")
+        holder.commit()
+        holder.execute("BEGIN IMMEDIATE;")
+        holder.execute("INSERT INTO t VALUES (1)")
+
+        blocked = sqlite3.connect(db_path, timeout=0.3)
+        try:
+            assert enable_wal(blocked) == "delete"
+        finally:
+            blocked.close()
+            holder.rollback()
+            holder.close()
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+
+
+class TestThreadSafety:
+    """The repository is shared: SnapShot holds one and passes it on.
+
+    Sharing it used to raise `sqlite3.ProgrammingError: SQLite objects created
+    in a thread can only be used in that same thread`, so a concurrent caller
+    had no way to use it at all.
+    """
+
+    def test_writes_from_another_thread_are_accepted(self, repo):
+        error: list = []
+
+        def writer():
+            try:
+                repo.insert_cumulative_vector_meta_data(
+                    1, "from another thread", "2026-08-01", PROJECT_ID, 10
+                )
+            except Exception as exc:
+                error.append(exc)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        thread.join()
+
+        assert error == []
+        assert repo.get_cumulative_vector_meta_data(1)[1] == "from another thread"
+
+    def test_concurrent_writers_lose_no_rows(self, repo):
+        workers, per_worker = 8, 25
+
+        def writer(worker_id):
+            for row in range(per_worker):
+                repo.insert_cumulative_vector_meta_data(
+                    worker_id * 1000 + row, f"s{worker_id}-{row}",
+                    f"2026-08-01T00:00:{row:02d}", PROJECT_ID, 1,
+                )
+
+        threads = [threading.Thread(target=writer, args=(w,)) for w in range(workers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(repo.get_cumulative_vector_meta_data_ids()) == workers * per_worker
+
+    def test_a_failed_write_leaves_the_connection_usable(self, repo):
+        repo.insert_cumulative_vector_meta_data(1, "first", "2026-08-01", PROJECT_ID, 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.insert_cumulative_vector_meta_data(
+                1, "duplicate", "2026-08-01", PROJECT_ID, 1
+            )
+        repo.insert_cumulative_vector_meta_data(2, "second", "2026-08-01", PROJECT_ID, 1)
+        assert len(repo.get_cumulative_vector_meta_data_ids()) == 2
+
+    def test_a_rolled_back_snapshot_leaves_nothing_behind(self, repo):
+        """insert_snapshot writes its chunks before the row that collides."""
+        repo.insert_cumulative_vector_meta_data(7, "taken", "2026-08-01", PROJECT_ID, 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.insert_snapshot(
+                chunks=[("orphan", "text", "2026-08-01", "turn")],
+                cumulative_row=(7, "collides", "2026-08-01", PROJECT_ID, 1),
+                summary_vector_rows=[(1, "orphan", PROJECT_ID)],
+                map_rows=[(7, 1)],
+            )
+        assert _row_count(repo.db_path, "summary_chunks") == 0
+        assert _row_count(repo.db_path, "summary_vector_meta_data") == 0
+
+    def test_close_waits_for_a_write_in_flight(self, tmp_path):
+        """close() takes the same lock, so it cannot pull the connection out
+        from under a writer that is mid-transaction on another thread."""
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        inside = threading.Event()
+        release = threading.Event()
+        error: list = []
+
+        def slow_chunks():
+            yield ("c1", "text", "2026-08-01", "turn")
+            inside.set()
+            release.wait(timeout=5)
+            yield ("c2", "text", "2026-08-01", "turn")
+
+        def writer():
+            try:
+                repo.batch_insert_summary_chunks(slow_chunks())
+            except Exception as exc:
+                error.append(exc)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert inside.wait(timeout=5)
+
+        closer = threading.Thread(target=repo.close)
+        closer.start()
+        release.set()
+        thread.join(timeout=5)
+        closer.join(timeout=5)
+
+        assert error == []
+        assert _row_count(repo.db_path, "summary_chunks") == 2
+
+    def test_close_is_idempotent(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo.close()
         repo.close()
 
 

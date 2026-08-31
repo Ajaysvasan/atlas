@@ -4,6 +4,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
+from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
+    connect,
+    enable_wal,
+)
+
 # A conversation turn is stored whole: one turn -> one chunk. `chunker_type`
 # records that provenance so a future splitting strategy can coexist with rows
 # written today without a migration.
@@ -33,8 +38,8 @@ class FullConversationRepository:
         self.__init_db()
 
     def __init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA foreign_keys = ON;")
+        with connect(self.db_path) as conn:
+            self.journal_mode = enable_wal(conn)
             cursor = conn.cursor()
             cursor.execute("""
             create table if not exists summary_chunks (
@@ -63,14 +68,14 @@ class FullConversationRepository:
         full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
         chunks: List[Tuple[str, str, str, str]],
     ) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             # full_conversation.chunk_id has an FK onto summary_chunks, so the
             # parent rows must land first. Previously the order was inverted and
-            # only "worked" because this connection never enabled foreign_keys
-            # (the PRAGMA in __init_db applies to that connection alone) — an
-            # orphan meta row was accepted, then silently dropped by every
-            # reader's JOIN, consuming its sequence_number forever.
-            conn.execute("PRAGMA foreign_keys = ON;")
+            # only "worked" because this connection had foreign_keys off — the
+            # PRAGMA is per-connection, and only __init_db set it — so an orphan
+            # meta row was accepted, then silently dropped by every reader's
+            # JOIN, consuming its sequence_number forever. connect() now applies
+            # it everywhere, which is the point of routing every open through it.
             try:
                 cursor = conn.cursor()
                 cursor.executemany(
@@ -115,9 +120,8 @@ class FullConversationRepository:
             return []
 
         created_at = utc_now()
-        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        conn = connect(self.db_path, isolation_level=None)
         try:
-            conn.execute("PRAGMA foreign_keys = ON;")
             # BEGIN IMMEDIATE takes the write lock up front, so the MAX() read
             # and the INSERT cannot interleave with another writer and hand out
             # the same sequence_number twice.
@@ -157,7 +161,7 @@ class FullConversationRepository:
             conn.close()
 
     def __get_sequence_number(self, chunk_id: str) -> int | None:
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"""SELECT sequence_number from full_conversation where chunk_id = ?;""",
@@ -171,7 +175,7 @@ class FullConversationRepository:
         # and would return the entire conversation.
         if n <= 0:
             return []
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             # Take the newest n by sequence_number (DESC + LIMIT), then re-sort
             # ascending so the caller receives them in conversation order.
@@ -192,7 +196,7 @@ class FullConversationRepository:
             return cursor.fetchall()
 
     def __get_ranged_chunks(self, start: int, end: int):
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -215,7 +219,7 @@ class FullConversationRepository:
         created_at and chunker_type alongside the text that get_ranged_chunks
         returns on its own.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -231,7 +235,7 @@ class FullConversationRepository:
             return cursor.fetchall()
 
     def __get_messages_after(self, sequence_number: int):
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -248,7 +252,7 @@ class FullConversationRepository:
 
     def __get_all(self):
 
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
             select chunk
@@ -260,7 +264,7 @@ class FullConversationRepository:
             return cursor.fetchall()
 
     def __get_size(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
             select count(chunk) 
@@ -298,7 +302,7 @@ class FullConversationRepository:
         Advisory only — read outside the write lock. append_turns() allocates
         its own under BEGIN IMMEDIATE.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with connect(self.db_path) as conn:
             return self.__next_sequence_number(conn.cursor())
 
     def get_sequence_number(self, chunk_id: str) -> int:

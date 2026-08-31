@@ -46,7 +46,7 @@ All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 Hierarchical organization: Topic → Project → Conversation → Snapshot
 
 - **Snapshot** (`memory/.../snapshot.py`): Bidirectional cursor traversal of conversation history; uses cosine similarity (torch) to find similar snapshots; stores summary and cumulative vectors
-- **ConversationVectorMetaDataRepository** (`conversation_data_management/conversationVectorMetaManager.py`): SQLite-based metadata with tables: `summary_chunks`, `summary_vector_meta_data`, `cumulative_vector_meta_data`, `summary_snapshot_map`
+- **ConversationVectorMetaDataRepository** (`conversation_data_management/conversationVectorMetaManager.py`): SQLite-based metadata with tables: `summary_chunks`, `summary_vector_meta_data`, `cumulative_vector_meta_data`, `summary_snapshot_map`. Thread-safe: one connection opened with `check_same_thread=False`, every statement (including its commit or rollback, and `close()`) under an `RLock`. `insert_snapshot()` writes a whole snapshot in one transaction.
 
 ### Storage
 
@@ -54,7 +54,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 |-------|------|---------|
 | DiskANN index | `data/disk_ann_index/` | Approximate nearest neighbor vector search |
 | SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one |
-| SQLite (memory) | `data/memory/topic_pool/.../conversation_pool/{project_id}_conversation.db` | Conversation snapshot metadata |
+| SQLite (memory) | `data/memory/topic_pool/.../conversation_pool/{project_id}_conversation.db` | Conversation turns **and** snapshot metadata, in one file shared by `FullConversationRepository` and `ConversationVectorMetaDataRepository`. Every open goes through `sqlite_setup.connect()`: WAL journal (so `.db-wal` and `.db-shm` sit alongside it), `synchronous=NORMAL`, `foreign_keys=ON` |
 | PostgreSQL | localhost:5432, DB `Vectors` | Vector repository via pgvector (`vectorRepository.py`) |
 
 PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DBNAME`, `DB_USER`, `PASSWORD`, `HOST`, `PORT`. `DB_USER` is deliberately not `USER` — login shells export `USER`, and `load_dotenv()` will not override it.
@@ -83,17 +83,17 @@ Central config class with constants:
 
 ## Known Bugs (see `bugs.md` and `production_impact_report.md`)
 
-**P1 — snapshot.py:**
-- Bug 4.3: `get_snapshots()` destructively resets cursor positions to 0/len-1 on every call
-- Bug 4.4: Failed similarity search returns `[-1]` index instead of `None`/empty
-
 **P2 — Unimplemented:**
 - Bug 2.1/2.2: `cli/cli_interface.py` query loop is a placeholder (`# some stuff`) — no downstream pipeline integration
-- Bug 4.1: `MemoryManager`, `ProjectManager`, `TopicManager`, `ConversationPoolManager`, `ConversationSummary` are empty stub classes
+- Bug 4.1: `MemoryManager`, `ProjectManager`, `TopicManager` are still empty stub classes. `ConversationPoolManager` and `ConversationSummary` are implemented.
 
-**P3 — Data type mismatches:**
-- Vector IDs passed as strings instead of unsigned integers
+**P3:**
 - DiskANN index not persisted/reloaded correctly between sessions
+
+**Fixed since this list was written** (each has a regression test):
+- Bug 4.3: `search()` no longer moves the instance cursors — `__find_best_snapshot` scans with local ones
+- Bug 4.4: a failed similarity search returns `None`, not `[-1]`
+- Vector ids are ints masked into the signed 64-bit range (`Config.VECTOR_ID_MASK`), derived from `chunk_id` rather than chunk text
 
 ## Docs
 

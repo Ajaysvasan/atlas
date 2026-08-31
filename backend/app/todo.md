@@ -74,9 +74,11 @@ it is a coding task.
       4.41, 4.43). All cosmetic or type-hint level.
 - [ ] `Config.CONVERSATION` is now dead — the only mention left is a docstring
       explaining why it is *not* used. Remove it, or repurpose it in 2.1.
-- [ ] `test/stress_testing/test_stress.py` references
+- [x] `test/stress_testing/test_stress.py` referenced
       `Config.CONVERSATION_SNAPSHOT_DB`, which does not exist — 3 failing tests.
-      Settle as part of 2.1, since that is where the path scheme gets decided.
+      Rewritten against the current APIs and against temporary directories
+      instead of Config paths, so the suite no longer depends on the 2.1 path
+      decision at all. 10 tests, whole suite now green.
 - [ ] No logger in `snapshot.py`, so the compensating-delete failure path in
       `__add_snap_shot` swallows errors silently. Route it somewhere once
       logging exists.
