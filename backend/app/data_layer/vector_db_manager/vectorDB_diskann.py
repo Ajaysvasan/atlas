@@ -44,10 +44,13 @@ class VectorDb_diskann:
         try:
             self.dynamic_dann.insert(vector, vector_id)
         except (ValueError, RuntimeError) as e:
-            raise VectorInsertionError(vector_id)
+            raise VectorInsertionError(vector_id, e) from e
 
     def __insert_vectors(self, vectors, vector_ids):
-        self.dynamic_dann.batch_insert(vectors, vector_ids)
+        try:
+            self.dynamic_dann.batch_insert(vectors, vector_ids)
+        except (ValueError, RuntimeError) as e:
+            raise VectorInsertionError(vector_ids, e) from e
 
     def __delete(self, vector_id):
         self.dynamic_dann.mark_deleted(vector_id)

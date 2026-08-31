@@ -57,10 +57,11 @@ class IngestionPipeline:
     ) -> List[NormalizedContent]:
         return self.t_normalizer.normalize_all(extracted_texts)
 
-    # No api for that right now
-    # TODO: Implement an API for chunking for one document alone
-    def chunk_text(self):
-        pass
+    def chunk_text(
+        self, normalized_content: NormalizedContent
+    ) -> List[HChunk] | List[RChunk]:
+        """Chunk a single document, routed the same way a batch would be."""
+        return self.chunker.chunk_document(normalized_content)
 
     def chunk_texts(
         self, normalized_contents: List[NormalizedContent]

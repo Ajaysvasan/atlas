@@ -18,9 +18,17 @@ psycopg[binary]==3.3.4           # memory layer: pgvector store (needs PostgreSQ
                                  # with the `vector` extension; see .env)
 
 # --- Document ingestion -------------------------------------------------------
-python-docx==1.2.0               # .docx
+# The extractor falls back to decoding any other file as text, so a missing
+# entry here costs fidelity on that format, never the whole run.
+python-docx==1.2.0               # .docx, including tables and heading styles
 PyPDF2==3.0.1                    # .pdf
-textract==2.0.0                  # .doc and assorted fallbacks
+python-pptx==1.0.2               # .pptx
+beautifulsoup4==4.13.5           # .html / .xml tag stripping
+chardet==7.4.3                   # encoding detection for the text fallback
+textract==2.0.0                  # .doc, .odt, .rtf, .epub and other binaries
+
+# Optional: each adds one format and degrades to textract or plain text if absent.
+# openpyxl==3.1.5                # .xlsx / .xlsm read natively rather than via textract
 
 # --- Configuration ------------------------------------------------------------
 python-dotenv==1.2.2             # DBNAME / DB_USER / PASSWORD / HOST / PORT

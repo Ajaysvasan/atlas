@@ -27,8 +27,15 @@ class EmbeddingManager:
         self.model = SentenceTransformer(model_name)
         self.embedding_dimension = embeddding_dimension
 
-    def __generate_vector_id(self, chunk: str) -> int:
-        hash_bytes = hashlib.md5(chunk.encode("utf-8")).digest()
+    def __generate_vector_id(self, chunk_id: str) -> int:
+        """Derive the vector id from the chunk id, never from the chunk text.
+
+        Chunk text repeats — a licence header, a boilerplate paragraph, a "yes"
+        turn — and hashing it produced one vector id for several distinct
+        chunks, so all but one of them were unreachable in the index. The chunk
+        ids the chunkers emit already bind position as well as content.
+        """
+        hash_bytes = hashlib.md5(chunk_id.encode("utf-8")).digest()
         uint64_id = int.from_bytes(hash_bytes[:8], byteorder="little", signed=False)
         # Clearing the top bit keeps the id non-negative AND inside the signed
         # 64-bit range both storage backends accept. Without this, ~49% of ids
@@ -44,7 +51,7 @@ class EmbeddingManager:
         embedded_chunk = self.model.encode(chunk, truncate_dim=self.embedding_dimension)
         return EmbeddedChunk(
             embedded_chunk.astype(np.float32),
-            self.__generate_vector_id(chunk),
+            self.__generate_vector_id(chunk_id),
             self.__create_meta_data(chunk_id, chunk),
         )
 
@@ -71,7 +78,7 @@ class EmbeddingManager:
             embedded_chunks.append(
                 EmbeddedChunk(
                     vector.astype(np.float32),
-                    self.__generate_vector_id(chunk),
+                    self.__generate_vector_id(chunk_id),
                     self.__create_meta_data(chunk_id, chunk),
                 )
             )
@@ -87,7 +94,7 @@ class EmbeddingManager:
         vector = self.model.encode(text, truncate_dim=self.embedding_dimension)
         return EmbeddedChunk(
             vector.astype(np.float32),
-            self.__generate_vector_id(text),
+            self.__generate_vector_id(chunk_id),
             self.__create_meta_data(chunk_id, text),
         )
 

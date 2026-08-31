@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -19,6 +18,7 @@ class ChunkMetaData:
     document_name: str
     document_id: str
     chunking_algorithm_used: str
+    section_name: str | None = None
 
 
 @dataclass(frozen=True)

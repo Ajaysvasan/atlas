@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 
 from config import Config
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
+    DuplicateVectorException,
     InvalidBatchSize,
     InvalidVectorDimension,
     MissingDatabaseConfiguration,
@@ -90,9 +91,14 @@ class VectorRepository:
         try:
             self.curr.execute(query, (self.project_id, int(vector_id), vector))
             self.conn.commit()
+        except psycopg.errors.UniqueViolation as e:
+            # Reported apart from a failed write: the caller can carry on
+            # knowing the vector is stored, rather than compensating for it.
+            self.conn.rollback()
+            raise DuplicateVectorException(vector_id) from e
         except Exception as e:
             self.conn.rollback()
-            raise VectorInsertionError(e)
+            raise VectorInsertionError(vector_id, e) from e
 
     def __insert_batch_vector(self, vectors: ndarray, vector_ids: List[uint32]):
         if len(vectors) != len(vector_ids):
@@ -112,7 +118,7 @@ class VectorRepository:
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()
-            raise VectorInsertionError(e)
+            raise VectorInsertionError(vector_ids, e) from e
 
     def __update_vector(self, vector: ndarray, vector_id: uint32) -> None:
         if len(vector) != Config.EMBEDDING_DIMENSIONS:
@@ -133,7 +139,7 @@ class VectorRepository:
             raise
         except Exception as e:
             self.conn.rollback()
-            raise VectorInsertionError(e)
+            raise VectorInsertionError(vector_id, e) from e
 
     def __get_vector(self, vector_id: uint32) -> NDArray[float32]:
         query = """
@@ -163,7 +169,7 @@ class VectorRepository:
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()
-            raise VectorInsertionError(e)
+            raise VectorInsertionError(vector_ids, e) from e
 
     def insert(self, vector_id: uint32, vector: ndarray) -> None:
         self.__insert_vector(vector, vector_id)

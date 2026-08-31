@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Tuple
 
 from numpy import ndarray
 
@@ -7,6 +8,22 @@ from data_layer.ingestion.metadata.metadata import (
     EmbeddedChunkMetaData,
     NormalizedTextMetaData,
 )
+
+
+@dataclass(frozen=True)
+class SectionSpan:
+    """A heading and the body that follows it, located in normalized content.
+
+    The normalizer emits these because it is the only stage that still sees the
+    document's line structure; every offset is absolute into
+    NormalizedContent.content so a chunk can be traced back to its source.
+    """
+
+    name: str
+    heading_start: int
+    heading_end: int
+    content_start: int
+    content_end: int
 
 
 @dataclass(frozen=True)
@@ -59,12 +76,16 @@ class RChunk:
     meta_data: ChunkMetaData
     chunk_id: str
 
+    start_off_set: int = 0
+    end_off_set: int = 0
+
 
 @dataclass(frozen=True)
 class NormalizedContent:
     content: str
     has_section: bool
     meta_data: NormalizedTextMetaData
+    sections: Tuple[SectionSpan, ...] = ()
 
 
 @dataclass(frozen=True)

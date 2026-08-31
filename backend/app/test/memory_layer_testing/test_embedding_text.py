@@ -63,10 +63,19 @@ class TestVectorIdRange:
             vid = manager.embed_text(f"payload {i}").vector_id
             conn.execute("INSERT OR IGNORE INTO v VALUES (?)", (vid,))
 
-    def test_id_matches_masked_md5(self, manager):
-        digest = hashlib.md5(b"deterministic").digest()
+    def test_id_matches_masked_md5_of_the_chunk_id(self, manager):
+        """The id is derived from the chunk id, not the text: identical text
+        under two different chunk ids has to reach two different vectors."""
+        chunk_id = hashlib.sha256(b"deterministic").hexdigest()
+        digest = hashlib.md5(chunk_id.encode("utf-8")).digest()
         expected = int.from_bytes(digest[:8], "little", signed=False) & SIGNED_64_MAX
         assert manager.embed_text("deterministic").vector_id == expected
+
+    def test_same_text_under_different_chunk_ids_gets_different_ids(self, manager):
+        assert (
+            manager.embed_text("repeated", chunk_id="a").vector_id
+            != manager.embed_text("repeated", chunk_id="b").vector_id
+        )
 
     def test_id_is_deterministic(self, manager):
         assert (

@@ -1,5 +1,11 @@
 # Production Data Layer Bug Impact Report
 
+> **Status — superseded.** This is a point-in-time record of a test run against
+> the code as it stood then, kept for history. The failures below have since been
+> fixed; the ingestion layer was reworked again in the "Ingestion" pass recorded
+> in `todo.md`. For current behaviour see `docs/data_layer_docs/` and the live
+> suite in `test/data_layer_testing/`.
+
 This report summarizes the results of running a clean "production-simulation" unit test suite on the current `data_layer` codebase. The goal of this suite was to test the layer assuming it *should* work flawlessly in a production environment, effectively revealing exactly how many native workflows crash due to the underlying bugs.
 
 ## Overall Test Execution Results

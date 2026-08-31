@@ -11,12 +11,37 @@ class InvalidFileType(Exception):
 
 
 class VectorInsertionError(Exception):
-    def __init__(self, vector_id):
+    """A vector write failed, in either vector store.
+
+    `cause` carries the driver exception separately from `vector_id`, which
+    used to hold whichever of the two the raising site happened to have: the
+    DiskANN driver passed an id, the pgvector repository passed the psycopg
+    error, so anything reading the attribute got one or the other.
+    """
+
+    MAX_IDS_SHOWN = 5
+
+    def __init__(self, vector_id, cause: BaseException | None = None) -> None:
         self.vector_id = vector_id
-        super().__init__(self.vector_id)
+        self.cause = cause
+        super().__init__(vector_id, cause)
+
+    def __describe_ids(self) -> str:
+        if isinstance(self.vector_id, (str, bytes)) or not hasattr(
+            self.vector_id, "__len__"
+        ):
+            return str(self.vector_id)
+        ids = list(self.vector_id)
+        shown = ", ".join(str(vector_id) for vector_id in ids[: self.MAX_IDS_SHOWN])
+        if len(ids) > self.MAX_IDS_SHOWN:
+            return f"{shown}, ... ({len(ids)} ids)"
+        return shown
 
     def __str__(self):
-        return f"An Error occured while inserting the vector : {self.vector_id}"
+        message = f"An Error occured while inserting the vector : {self.__describe_ids()}"
+        if self.cause is None:
+            return message
+        return f"{message}. Caused by {type(self.cause).__name__}: {self.cause}"
 
 
 class IndexDirectoryDoesNotExists(Exception):
@@ -58,6 +83,13 @@ class VectorNotFoundEror(Exception):
 
 
 class DuplicateVectorException(Exception):
+    """`VectorRepository.insert` was given an id the project already stores.
+
+    Distinct from VectorInsertionError so a caller can tell "already written"
+    from "the write failed", which matters to the vectors-first snapshot path:
+    the first needs no compensating delete, the second does. batch_insert does
+    not raise it — that path is `on conflict do nothing` by design.
+    """
 
     def __init__(self, vector_id: uint32) -> None:
         self.vector_id = vector_id
@@ -88,12 +120,18 @@ class InvalidVectorDimension(Exception):
 
 
 class InvalidVectorID(Exception):
+    """No `vector_meta_data` row exists for the requested id.
+
+    The name says invalid, the condition is missing; it is kept because every
+    `except InvalidVectorID` in the tree would break with it renamed.
+    """
+
     def __init__(self, vectorID) -> None:
         self.vectorId = vectorID
         super().__init__(self.vectorId)
 
     def __str__(self) -> str:
-        return f"There is arrtibute of id {self.vectorId}"
+        return f"No vector meta data found for the vector id : {self.vectorId}"
 
 
 class InvalidColumnNameException(Exception):

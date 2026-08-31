@@ -1,124 +1,163 @@
 # Chunking Algorithms & Storage Layer (`Chunker/`)
 
 ## Overview & Purpose
-The `Chunker` submodule partitions long normalized document texts into smaller, semantically coherent text segments suitable for vector embedding and approximate nearest neighbor search. It routes documents based on internal structure (`has_section`), utilizing two distinct chunking strategies:
-1. **Hierarchical Chunking (`HierarchicalChunker`)**: Segments structured documents by headings (`Section`), paragraphs (`Context`), and sliding character windows (`HChunk`), persisting the full tree relationships inside a relational SQLite database (`DB_Manager`).
-2. **Recursive Chunking (`RecursiveChunker`)**: Segments unstructured documents by recursively splitting text along hierarchical separator lists (`["\n\n", "\n", ".", " ", ""]`) up to `chunk_size` character limits with sliding overlap (`RChunk`).
+The `Chunker` submodule partitions normalized document text into smaller segments suitable for vector embedding and approximate nearest neighbour search. It routes documents on `has_section`:
+
+1. **Hierarchical Chunking (`HierarchicalChunker`)** — structured documents, decomposed `Document → Section → Context → HChunk`, with the tree persisted in SQLite (`DB_Manager`).
+2. **Recursive Chunking (`RecursiveChunker`)** — flat documents, split along a separator hierarchy down to `chunk_size`, with overlap.
+
+Both share `windowing.sliding_windows()` for the final character-level split.
+
+---
+
+## Invariants
+
+These hold for every chunk either chunker emits, and are covered by
+`test/data_layer_testing/test_ingestion.py`.
+
+| Invariant | Why it matters |
+| :--- | :--- |
+| `len(chunk) <= chunk_size` | The embedding model has a fixed input budget. |
+| `content[start_off_set:end_off_set] == chunk` | Offsets are **absolute into the normalized document**, so a retrieved chunk can be traced back to its source. They were previously relative to the parent context or section, which made them unresolvable. |
+| Chunk ids are unique within a document | Ids bind position as well as content. Hashing content alone gave one id to every repeated paragraph. |
+| Words are not cut in half | `sliding_windows` retreats to the last whitespace in the window. |
+| Re-ingesting unchanged input is a no-op | All inserts are `on conflict … do nothing`. |
+
+---
+
+## `windowing.py`
+
+### `sliding_windows(text: str, size: int, overlap: int) -> List[Tuple[int, int]]`
+Returns the offsets of successive windows over `text`, none longer than `size`.
+
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `text` | `str` | The text to window. |
+| `size` | `int` | Maximum window length in characters. Must be positive. |
+| `overlap` | `int` | Characters each window extends back into the previous one. Must satisfy `0 <= overlap < size`. |
+
+Raises `ValueError` for impossible geometry rather than looping or emitting oversized windows.
+
+#### How It Works
+1. Skips leading whitespace so no window starts mid-gap.
+2. Takes `end = min(start + size, len(text))`, then retreats to the last whitespace character in `[start, end)` so words survive. A run with no whitespace in it — a base64 blob, a minified line — has nothing to retreat to and is split at exactly `size`.
+3. Advances to `max(end - overlap, start + 1)`. The `max()` is load-bearing: a window pulled back to a word boundary can be *shorter* than the overlap, and `end - overlap` would then step backwards forever.
 
 ---
 
 ## Classes & Public APIs
 
 ### `class Chunker` (`chunker.py`)
-The high-level routing controller that analyzes `NormalizedContent` lists and delegates items to either hierarchical or recursive processing.
+Routing controller that splits a `NormalizedContent` list by structure and delegates.
 
 #### Constructor: `__init__(self, chunk_size: int = 256, overlap: int = 20, db_path: str = Config.DB_PATH) -> None`
-Initializes window sizes and sets up the SQLite database path for hierarchical relationship persistence.
 
 #### Methods
 
 ##### `chunk_per_document(self, normalised_content: List[NormalizedContent]) -> Tuple[List[HChunk], List[RChunk]]`
-Splits normalized documents by structural criteria (`has_section`) and invokes their respective chunking engines.
-
-###### Parameters
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `normalised_content` | `List[NormalizedContent]` | List of sanitized document objects returned by `TextNormalizer`. |
 
 ###### Return Value
 - **Type:** `Tuple[List[HChunk], List[RChunk]]`
-- **Description:** A 2-tuple `(h_chunks, r_chunks)` containing the lists of generated hierarchical `HChunk` objects and recursive `RChunk` objects.
 
 ###### How It Works
-1. Iterates through `normalised_content`. If `content.has_section is True`, appends to `hierarchical_chunker_list`; otherwise appends to `recursive_chunker_list`.
-2. Passes `hierarchical_chunker_list` to `HierarchicalChunker(overlap, chunk_size, db_path, ...).process_doc()`.
-3. Passes `recursive_chunker_list` to `RecursiveChunker(..., chunk_size, overlap).recursive_chunker()`.
-4. Returns the combined `(h_chunks, r_chunks)` tuple.
+1. Partitions on `content.has_section`.
+2. Invokes each chunker **only when its list is non-empty**, so an all-flat batch never opens a SQLite connection it has nothing to write to.
+3. Returns `(h_chunks, r_chunks)`.
+
+##### `chunk_document(self, normalised_content: NormalizedContent) -> List[HChunk] | List[RChunk]`
+Single-document convenience wrapper, routed identically. Backs `IngestionPipeline.chunk_text()`.
 
 ---
 
 ### `class HierarchicalChunker` (`HierarchicalChunker.py`)
-Executes three-tier hierarchical document decomposition (`Document` $\rightarrow$ `Section` $\rightarrow$ `Context` $\rightarrow$ `HChunk`) and stores structural records in SQLite.
 
 #### Constructor: `__init__(self, chunkOverlap: int, chunkSize: int, db_path: str, normalizedDocumentsContents: List[NormalizedContent]) -> None`
-Initializes window settings, target database path, and document lists.
+Validates the window geometry up front — `chunkSize > 0` and `0 <= chunkOverlap < chunkSize` — raising `ValueError` rather than deferring the check to slicing time.
 
 #### Methods
 
 ##### `process_doc(self) -> List[HChunk]`
-Orchestrates document structuring, database table creation/insertion, and chunk slicing across all assigned documents.
-
-###### Parameters
-*None.*
 
 ###### Return Value
 - **Type:** `List[HChunk]`
-- **Description:** Complete list of `HChunk` instances across all hierarchical documents.
 
 ###### How It Works
-1. Converts `NormalizedContent` items into `Document` node dataclasses (`__make_document_objs()`).
-2. Opens `Manager(self.db_path, is_chunker_type_hierarchical=True)` to initialize `Documents`, `Sections`, `Contexts`, and `Chunks` tables.
-3. For each document:
-   - Finds uppercase section headers (`re.compile(r"^[A-Z\s]+$", re.MULTILINE)`) and constructs `Section` nodes (`__find_sections(doc)`).
-   - Inserts `Section` nodes into SQLite via `h_manager.insert_sections(...)`.
-   - For each section, splits double-newline boundaries (`r"\n\s*\n"`) into paragraph `Context` nodes (`__find_contexts(sections)`).
-   - Inserts `Context` nodes into SQLite via `h_manager.insert_contexts(...)`.
-   - For each `Context`, applies sliding character window slicing (`chunkSize`, `chunkOverlap`) to generate `HChunk` nodes (`__get_chunks(contexts, doc)`).
-   - Inserts `HChunk` nodes into SQLite (`h_manager.insert_chunks(...)`).
-4. Closes database connection (`h_manager.close()`) and returns all compiled `HChunk` objects.
+1. Returns `[]` immediately for an empty document list, without creating a database.
+2. Converts `NormalizedContent` items into `Document` nodes.
+3. Opens `Manager(db_path, is_chunker_type_hierarchical=True)` inside a `try` whose `finally` closes it — the connection previously leaked whenever any step raised.
+4. For each document:
+   - `__find_sections(doc, spans)` converts the normalizer's `SectionSpan` list into `Section` nodes. **No heading regex runs here.** Text before the first heading becomes a `PREAMBLE` section; a document with no spans becomes a single `MAIN` section.
+   - `__find_contexts(sections)` splits each section on `r"\n\s*\n"` into paragraph `Context` nodes, converting section-relative indices to document-absolute offsets.
+   - `__get_chunks(...)` windows each context through `sliding_windows` and attaches the owning section name to `ChunkMetaData.section_name`.
+5. Returns every `HChunk`.
+
+###### Identifier construction
+| Node | Id derived from | Reason |
+| :--- | :--- | :--- |
+| `Section` | `(documentId, ordinal, name)` | A document with two `NOTES` headings previously hashed both to one `sectionId` and aborted the run on the primary key. |
+| `Context` | `(sectionId, ordinal, text)` | Same failure for a repeated paragraph. |
+| `HChunk` | `(contextId, ordinal, chunk)` | Same failure for a repeated window. |
 
 ---
 
 ### `class RecursiveChunker` (`RecursiveChunker.py`)
-Performs top-down separator splitting on unstructured text strings until segments fit within `chunk_size` bounds.
 
-#### Constructor: `__init__(self, normalized_documents_contents: List[NormalizedContent], chunk_size: int, overlap: int = 20, separator: Optional[List[str]] = None) -> None`
-Initializes maximum character limits (`chunk_size`), sliding window overlap (`overlap`), and separator hierarchy (default: `["\n\n", "\n", ".", " ", ""]`).
+#### Constructor: `__init__(self, normalized_documents_contents: List[NormalizedContent], chunk_size: int, overlap: int = 20, separator: Optional[List[str]] = None, db_path: Optional[str] = None) -> None`
+Validates window geometry as above. `db_path` is optional; when supplied, chunks are persisted to the `RecursiveChunks` table.
+
+Default separators: `["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "]`. The sentence separators carry their trailing space so a split lands between sentences rather than inside an abbreviation, and the empty-string terminator is gone — `sliding_windows` is the base case now.
 
 #### Methods
 
 ##### `recursive_chunker(self) -> List[RChunk]`
-Iterates across all input documents, invokes recursive separator splitting, and wraps outputs in `RChunk` objects.
-
-###### Parameters
-*None.*
 
 ###### Return Value
 - **Type:** `List[RChunk]`
-- **Description:** Complete list of recursive chunks generated across all assigned documents.
 
 ###### How It Works
-1. For each `NormalizedContent` document string, calls internal helper `__r_chunker(content, self.default_separators)`.
-2. Inside `__r_chunker`:
-   - If string length $\le$ `chunk_size`, returns the string as a single-element list.
-   - Finds the largest separator (`\n\n`, `\n`, etc.) present in the text.
-   - Splits text using that separator. If merged segments exceed `chunk_size`, recursively invokes `__r_chunker(piece, remaining_separator)` on oversized pieces.
-   - Applies character overlap (`prev_tail + chunks[i]`) across adjacent chunk slices (`self.overlap > 0`).
-3. Wraps resulting text strings in `RChunk(chunk, ChunkMetaData(...), chunk_id)` and returns them.
+1. For each document, `__split(content, 0, separators)` returns **absolute `(start, end)` spans**, not strings, so offsets stay exact.
+2. Inside `__split`:
+   - Text at or under `chunk_size` is returned as one span.
+   - The first separator present in the text is chosen; `__separator_pieces` yields offsets in which each piece keeps its *own* separator and the pieces tile the text exactly. The previous implementation rebuilt pieces as `part + separator`, which appended a separator the document never had to the final piece.
+   - Pieces are accumulated up to `chunk_size`; any single piece exceeding it recurses on the remaining separators. Exhausting the separators falls through to `sliding_windows`.
+3. `__apply_overlap()` runs **once**, over the finished spans. It previously ran inside the recursion, applying again at every level and copying text near a boundary into a chunk several times over. Each chunk extends back into the *original* previous span, so overlap does not compound.
+4. Spans are materialised into `RChunk` objects whose `chunk_id` binds `(document_id, ordinal, chunk)`.
+5. When `db_path` is set, the parent `Document` rows are written before the chunks, satisfying the foreign key.
 
 ---
 
 ### `class Manager` (`DB_Manager.py`)
-Relational SQLite database manager that creates tables and handles transactional batch insertions for hierarchical nodes (`Document`, `Section`, `Context`, `HChunk`).
+SQLite manager that creates tables and performs batch insertion for both chunker paths.
 
 #### Constructor: `__init__(self, db_path: str, is_chunker_type_hierarchical: bool) -> None`
-Opens an SQLite connection (`sqlite3.connect(db_path)`), enables foreign key enforcement (`PRAGMA foreign_keys = ON;`), and creates relational tables if `is_chunker_type_hierarchical=True`.
+Creates the parent directory, connects with `check_same_thread=False`, enables `PRAGMA foreign_keys = ON`, and creates the tables for the selected path. `Documents` is created in **both** modes; the `False` branch previously created no tables at all, so every insert against it failed with "no such table".
 
 #### Relational Schema
+Hierarchical path:
 - **`Documents`:** `(documentId TEXT PRIMARY KEY, documentName TEXT)`
 - **`Sections`:** `(sectionId TEXT PRIMARY KEY, documentId TEXT FK, sectionName TEXT, content TEXT, contentLength INT, startoffset INT, endoffset INT)`
 - **`Contexts`:** `(contextId TEXT PRIMARY KEY, sectionId TEXT FK, context TEXT, contextLength INT, startoffset INT, endoffset INT)`
 - **`Chunks`:** `(chunkId TEXT PRIMARY KEY, contextId TEXT FK, chunk TEXT, startoffset INT, endoffset INT)`
 
+Recursive path:
+- **`Documents`:** as above
+- **`RecursiveChunks`:** `(chunkId TEXT PRIMARY KEY, documentId TEXT FK, chunk TEXT, startoffset INT, endoffset INT)`
+
+Both sets coexist in one file, which is what `Chunker` produces when a batch contains documents of both kinds.
+
+#### Insertion semantics
+All four `insert_*` methods issue a single `executemany` with `on conflict(<pk>) do nothing`, commit, and wrap any failure in `InsertionError` after a rollback. Ids bind content *and* position, so a conflict means the identical row is already stored — which is exactly what re-ingesting an unchanged folder produces. A plain `INSERT` previously aborted the second run on `UNIQUE constraint failed: Documents.documentId`.
+
 #### Public Methods
-| Method | Parameters | Return / Behavior | Description |
-| :--- | :--- | :--- | :--- |
-| `insert_documents` | `Documents: List[Document]` | `None` | Executes transactional batch insertion (`BEGIN IMMEDIATE`) into `Documents` table. Raises `InsertionError` and rolls back on failure. |
-| `insert_sections` | `Sections: List[Section]` | `None` | Executes transactional batch insertion into `Sections` table. |
-| `insert_contexts` | `Contexts: List[Context]` | `None` | Executes transactional batch insertion into `Contexts` table. |
-| `insert_chunks` | `Chunks: List[HChunk]` | `None` | Executes transactional batch insertion into `Chunks` table. |
-| `get_section_from_context` | `sectionId: str` | `List[tuple]` | Queries all columns from `Sections` where `sectionId = ?`. |
-| `get_context_from_chunk` | `contextId: str` | `List[tuple]` | Queries all columns from `Contexts` where `contextId = ?`. |
-| `get_chunk` | `chunkId: str` | `List[tuple]` | Queries all columns from `Chunks` where `chunkId = ?`. |
-| `get_document_from_section` | `documentId: str` | `List[tuple]` | Queries all columns from `Documents` where `documentId = ?`. |
-| `close` | *None* | `None` | Closes `self.cursor` and `self.connection`. |
+| Method | Parameters | Description |
+| :--- | :--- | :--- |
+| `insert_documents` | `Documents: List[Document]` | Batch insert into `Documents`. |
+| `insert_sections` | `Sections: List[Section]` | Batch insert into `Sections`. |
+| `insert_contexts` | `Contexts: List[Context]` | Batch insert into `Contexts`. |
+| `insert_chunks` | `Chunks: List[HChunk]` | Batch insert into `Chunks`. |
+| `insert_recursive_chunks` | `Chunks: List[RChunk]` | Batch insert into `RecursiveChunks`. |
+| `get_section_from_context` | `sectionId: str` | Rows from `Sections` where `sectionId = ?`. |
+| `get_context_from_chunk` | `contextId: str` | Rows from `Contexts` where `contextId = ?`. |
+| `get_chunk` | `chunkId: str` | Rows from `Chunks` where `chunkId = ?`. |
+| `get_document_from_section` | `documentId: str` | Rows from `Documents` where `documentId = ?`. |
+| `close` | *None* | Closes `self.cursor` and `self.connection`. |

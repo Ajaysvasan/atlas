@@ -110,6 +110,40 @@ Mostly path and identity resolution now that the layer below is settled.
 
 ---
 
+## 2b. Ingestion — done
+
+The submodule now takes any file type and the chunkers agree with the
+normalizer about where sections are. 85 tests in
+`test/data_layer_testing/test_ingestion.py`.
+
+What changed, and why each mattered:
+
+- The `\s+` whitespace collapse flattened every document to one line **before**
+  the chunkers ran, so `has_section` was decided on the raw text while
+  `HierarchicalChunker` saw text with no line structure left. Every "hierarchical"
+  document degenerated to a single MAIN section, one context, and fixed-width
+  slices. Normalization is now line-by-line and the normalizer hands down
+  `SectionSpan` offsets, so there is only one heading detector in the pipeline.
+- Section, context and chunk ids hashed content alone. A document with two
+  `NOTES` headings, or a repeated paragraph, aborted on the primary key — the
+  same rule already recorded under "Decisions on record". Ids now bind position.
+- Re-running the pipeline over an unchanged folder died on `Documents.documentId`.
+  All writes are `on conflict do nothing`.
+- `RecursiveChunker` appended a separator the document never had, and applied
+  overlap again at every level of the recursion, duplicating text into chunks.
+- `FileLoader` recursed forever on a symlink to an ancestor; the `RecursionError`
+  was caught as if the folder were unreadable, so the scan silently returned a
+  partial tree.
+- HTML and XML were embedded with their tags and inline scripts. PDF pages with
+  no text layer raised `TypeError` on `"\n".join`. `.docx` tables were dropped.
+
+- [ ] `openpyxl` is commented out in `requirements.txt`; `.xlsx` currently goes
+      through textract. Install it if spreadsheets matter.
+- [ ] `chunkAlgorithmTypes.ChunkingAlgorithmType` is still unused — the routing
+      decision is `has_section`. Use the enum or drop it.
+
+---
+
 ## 3. Retrieval and delivery
 
 - [ ] **RAG query pipeline** — query → embed → DiskANN search → retrieve chunks

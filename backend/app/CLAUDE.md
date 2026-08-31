@@ -34,10 +34,10 @@ PYTHONPATH=. pytest test/data_layer_testing/test_data_layer_production.py::TestC
 
 All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 
-- **FileLoader** (`TextFileProcessor/file_loader.py`): Recursively scans directories, returns `Dict[extension, List[Path]]`
-- **TextExtractor** (`TextFileProcessor/text_extractor.py`): Extracts text from `.txt`, `.pdf`, `.docx`, `.doc`, `.md`, `.html`, `.xml`, `.csv`
-- **TextNormalizer** (`normalizer/normalizer.py`): Cleans text, detects sections via regex `^(?=.*[A-Z])[A-Z\s]+$`, generates SHA256 content IDs, returns `NormalizedContent`
-- **Chunker** (`Chunker/chunker.py`): Routes to `HierarchicalChunker` (documents with sections) or `RecursiveChunker` (flat docs). chunk_size=256, overlap=20
+- **FileLoader** (`TextFileProcessor/file_loader.py`): Recursively scans directories, returns `Dict[extension, List[Path]]`. The policy is a denylist, not an allowlist: anything that is not a known binary format (`NON_DOCUMENT_EXTENSIONS`) is offered to the extractor. Skips VCS/build directories, dotfiles, empty files and files over `max_file_size` (64 MB), and resolves symlinked directories against a visited set so a link to an ancestor cannot loop.
+- **TextExtractor** (`TextFileProcessor/text_extractor.py`): Dedicated readers for `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`/`.xml`, `.json`, `.ipynb`, and the textract-backed binaries (`.doc`, `.odt`, `.rtf`, `.epub`, …); **every other extension falls back to decoded text**, so source code, logs, config, TeX and unknown formats all ingest. Encoding is BOM → utf-8 → chardet → latin-1; content with NUL bytes raises `InvalidFileType`. Word heading styles, HTML `<h1>`–`<h6>` and PowerPoint slide titles are emitted as markdown `#` headings so formats with no heading syntax still produce sections.
+- **TextNormalizer** (`normalizer/normalizer.py`): Cleans text **line by line**, preserving paragraph structure, and returns `NormalizedContent` with a `sections` tuple of `SectionSpan` offsets into the normalized content. Headings are detected on the raw lines — before lowercasing or punctuation stripping — in four shapes: markdown ATX, setext underline, numbered (`1.`, `2.3`), and ALL CAPS (guarded by a letter-ratio test so table rows are not mistaken for headings). Code fences are skipped.
+- **Chunker** (`Chunker/chunker.py`): Routes to `HierarchicalChunker` (documents with sections) or `RecursiveChunker` (flat docs). chunk_size=256, overlap=20. Both chunkers window text through `Chunker/windowing.py::sliding_windows`, which breaks on word boundaries and guarantees `len(chunk) <= chunk_size`. Chunk, context and section ids all bind position as well as content, so repeated text does not collide; all writes are `on conflict do nothing`, so re-ingesting an unchanged folder is a no-op rather than a `UNIQUE` failure.
 - **EmbeddingManager** (`embedding/EmbeddingManager.py`): SentenceTransformer `all-MiniLM-L6-v2`, 128-dim float32, batch size 64, MD5-based vector IDs
 - **VectorDbManager** (`vector_db_manager/vectorDbManager.py`): Thread-safe DiskANN wrapper, k_neighbors=9, l2 distance, up to 1M vectors
 
@@ -53,7 +53,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 | Store | Path | Purpose |
 |-------|------|---------|
 | DiskANN index | `data/disk_ann_index/` | Approximate nearest neighbor vector search |
-| SQLite (chunker) | `data/hierarchical_db/` | Hierarchical chunk metadata |
+| SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one |
 | SQLite (memory) | `data/memory/topic_pool/.../conversation_pool/{project_id}_conversation.db` | Conversation snapshot metadata |
 | PostgreSQL | localhost:5432, DB `Vectors` | Vector repository via pgvector (`vectorRepository.py`) |
 
@@ -61,8 +61,9 @@ PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DBNAM
 
 ### Key Data Models
 
-- `NormalizedContent`: normalized text, `has_section` flag, metadata
-- `HChunk` / `RChunk`: hierarchical vs recursive chunks with offsets and metadata
+- `NormalizedContent`: normalized text, `has_section` flag, `sections` (`Tuple[SectionSpan, ...]`), metadata
+- `SectionSpan`: a heading plus its body, as absolute offsets into `NormalizedContent.content`
+- `HChunk` / `RChunk`: hierarchical vs recursive chunks. Offsets on both are absolute into the normalized document, so `content[start_off_set:end_off_set] == chunk`
 - `EmbeddedChunk`: numpy float32 vector, MD5 vector_id, chunk metadata
 - `Document`, `Section`, `Context`: intermediate pipeline models
 
@@ -90,10 +91,7 @@ Central config class with constants:
 - Bug 2.1/2.2: `cli/cli_interface.py` query loop is a placeholder (`# some stuff`) — no downstream pipeline integration
 - Bug 4.1: `MemoryManager`, `ProjectManager`, `TopicManager`, `ConversationPoolManager`, `ConversationSummary` are empty stub classes
 
-**P3 — Data type mismatches (causing 100% test failure):**
-- `TextExtractor` returns `PosixPath` objects; `TextNormalizer` expects strings
-- `EmbeddingManager` returns lists instead of numpy arrays
-- Markdown extractor doubles newlines
+**P3 — Data type mismatches:**
 - Vector IDs passed as strings instead of unsigned integers
 - DiskANN index not persisted/reloaded correctly between sessions
 

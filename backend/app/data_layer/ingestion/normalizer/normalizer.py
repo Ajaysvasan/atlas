@@ -2,12 +2,63 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from data_layer.ingestion.metadata.metadata import NormalizedTextMetaData
-from data_layer.ingestion.nodes.nodes import NormalizedContent
+from data_layer.ingestion.nodes.nodes import NormalizedContent, SectionSpan
 
-NORMALIZATION_VERSION = "rag_v1"
+NORMALIZATION_VERSION = "rag_v2"
+
+HEADING_MAX_LENGTH = 80
+HEADING_MAX_WORDS = 12
+HEADING_MIN_LETTERS = 3
+HEADING_MIN_LETTER_RATIO = 0.5
+
+_ATX_HEADING = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*$")
+_SETEXT_UNDERLINE = re.compile(r"^(?:=|-){3,}\s*$")
+_NUMBERED_HEADING = re.compile(r"^(?:\d+(?:\.\d+)+|\d+[.)])\s+[A-Z]\S*")
+_UPPERCASE_HEADING = re.compile(r"^(?=.*[A-Z])[^a-z]+$")
+_CODE_FENCE = re.compile(r"^\s*(?:```|~~~)")
+_SENTENCE_TAIL = (".", ",", ";", ":", "!", "?")
+
+
+def _is_mostly_letters(line: str) -> bool:
+    """Guards the ALL CAPS rule, which otherwise fires on anything without a
+    lowercase letter — a spreadsheet row like "Q1 | 1.2M" included."""
+    letters = sum(1 for char in line if char.isalpha())
+    visible = sum(1 for char in line if not char.isspace())
+    return (
+        letters >= HEADING_MIN_LETTERS
+        and letters >= visible * HEADING_MIN_LETTER_RATIO
+    )
+
+
+def _heading_name(line: str) -> str | None:
+    """The heading this line announces, or None if it is body text.
+
+    Three shapes are recognised because real documents use all of them:
+    markdown `# Title`, numbered `1.2 Title`, and ALL CAPS. Setext underlines
+    need the following line, so they are handled by the caller.
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > HEADING_MAX_LENGTH:
+        return None
+
+    atx = _ATX_HEADING.match(stripped)
+    if atx:
+        return atx.group(2).strip()
+
+    if _NUMBERED_HEADING.match(stripped) and not stripped.endswith(_SENTENCE_TAIL):
+        return stripped
+
+    if (
+        _UPPERCASE_HEADING.match(stripped)
+        and len(stripped.split()) <= HEADING_MAX_WORDS
+        and _is_mostly_letters(stripped)
+    ):
+        return stripped
+
+    return None
 
 
 class TextNormalizer:
@@ -66,127 +117,155 @@ class TextNormalizer:
         return re.sub(r"[^a-zA-Z0-9\s.,!?;:\-\']", "", text)
 
     def _remove_extra_whitespace(self, text: str) -> str:
-        return re.sub(r"\s+", " ", text)
+        """Collapse runs of spaces and tabs, leaving line breaks alone.
 
-    def _normalize_newlines(self, text: str) -> str:
-        """Normalize newlines while preserving paragraph structure"""
-        text = re.sub(r"\n\s*\n+", "\n\n", text)
-        text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
-        return text
+        A plain \\s+ collapse here is what used to flatten every document to a
+        single line, after which no heading regex, paragraph split or "\\n\\n"
+        chunk separator downstream could ever match.
+        """
+        return re.sub(r"[^\S\n]+", " ", text)
 
-    def __find_section_names(self, text):
-        sections = []
-        pattern = re.compile(r"^(?=.*[A-Z])[A-Z\s]+$", re.MULTILINE)
-        matches = list(pattern.finditer(text))
-        for i, match in enumerate(matches):
-            sectionName = match.group().strip()
-            sections.append(sectionName)
-        return sections
-
-    def __create_normalized_content_meta_data(
-        self,
-        document_id,
-        source_file,
-        file_type,
-        ingestion_time,
-        normalization_version,
-        content_hash,
-    ):
-        file_name = Path(source_file).name
-        return NormalizedTextMetaData(
-            document_id,
-            source_file,
-            file_name,
-            file_type,
-            ingestion_time,
-            normalization_version,
-            content_hash,
-        )
-
-    def _has_section(self, normalizedText):
-        return len(self.__find_section_names(normalizedText)) != 0
-
-    def __process_text(self, text: str) -> str:
-        if not text:
-            return ""
-
+    def __process_line(self, line: str) -> str:
         if self.remove_urls:
-            text = self._replace_urls(text)
+            line = self._replace_urls(line)
 
         if self.remove_emails:
-            text = self._replace_emails(text)
-
-        if self.remove_newlines:
-            text = self._normalize_newlines(text)
+            line = self._replace_emails(line)
 
         if self.lowercase:
-            text = text.lower()
+            line = line.lower()
+
         if self.remove_numbers:
-            text = self._remove_numbers(text)
+            line = self._remove_numbers(line)
 
         if self.remove_punctuation:
-            text = self._remove_punctuation(text)
+            line = self._remove_punctuation(line)
 
         if self.remove_special_chars:
-            text = self._remove_special_chars(text)
+            line = self._remove_special_chars(line)
 
         if self.remove_extra_whitespace:
-            text = self._remove_extra_whitespace(text)
+            line = self._remove_extra_whitespace(line)
 
         if self.strip_whitespace:
-            text = text.strip()
+            line = line.strip()
 
-        return text
+        return line
 
-    def normalize_text(self, file_path, text) -> NormalizedContent:
-        file_name = Path(file_path).name
-        file_type = Path(file_path).suffix.lower()
+    def __group_lines(self, text: str) -> List[Tuple[bool, List[str]]]:
+        """Split raw text into (is_heading, lines) blocks.
+
+        Runs before any lexical transform, so ALL CAPS headings are still
+        recognisable even when the profile lowercases, and `#` is still there
+        when the profile strips punctuation.
+        """
+        lines = re.sub(r"\r\n?", "\n", text).split("\n")
+        blocks: List[Tuple[bool, List[str]]] = []
+        body: List[str] = []
+        in_code_fence = False
+        index = 0
+
+        while index < len(lines):
+            line = lines[index]
+            if _CODE_FENCE.match(line):
+                in_code_fence = not in_code_fence
+
+            name = None
+            if not in_code_fence:
+                name = _heading_name(line)
+                if (
+                    name is None
+                    and line.strip()
+                    and len(line.strip()) <= HEADING_MAX_LENGTH
+                    and index + 1 < len(lines)
+                    and _SETEXT_UNDERLINE.match(lines[index + 1])
+                ):
+                    name = line.strip()
+                    index += 1
+
+            if name is not None:
+                if body:
+                    blocks.append((False, body))
+                    body = []
+                blocks.append((True, [name]))
+            elif line.strip():
+                body.append(line)
+            elif body:
+                blocks.append((False, body))
+                body = []
+
+            index += 1
+
+        if body:
+            blocks.append((False, body))
+        return blocks
+
+    def __build_blocks(self, text: str) -> Tuple[str, Tuple[SectionSpan, ...]]:
+        """Normalize text and report where each section landed in the result."""
+        if not text:
+            return "", ()
+
+        joiner = " " if self.remove_newlines else "\n"
+        rendered: List[Tuple[bool, str, str]] = []
+        for is_heading, lines in self.__group_lines(text):
+            processed = [line for line in map(self.__process_line, lines) if line]
+            if not processed:
+                continue
+            rendered.append((is_heading, lines[0].strip(), joiner.join(processed)))
+
+        content = "\n\n".join(block for _, _, block in rendered)
+
+        headings: List[Tuple[str, int, int]] = []
+        cursor = 0
+        for is_heading, name, block in rendered:
+            if is_heading:
+                headings.append((name, cursor, cursor + len(block)))
+            cursor += len(block) + 2
+
+        spans: List[SectionSpan] = []
+        for position, (name, start, end) in enumerate(headings):
+            content_start = min(end + 2, len(content))
+            if position + 1 < len(headings):
+                content_end = max(content_start, headings[position + 1][1] - 2)
+            else:
+                content_end = len(content)
+            spans.append(SectionSpan(name, start, end, content_start, content_end))
+
+        return content, tuple(spans)
+
+    def __normalize(self, file_path, text: str) -> NormalizedContent:
+        source_path = str(file_path)
+        file_name = Path(source_path).name
+        file_type = Path(source_path).suffix.lower()
         ingestion_time = datetime.now(timezone.utc).isoformat()
-        has_section = self._has_section(text)
-        normalized_text = self.__process_text(text)
-        document_id = self.__generate_document_id(file_name, file_path, normalized_text)
+
+        normalized_text, sections = self.__build_blocks(text)
+        document_id = self.__generate_document_id(file_name, source_path, normalized_text)
         content_id = self.__generate_content_id(normalized_text)
+
         return NormalizedContent(
             content=normalized_text,
-            has_section=has_section,
-            meta_data=self.__create_normalized_content_meta_data(
+            has_section=len(sections) > 0,
+            meta_data=NormalizedTextMetaData(
                 document_id,
-                file_path,
+                source_path,
+                file_name,
                 file_type,
                 ingestion_time,
                 NORMALIZATION_VERSION,
                 content_id,
             ),
+            sections=sections,
         )
 
-    def normalize_all(self, extracted_texts: Dict[str, str]) -> List[NormalizedContent]:
-        normalized_documents_contents = []
-        for file_path, text in extracted_texts.items():
-            file_name = Path(file_path).name
-            file_type = Path(file_path).suffix.lower()
-            ingestion_time = datetime.now(timezone.utc).isoformat()
-            has_section = self._has_section(text)
-            normalized_text = self.__process_text(text)
-            document_id = self.__generate_document_id(
-                file_name, file_path, normalized_text
-            )
-            content_id = self.__generate_content_id(normalized_text)
-            normalized_documents_contents.append(
-                NormalizedContent(
-                    normalized_text,
-                    has_section,
-                    self.__create_normalized_content_meta_data(
-                        document_id,
-                        file_path,
-                        file_type,
-                        ingestion_time,
-                        NORMALIZATION_VERSION,
-                        content_id,
-                    ),
-                )
-            )
+    def normalize_text(self, file_path, text) -> NormalizedContent:
+        return self.__normalize(file_path, text)
 
-        return normalized_documents_contents
+    def normalize_all(self, extracted_texts: Dict[str, str]) -> List[NormalizedContent]:
+        return [
+            self.__normalize(file_path, text)
+            for file_path, text in extracted_texts.items()
+        ]
 
 
 class NormalizationProfiles:

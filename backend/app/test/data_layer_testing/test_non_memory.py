@@ -72,23 +72,27 @@ class TestNonMemoryBugs(unittest.TestCase):
         self.assertTrue(norm_content_lower.has_section)
 
     def test_bug_2_3_text_extractor(self):
-        # Create dummy csv, html, xml files
+        # Markup is stripped rather than passed through: tags and inline
+        # scripts used to be chunked and embedded along with the prose.
         with open("test.csv", "w") as f:
             f.write("a,b,c\n1,2,3")
         with open("test.html", "w") as f:
-            f.write("<html></html>")
+            f.write("<html><body><script>evil()</script><p>Hello</p></body></html>")
         with open("test.xml", "w") as f:
-            f.write("<xml></xml>")
+            f.write("<note><body>Reminder</body></note>")
 
         extractor = TextExtractor()
         _, csv_text = extractor.extract_text_from_file("test.csv")
         self.assertEqual(csv_text, "a,b,c\n1,2,3")
 
         _, html_text = extractor.extract_text_from_file("test.html")
-        self.assertEqual(html_text, "<html></html>")
+        self.assertIn("Hello", html_text)
+        self.assertNotIn("<p>", html_text)
+        self.assertNotIn("evil()", html_text)
 
         _, xml_text = extractor.extract_text_from_file("test.xml")
-        self.assertEqual(xml_text, "<xml></xml>")
+        self.assertIn("Reminder", xml_text)
+        self.assertNotIn("<body>", xml_text)
 
         os.remove("test.csv")
         os.remove("test.html")

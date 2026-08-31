@@ -1,5 +1,11 @@
 # Bug Fixes and Testing Report
 
+> **Status — superseded.** This is a point-in-time record of a test run against
+> the code as it stood then, kept for history. The failures below have since been
+> fixed; the ingestion layer was reworked again in the "Ingestion" pass recorded
+> in `todo.md`. For current behaviour see `docs/data_layer_docs/` and the live
+> suite in `test/data_layer_testing/`.
+
 This report outlines the fixes made to resolve all bugs outside the `memory/` directory as requested, ensuring the code is production-ready. 
 
 ## Section 1: Configuration & System Architecture

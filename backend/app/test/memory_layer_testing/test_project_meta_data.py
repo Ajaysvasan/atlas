@@ -16,7 +16,10 @@ import numpy as np
 import pytest
 
 from config import Config
-from data_layer.datalayer_exceptions.datalayer_exceptions import VectorNotFoundEror
+from data_layer.datalayer_exceptions.datalayer_exceptions import (
+    DuplicateVectorException,
+    VectorNotFoundEror,
+)
 from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
 from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
     ProjectMetaData,
@@ -39,7 +42,7 @@ class FakeVectorRepository:
 
     def insert(self, vector_id, vector):
         if int(vector_id) in self.store:
-            raise RuntimeError("duplicate key value violates unique constraint")
+            raise DuplicateVectorException(vector_id)
         self.store[int(vector_id)] = np.asarray(vector, dtype=np.float32)
 
     def batch_insert(self, vector_ids, vectors):
@@ -199,9 +202,13 @@ class TestAddProjectVector:
         assert meta.get_all_summary_vector_id() == [11, 12]
 
     def test_duplicate_id_is_rejected(self, meta):
-        """Unlike the batch path: the single insert has no on-conflict clause."""
+        """Unlike the batch path: the single insert has no on-conflict clause.
+
+        DuplicateVectorException rather than a generic write failure, so the
+        caller can tell the vector is already stored and skip compensating.
+        """
         meta.add_project_vector(vec(1), 11, "Alpha")
-        with pytest.raises(RuntimeError):
+        with pytest.raises(DuplicateVectorException):
             meta.add_project_vector(vec(2), 11, "Alpha")
 
 

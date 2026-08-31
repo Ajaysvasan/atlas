@@ -13,7 +13,6 @@ class Chunker:
         self.overlap = overlap
         self.db_path = db_path
 
-    #  No return statement as the values are stored in the Db
     def _call_hierarchical_chunker(
         self, hierarchical_chunker_list: List[NormalizedContent]
     ) -> List[HChunk]:
@@ -26,7 +25,7 @@ class Chunker:
         self, recursive_chunker_list: List[NormalizedContent]
     ) -> List[RChunk]:
         recursive_chunker = RecursiveChunker(
-            recursive_chunker_list, self.chunk_size, self.overlap
+            recursive_chunker_list, self.chunk_size, self.overlap, db_path=self.db_path
         )
         return recursive_chunker.recursive_chunker()
 
@@ -48,6 +47,20 @@ class Chunker:
         hierarchical_chunker_list, recursive_chunker_list = (
             self.__hierarchical_and_recursive_objects(normalised_content)
         )
-        h_chunks = self._call_hierarchical_chunker(hierarchical_chunker_list)
-        r_chunks = self.__call_recursive_chunker(recursive_chunker_list)
+        h_chunks = (
+            self._call_hierarchical_chunker(hierarchical_chunker_list)
+            if hierarchical_chunker_list
+            else []
+        )
+        r_chunks = (
+            self.__call_recursive_chunker(recursive_chunker_list)
+            if recursive_chunker_list
+            else []
+        )
         return h_chunks, r_chunks
+
+    def chunk_document(
+        self, normalised_content: NormalizedContent
+    ) -> List[HChunk] | List[RChunk]:
+        h_chunks, r_chunks = self.chunk_per_document([normalised_content])
+        return h_chunks if normalised_content.has_section else r_chunks

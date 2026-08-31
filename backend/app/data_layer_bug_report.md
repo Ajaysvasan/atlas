@@ -1,5 +1,11 @@
 # Data Layer Bug Reproduction Report
 
+> **Status — superseded.** This is a point-in-time record of a test run against
+> the code as it stood then, kept for history. The failures below have since been
+> fixed; the ingestion layer was reworked again in the "Ingestion" pass recorded
+> in `todo.md`. For current behaviour see `docs/data_layer_docs/` and the live
+> suite in `test/data_layer_testing/`.
+
 This report outlines the unit testing and validation process executed against the newly discovered `data_layer` architectural bugs (Section 7 in `bugs.md`). To prove these bugs exist without deploying a broken environment, I isolated the components and built a targeted mock suite simulating external dependencies.
 
 ## Testing Setup

@@ -24,7 +24,7 @@ Initializes internal component instances using defaults from `Config`.
 #### Methods
 
 ##### `load_file(self, folder_path: Union[str, Path]) -> Dict[str, List[Path]]`
-Scans a target folder for supported document files categorized by their extension.
+Scans a target folder for candidate documents, categorized by extension. Anything that is not a known binary format is a candidate.
 
 ###### Parameters
 | Parameter | Type | Description |
@@ -33,7 +33,7 @@ Scans a target folder for supported document files categorized by their extensio
 
 ###### Return Value
 - **Type:** `Dict[str, List[Path]]`
-- **Description:** Dictionary mapping extension strings (`"pdf"`, `"docx"`, etc.) to lists of `Path` objects.
+- **Description:** Dictionary mapping extension strings (`"pdf"`, `"docx"`, `"rs"`, `"tex"`, …, or `"noext"`) to lists of `Path` objects. Only non-empty categories appear.
 
 ---
 
@@ -76,7 +76,7 @@ Sanitizes a single document text string using the default RAG normalizer profile
 
 ###### Return Value
 - **Type:** `NormalizedContent`
-- **Description:** Sanitized output wrapper containing string `content` and `has_section` boolean flag.
+- **Description:** Sanitized output wrapper containing string `content`, the `has_section` flag, and the `sections` tuple of `SectionSpan` offsets.
 
 ---
 
@@ -91,6 +91,20 @@ Sanitizes all extracted texts contained within a path-to-text dictionary.
 ###### Return Value
 - **Type:** `List[NormalizedContent]`
 - **Description:** List of `NormalizedContent` objects ready for chunking.
+
+---
+
+##### `chunk_text(self, normalized_content: NormalizedContent) -> Union[List[HChunk], List[RChunk]]`
+Chunks a single document, routed the same way a batch would be. Delegates to `Chunker.chunk_document()`.
+
+###### Parameters
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `normalized_content` | `NormalizedContent` | A single normalized document object. |
+
+###### Return Value
+- **Type:** `Union[List[HChunk], List[RChunk]]`
+- **Description:** Hierarchical chunks when the document has sections, recursive chunks otherwise.
 
 ---
 
