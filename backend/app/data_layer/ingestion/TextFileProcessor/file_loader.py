@@ -75,14 +75,17 @@ class FileLoader:
         try:
             size = os.path.getsize(item_path)
         except OSError as e:
-            logger.warning(f"Could not stat '{item_path}': {e}")
+            logger.warning("Could not stat '%s': %s", item_path, e)
             return False
         if size == 0:
-            logger.debug(f"Skipped empty file: '{item_path}'")
+            logger.debug("Skipped empty file: '%s'", item_path)
             return False
         if size > self.max_file_size:
             logger.warning(
-                f"Skipped '{item_path}': {size} bytes exceeds the {self.max_file_size} byte limit."
+                "Skipped '%s': %s bytes exceeds the %s byte limit.",
+                item_path,
+                size,
+                self.max_file_size,
             )
             return False
         return True
@@ -96,7 +99,7 @@ class FileLoader:
         # so the scan returned a partial tree and reported success.
         real_path = os.path.realpath(path)
         if real_path in visited:
-            logger.debug(f"Skipped already visited directory: '{path}'")
+            logger.debug("Skipped already visited directory: '%s'", path)
             return
         visited.add(real_path)
 
@@ -112,31 +115,40 @@ class FileLoader:
 
                 category = self.__get_file_category(item_path)
                 if category == "unknown":
-                    logger.debug(f"Ignored non-document file during scan: '{item_path}'")
+                    logger.debug(
+                        "Ignored non-document file during scan: '%s'",
+                        item_path,
+                    )
                     continue
                 if not self.__should_load(item_path):
                     continue
                 loaded_files.setdefault(category, []).append(Path(item_path))
 
         except PermissionError:
-            logger.error(f"Permission denied while scanning directory: '{path}'")
+            logger.error("Permission denied while scanning directory: '%s'", path)
         except OSError as e:
-            logger.error(f"Error scanning directory '{path}': {e}", exc_info=True)
+            logger.error("Error scanning directory '%s': %s", path, e, exc_info=True)
 
     def load_files(self, folder_path) -> Dict[str, List[Path]]:
         if not os.path.exists(folder_path):
-            logger.error(f"load_files failed: path '{folder_path}' does not exist.")
+            logger.error("load_files failed: path '%s' does not exist.", folder_path)
             raise ValueError(f"The provided path '{folder_path}' does not exist.")
         if not self.__is_directory(folder_path):
-            logger.error(f"load_files failed: path '{folder_path}' is not a directory.")
+            logger.error(
+                "load_files failed: path '%s' is not a directory.",
+                folder_path,
+            )
             raise ValueError(f"The provided path '{folder_path}' is not a directory.")
 
-        logger.info(f"Scanning directory '{folder_path}' for documents...")
+        logger.info("Scanning directory '%s' for documents...", folder_path)
         loaded_files: Dict[str, List[Path]] = {}
 
         self.__scan_directory(str(folder_path), loaded_files, set())
         total_loaded = sum(len(files) for files in loaded_files.values())
         logger.info(
-            f"Loaded {total_loaded} file(s) across {len(loaded_files)} file categories from '{folder_path}'."
+            "Loaded %s file(s) across %s file categories from '%s'.",
+            total_loaded,
+            len(loaded_files),
+            folder_path,
         )
         return loaded_files

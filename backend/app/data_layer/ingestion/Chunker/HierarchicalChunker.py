@@ -2,6 +2,7 @@ import hashlib
 import re
 from typing import List
 
+from config import get_logger
 from data_layer.ingestion.metadata.metadata import ChunkMetaData
 from data_layer.ingestion.nodes.nodes import (
     Context,
@@ -14,6 +15,8 @@ from data_layer.ingestion.nodes.nodes import (
 
 from .DB_Manager import Manager
 from .windowing import sliding_windows
+
+logger = get_logger(__name__)
 
 PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
 
@@ -195,6 +198,7 @@ class HierarchicalChunker:
 
     def process_doc(self) -> List[HChunk]:
         if not self.normalizedDocumentsContents:
+            logger.debug("Hierarchical chunker called with no documents")
             return []
 
         docObjs = self.__make_document_objs()
@@ -208,4 +212,9 @@ class HierarchicalChunker:
                 )
         finally:
             h_manager.close()
+        logger.debug(
+            "Hierarchical chunker produced %d chunk(s) from %d document(s)",
+            len(chunks),
+            len(docObjs),
+        )
         return chunks

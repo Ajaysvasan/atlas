@@ -4,13 +4,15 @@ from typing import List
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from config import Config
+from config import Config, get_logger, log_timing
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
     InvalidEmbeddingArgument,
 )
 from data_layer.ingestion.metadata.metadata import EmbeddedChunkMetaData
 from data_layer.ingestion.nodes.nodes import EmbeddedChunk, HChunk, RChunk
 
+
+logger = get_logger(__name__)
 
 # Re-exported so callers of this module can reason about the id range without
 # reaching for Config. See Config.VECTOR_ID_MASK for the rationale.
@@ -24,7 +26,10 @@ class EmbeddingManager:
         embeddding_dimension: int = Config.EMBEDDING_DIMENSIONS,
     ):
         self.model_name = model_name
-        self.model = SentenceTransformer(model_name)
+        # Worth timing: this pulls ~100MB of weights and dominates the cost of a
+        # short run, so an ingestion that looks slow is usually this line.
+        with log_timing(logger, "loading embedding model", model=model_name):
+            self.model = SentenceTransformer(model_name)
         self.embedding_dimension = embeddding_dimension
 
     def __generate_vector_id(self, chunk_id: str) -> int:
@@ -67,6 +72,9 @@ class EmbeddingManager:
 
         vectors = []
         batch_size = 64
+        logger.debug(
+            "Embedding %d chunk(s) in batches of %d", len(texts), batch_size
+        )
         for i in range(0, len(texts), batch_size):
             batch_vectors = self.model.encode(
                 texts[i : i + batch_size], truncate_dim=self.embedding_dimension

@@ -1,10 +1,13 @@
 import hashlib
 from typing import List, Sequence, Tuple
 
+from config import get_logger
 from data_layer.ingestion.metadata.metadata import ChunkMetaData
 from data_layer.ingestion.nodes.nodes import Document, NormalizedContent, RChunk
 
 from .windowing import sliding_windows
+
+logger = get_logger(__name__)
 
 DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "]
 
@@ -154,10 +157,18 @@ class RecursiveChunker:
                 )
 
         self.__persist(chunk_values)
+        logger.debug(
+            "Recursive chunker produced %d chunk(s) from %d document(s)",
+            len(chunk_values),
+            len(self.normalized_documents_contents),
+        )
         return chunk_values
 
     def __persist(self, chunks: List[RChunk]) -> None:
         if not self.db_path or not chunks:
+            # A chunker built without a db_path is in-memory by design (the
+            # pipeline always passes one), so this is not a warning.
+            logger.debug("Recursive chunks not persisted: db_path=%s", self.db_path)
             return
         from .DB_Manager import Manager
 

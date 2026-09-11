@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 
 from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
-from config import Config
+from config import Config, get_logger, log_timing
 
 from .Chunker.chunker import Chunker
 from .embedding.EmbeddingManager import EmbeddingManager
@@ -13,9 +13,13 @@ from .TextFileProcessor.file_loader import FileLoader
 from .TextFileProcessor.text_extractor import TextExtractor
 
 
+logger = get_logger(__name__)
+
+
 # I Don't need any more abstraction here since I am not mutating the data rather just providing an simplified interface that I can use
 class IngestionPipeline:
     def __init__(self):
+        logger.info("Building ingestion pipeline")
         self.f_loader = FileLoader()
         self.t_extractor = TextExtractor()
         self.t_normalizer = NormalizationProfiles.rag_ingestion()
@@ -31,6 +35,7 @@ class IngestionPipeline:
             num_threads=Config.NUM_THREADS,
             k_neighbors=Config.K_NEIGHBORS,
         )
+        logger.debug("Ingestion pipeline ready")
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:
         """Returns the files that are within that specified path
@@ -47,7 +52,8 @@ class IngestionPipeline:
         self, loaded_files: Dict[str, List[Path]]
     ) -> Dict[str, str]:
         """Returns the extract texts from a set of loaded files"""
-        return self.t_extractor.extract_all(loaded_files)
+        with log_timing(logger, "extraction", files=sum(len(v) for v in loaded_files.values())):
+            return self.t_extractor.extract_all(loaded_files)
 
     def normalize_doc(self, file_path, text) -> NormalizedContent:
         return self.t_normalizer.normalize_text(file_path, text)
@@ -55,7 +61,8 @@ class IngestionPipeline:
     def normalize_docs(
         self, extracted_texts: Dict[str, str]
     ) -> List[NormalizedContent]:
-        return self.t_normalizer.normalize_all(extracted_texts)
+        with log_timing(logger, "normalisation", documents=len(extracted_texts)):
+            return self.t_normalizer.normalize_all(extracted_texts)
 
     def chunk_text(
         self, normalized_content: NormalizedContent
@@ -66,15 +73,20 @@ class IngestionPipeline:
     def chunk_texts(
         self, normalized_contents: List[NormalizedContent]
     ) -> Tuple[List[HChunk], List[RChunk]]:
-        return self.chunker.chunk_per_document(normalized_contents)
+        with log_timing(logger, "chunking", documents=len(normalized_contents)):
+            return self.chunker.chunk_per_document(normalized_contents)
 
     def embed(
         self, arg: HChunk | RChunk | List[HChunk | RChunk]
     ) -> EmbeddedChunk | List[EmbeddedChunk]:
-        return self.embedder.embed(arg)
+        if not isinstance(arg, list):
+            return self.embedder.embed(arg)
+        with log_timing(logger, "embedding", chunks=len(arg)):
+            return self.embedder.embed(arg)
 
     def ingest_vector(self, embedded_value: EmbeddedChunk) -> None:
         self.vector_db.insert(embedded_value)
 
     def batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> None:
-        self.vector_db.batch_insert(embedded_objs)
+        with log_timing(logger, "vector insert", vectors=len(embedded_objs)):
+            self.vector_db.batch_insert(embedded_objs)

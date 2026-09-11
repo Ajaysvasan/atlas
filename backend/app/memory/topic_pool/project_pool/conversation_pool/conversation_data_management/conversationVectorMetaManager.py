@@ -4,10 +4,13 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
+from config import get_logger
 from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
     connect,
     enable_wal,
 )
+
+logger = get_logger(__name__)
 
 
 class ConversationVectorMetaDataRepository:
@@ -64,13 +67,14 @@ class ConversationVectorMetaDataRepository:
                 self.conn.commit()
             except BaseException:
                 self.conn.rollback()
+                logger.debug("Rolled back a write on %s", self.db_path)
                 raise
 
     def _init_db(self):
         # check_same_thread=False is what allows the shared instance described
         # in the class docstring; _lock is what makes it correct.
         self.conn = connect(self.db_path, check_same_thread=False)
-        self.journal_mode = enable_wal(self.conn)
+        self.journal_mode = enable_wal(self.conn, self.db_path)
         cursor = self.conn.cursor()
 
         cursor.execute("""
@@ -112,6 +116,11 @@ class ConversationVectorMetaDataRepository:
         """)
 
         self.conn.commit()
+        logger.debug(
+            "Snapshot metadata store ready at %s (journal=%s)",
+            self.db_path,
+            self.journal_mode,
+        )
 
     def batch_insert_summary_chunks(self, records: List[Tuple[str, str, str, str]]):
         """records: [(chunk_id, chunk, created_at, chunker_type), ...]
@@ -306,6 +315,12 @@ class ConversationVectorMetaDataRepository:
                 "INSERT OR IGNORE INTO summary_snapshot_map (cumulative_vector_id, summary_vector_id) VALUES (?, ?)",
                 [(int(r[0]), int(r[1])) for r in map_rows],
             )
+        logger.info(
+            "Stored snapshot %s for project %s over %d chunk(s)",
+            cumulative_row[0],
+            cumulative_row[3],
+            len(chunks),
+        )
 
     def get_highest_summarised_sequence(self) -> int | None:
         """Highest conversation sequence_number any snapshot has covered.

@@ -1,11 +1,14 @@
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
+from config import get_logger
 from memory.memory_pool_exceptions import EmptyTurnContent, InvalidRole
 
 from .fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
 )
+
+logger = get_logger(__name__)
 
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
@@ -50,7 +53,9 @@ class FullConversation:
         through a batch cannot leave the first half committed.
         """
         validated = [self.__validate_turn(role, text) for role, text in turns]
-        return self.fullConversationoRep.append_turns(validated)
+        sequences = self.fullConversationoRep.append_turns(validated)
+        logger.debug("Appended %d turn(s) up to sequence %s", len(sequences), sequences[-1] if sequences else None)
+        return sequences
 
     def next_sequence_number(self) -> int:
         return self.fullConversationoRep.next_sequence_number()

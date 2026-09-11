@@ -3,7 +3,10 @@ from typing import List
 import numpy as np
 from numpy import uint32
 
+from config import get_logger
 from data_layer.vector_db_manager.repository.vectorRepository import VectorRepository
+
+logger = get_logger(__name__)
 
 
 class ConversationVectorManager:
@@ -33,6 +36,9 @@ class ConversationVectorManager:
         Removes vectors from the repository. Used to undo a partially written
         snapshot when its metadata transaction fails.
         """
+        logger.debug(
+            "Deleting %d vector(s) for project %s", len(vector_ids), self.project_id
+        )
         self.repository.batch_delete(vector_ids)
 
     def get_vector(self, vector_id: uint32) -> np.ndarray:

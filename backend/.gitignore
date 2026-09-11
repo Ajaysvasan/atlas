@@ -5,6 +5,12 @@ __pycache__/
 data/
 dataset
 *.log
+# Rotation backups: app.log.1 .. app.log.5. `*.log` does not match them.
+*.log.[0-9]
 *.db
+# WAL sidecars, which sit beside every conversation database. `*.db` does
+# not match them either, and a committed -wal is a partial transaction log.
+*.db-wal
+*.db-shm
 disk_ann_index
 models/

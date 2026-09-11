@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from numpy import float32, ndarray, uint32
 from numpy.typing import NDArray
 
-from config import Config
+from config import Config, get_logger
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
     DuplicateVectorException,
     InvalidBatchSize,
@@ -24,6 +24,8 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
     VectorInsertionError,
     VectorNotFoundEror,
 )
+
+logger = get_logger(__name__)
 
 
 class VectorRepository:
@@ -58,6 +60,9 @@ class VectorRepository:
             if value is None
         ]
         if missing:
+            logger.error(
+                "PostgreSQL configuration incomplete; missing %s", ", ".join(missing)
+            )
             raise MissingDatabaseConfiguration(missing)
 
         self.conn = psycopg.connect(
@@ -70,6 +75,15 @@ class VectorRepository:
         self.curr = self.conn.cursor()
         self.__create_extension()
         self.__create_table()
+        # Host and database only. The password is deliberately never logged, and
+        # nothing here should ever start interpolating the whole DSN.
+        logger.info(
+            "Connected to vector store %s@%s:%s (project %s)",
+            self.__db_name,
+            self.__host,
+            self.__port,
+            self.project_id,
+        )
 
     def __create_extension(self):
         query = f"create extension if not exists vector;"
@@ -95,9 +109,11 @@ class VectorRepository:
             # Reported apart from a failed write: the caller can carry on
             # knowing the vector is stored, rather than compensating for it.
             self.conn.rollback()
+            logger.debug("Vector %s already present for project %s", vector_id, self.project_id)
             raise DuplicateVectorException(vector_id) from e
         except Exception as e:
             self.conn.rollback()
+            logger.error("Insert of vector %s failed: %s", vector_id, e)
             raise VectorInsertionError(vector_id, e) from e
 
     def __insert_batch_vector(self, vectors: ndarray, vector_ids: List[uint32]):
@@ -116,8 +132,14 @@ class VectorRepository:
             ]
             self.curr.executemany(query, rows)
             self.conn.commit()
+            logger.debug(
+                "Stored %d vector(s) for project %s", len(rows), self.project_id
+            )
         except Exception as e:
             self.conn.rollback()
+            logger.error(
+                "Batch insert of %d vector(s) failed: %s", len(vector_ids), e
+            )
             raise VectorInsertionError(vector_ids, e) from e
 
     def __update_vector(self, vector: ndarray, vector_id: uint32) -> None:
@@ -169,6 +191,7 @@ class VectorRepository:
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()
+            logger.error("Delete of %d vector(s) failed: %s", len(vector_ids), e)
             raise VectorInsertionError(vector_ids, e) from e
 
     def insert(self, vector_id: uint32, vector: ndarray) -> None:

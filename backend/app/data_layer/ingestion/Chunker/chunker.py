@@ -1,10 +1,12 @@
 from typing import List, Tuple
 
-from config import Config
+from config import Config, get_logger
 from data_layer.ingestion.nodes.nodes import HChunk, NormalizedContent, RChunk
 
 from .HierarchicalChunker import HierarchicalChunker
 from .RecursiveChunker import RecursiveChunker
+
+logger = get_logger(__name__)
 
 
 class Chunker:
@@ -47,6 +49,15 @@ class Chunker:
         hierarchical_chunker_list, recursive_chunker_list = (
             self.__hierarchical_and_recursive_objects(normalised_content)
         )
+        # The routing split is worth a line on its own: a corpus that lands
+        # entirely on the recursive side means the normaliser found no headings
+        # anywhere, which is a normaliser problem showing up as bad retrieval.
+        logger.debug(
+            "Routing %d document(s): %d hierarchical, %d recursive",
+            len(normalised_content),
+            len(hierarchical_chunker_list),
+            len(recursive_chunker_list),
+        )
         h_chunks = (
             self._call_hierarchical_chunker(hierarchical_chunker_list)
             if hierarchical_chunker_list
@@ -56,6 +67,12 @@ class Chunker:
             self.__call_recursive_chunker(recursive_chunker_list)
             if recursive_chunker_list
             else []
+        )
+        logger.info(
+            "Chunked %d document(s) into %d hierarchical and %d recursive chunk(s)",
+            len(normalised_content),
+            len(h_chunks),
+            len(r_chunks),
         )
         return h_chunks, r_chunks
 

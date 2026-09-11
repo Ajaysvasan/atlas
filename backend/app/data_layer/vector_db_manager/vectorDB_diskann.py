@@ -86,16 +86,16 @@ class VectorDb_diskann:
     def save(self, save_path=Config.INDEX_PATH):
         path = Path(save_path)
         if not path.exists():
-            logger.info(f"Creating DiskANN index directory '{save_path}'...")
+            logger.info("Creating DiskANN index directory '%s'...", save_path)
             path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Saving DiskANN dynamic index to '{save_path}'...")
+        logger.info("Saving DiskANN dynamic index to '%s'...", save_path)
         self.dynamic_dann.save(save_path)
         logger.debug("DiskANN dynamic index saved successfully to disk.")
 
     def load(self, load_path=Config.INDEX_PATH) -> dann.DynamicMemoryIndex | None:
         path = Path(load_path)
         if path.exists():
-            logger.info(f"Loading DiskANN index from '{load_path}'...")
+            logger.info("Loading DiskANN index from '%s'...", load_path)
             index = self.dynamic_dann.from_file(
                 index_directory=load_path,
                 max_vectors=self.max_vectors,
@@ -110,6 +110,6 @@ class VectorDb_diskann:
             logger.info("DiskANN index loaded successfully.")
             return index
         logger.error(
-            f"Failed to load DiskANN index: Directory '{load_path}' does not exist."
+            "Failed to load DiskANN index: Directory '%s' does not exist.", load_path
         )
         raise IndexDirectoryDoesNotExists(load_path)

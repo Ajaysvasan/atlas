@@ -4,8 +4,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from config import get_logger
 from data_layer.ingestion.metadata.metadata import NormalizedTextMetaData
 from data_layer.ingestion.nodes.nodes import NormalizedContent, SectionSpan
+
+logger = get_logger(__name__)
 
 NORMALIZATION_VERSION = "rag_v2"
 
@@ -240,6 +243,14 @@ class TextNormalizer:
         ingestion_time = datetime.now(timezone.utc).isoformat()
 
         normalized_text, sections = self.__build_blocks(text)
+        if not normalized_text:
+            logger.warning("Normalising '%s' produced no text", source_path)
+        elif not sections:
+            # No headings means this document takes the recursive path and loses
+            # section context in retrieval. Occasional is expected; every
+            # document in a corpus doing it points at heading detection, not the
+            # corpus.
+            logger.debug("No sections detected in '%s'", file_name)
         document_id = self.__generate_document_id(file_name, source_path, normalized_text)
         content_id = self.__generate_content_id(normalized_text)
 
@@ -262,10 +273,18 @@ class TextNormalizer:
         return self.__normalize(file_path, text)
 
     def normalize_all(self, extracted_texts: Dict[str, str]) -> List[NormalizedContent]:
-        return [
+        normalized = [
             self.__normalize(file_path, text)
             for file_path, text in extracted_texts.items()
         ]
+        sectioned = sum(1 for content in normalized if content.has_section)
+        logger.info(
+            "Normalised %d document(s); %d with sections, %d flat",
+            len(normalized),
+            sectioned,
+            len(normalized) - sectioned,
+        )
+        return normalized
 
 
 class NormalizationProfiles:

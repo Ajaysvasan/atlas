@@ -4,10 +4,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
+from config import get_logger
 from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
     connect,
     enable_wal,
 )
+
+logger = get_logger(__name__)
 
 # A conversation turn is stored whole: one turn -> one chunk. `chunker_type`
 # records that provenance so a future splitting strategy can coexist with rows
@@ -39,7 +42,7 @@ class FullConversationRepository:
 
     def __init_db(self):
         with connect(self.db_path) as conn:
-            self.journal_mode = enable_wal(conn)
+            self.journal_mode = enable_wal(conn, self.db_path)
             cursor = conn.cursor()
             cursor.execute("""
             create table if not exists summary_chunks (

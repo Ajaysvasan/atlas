@@ -8,7 +8,9 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
 )
 from numpy import uint32
 
-from config import Config
+from config import Config, get_logger
+
+logger = get_logger(__name__)
 
 
 class VectorMetaDataRepository:
@@ -54,6 +56,7 @@ class VectorMetaDataRepository:
 
         except Exception as e:
             self.connection.rollback()
+            logger.error("Vector metadata insert for %s failed: %s", vectorId, e)
             raise e
 
     def __insert_batch_meta_data(
@@ -80,6 +83,9 @@ class VectorMetaDataRepository:
             self.connection.commit()
         except Exception as e:
             self.connection.rollback()
+            logger.error(
+                "Vector metadata batch insert of %d row(s) failed: %s", len(rows), e
+            )
             raise e
 
     def __get_meta_data(self, vectorId: uint32, columnName: str) -> str | int:

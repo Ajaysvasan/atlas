@@ -6,7 +6,9 @@ Welcome to the official API documentation for the **Final Year Project Backend A
 
 ### 1. Core Configuration & CLI Interface
 - [Configuration (`config.py`)](config.md)
-  - Centralized application settings (`Config`) and standardized logging (`get_logger`).
+  - Centralized application settings (`Config`), and the re-exports that keep `from config import get_logger` working.
+- [Logging (`logging_setup.py`)](logging.md)
+  - `get_logger` for modules and `configure_logging` for the entry point, plus correlation context (`log_context`), stage timing (`log_timing`), rotation and JSON output.
 - [Main Application Entrypoint (`main.py`)](main.md)
   - Startup initialization and execution mode orchestration.
 - [Interactive CLI Interface (`cli_interface.py`)](cli_interface.md)

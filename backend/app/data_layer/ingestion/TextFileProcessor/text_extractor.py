@@ -82,7 +82,7 @@ class TextExtractor:
             if detected.get("encoding") and detected.get("confidence", 0) >= 0.7:
                 return raw.decode(detected["encoding"], errors="replace")
         except (ImportError, LookupError, UnicodeDecodeError):
-            logger.debug(f"Could not detect the encoding of '{file_path}'.")
+            logger.debug("Could not detect the encoding of '%s'.", file_path)
 
         return raw.decode("latin-1", errors="replace")
 
@@ -115,7 +115,12 @@ class TextExtractor:
             logger.warning("python-docx is not installed. Run: pip install python-docx")
             return ""
         except Exception as e:
-            logger.error(f"Error reading DOCX file '{file_path}': {e}", exc_info=True)
+            logger.error(
+                "Error reading DOCX file '%s': %s",
+                file_path,
+                e,
+                exc_info=True,
+            )
             return ""
 
     def _docx_heading_level(self, paragraph) -> int:
@@ -135,12 +140,13 @@ class TextExtractor:
             return textract.process(file_path).decode("utf-8", errors="replace")
         except ImportError:
             logger.warning(
-                f"textract is not installed, so '{file_path}' cannot be read. "
-                "Run: pip install textract"
+                "textract is not installed, so '%s' cannot be read. "
+                "Run: pip install textract",
+                file_path,
             )
             return ""
         except Exception as e:
-            logger.error(f"Error reading '{file_path}': {e}", exc_info=True)
+            logger.error("Error reading '%s': %s", file_path, e, exc_info=True)
             return ""
 
     def _extract_from_pdf(self, file_path: str) -> str:
@@ -159,7 +165,7 @@ class TextExtractor:
             logger.warning("PyPDF2 is not installed. Run: pip install PyPDF2")
             return ""
         except Exception as e:
-            logger.error(f"Error reading PDF file '{file_path}': {e}", exc_info=True)
+            logger.error("Error reading PDF file '%s': %s", file_path, e, exc_info=True)
             return ""
 
     def _extract_from_pptx(self, file_path: str) -> str:
@@ -184,7 +190,12 @@ class TextExtractor:
             logger.warning("python-pptx is not installed. Run: pip install python-pptx")
             return ""
         except Exception as e:
-            logger.error(f"Error reading PPTX file '{file_path}': {e}", exc_info=True)
+            logger.error(
+                "Error reading PPTX file '%s': %s",
+                file_path,
+                e,
+                exc_info=True,
+            )
             return ""
 
     def _extract_from_xlsx(self, file_path: str) -> str:
@@ -205,7 +216,12 @@ class TextExtractor:
             logger.warning("openpyxl is not installed. Run: pip install openpyxl")
             return self._extract_from_binary_document(file_path)
         except Exception as e:
-            logger.error(f"Error reading spreadsheet '{file_path}': {e}", exc_info=True)
+            logger.error(
+                "Error reading spreadsheet '%s': %s",
+                file_path,
+                e,
+                exc_info=True,
+            )
             return ""
 
     def _extract_from_markup(self, file_path: str) -> str:
@@ -234,7 +250,7 @@ class TextExtractor:
             )
             return markup
         except Exception as e:
-            logger.error(f"Error parsing markup '{file_path}': {e}", exc_info=True)
+            logger.error("Error parsing markup '%s': %s", file_path, e, exc_info=True)
             return markup
 
     def _flatten_json(self, value, prefix: str = "") -> List[str]:
@@ -259,7 +275,11 @@ class TextExtractor:
         try:
             return "\n".join(line for line in self._flatten_json(json.loads(raw)) if line)
         except (json.JSONDecodeError, RecursionError) as e:
-            logger.warning(f"'{file_path}' is not valid JSON ({e}); read as plain text.")
+            logger.warning(
+                "'%s' is not valid JSON (%s); read as plain text.",
+                file_path,
+                e,
+            )
             return raw
 
     def _extract_from_notebook(self, file_path: str) -> str:
@@ -267,7 +287,7 @@ class TextExtractor:
         try:
             notebook = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.warning(f"'{file_path}' is not a readable notebook ({e}).")
+            logger.warning("'%s' is not a readable notebook (%s).", file_path, e)
             return raw
 
         blocks: List[str] = []
@@ -281,11 +301,14 @@ class TextExtractor:
     def extract_text_from_file(self, file_path) -> Tuple[str, str]:
         path = str(file_path)
         if not os.path.exists(path):
-            logger.error(f"extract_text_from_file failed: File does not exist: '{path}'")
+            logger.error(
+                "extract_text_from_file failed: File does not exist: '%s'",
+                path,
+            )
             raise FileNotFoundError(path)
 
         extension = Path(path).suffix.lower()
-        logger.debug(f"Extracting text from '{path}' (extension: {extension})")
+        logger.debug("Extracting text from '%s' (extension: %s)", path, extension)
 
         handler = self._handlers.get(extension, self._extract_from_txt)
         return path, handler(path)
@@ -294,24 +317,36 @@ class TextExtractor:
         extracted_texts: Dict[str, str] = {}
         total_files = sum(len(paths) for paths in loaded_files.values())
         logger.info(
-            f"Starting batch text extraction across {total_files} file(s) in {len(loaded_files)} categories..."
+            "Starting batch text extraction across %s file(s) in %s categories...",
+            total_files,
+            len(loaded_files),
         )
 
         for category, file_paths in loaded_files.items():
             if file_paths:
-                logger.info(f"Extracting category: '{category}' ({len(file_paths)} files)")
+                logger.info(
+                    "Extracting category: '%s' (%s files)",
+                    category,
+                    len(file_paths),
+                )
             for file_path in file_paths:
-                logger.debug(f"Processing extraction for: '{file_path}'")
+                logger.debug("Processing extraction for: '%s'", file_path)
                 try:
                     path, text = self.extract_text_from_file(file_path)
                 except (InvalidFileType, FileNotFoundError, OSError) as e:
                     # One unreadable file should not abandon the rest of the batch.
-                    logger.warning(f"Skipped '{file_path}': {e}")
+                    logger.warning("Skipped '%s': %s", file_path, e)
                     continue
                 if text.strip():
                     extracted_texts[path] = text
                 else:
-                    logger.warning(f"Skipped '{file_path}': no text could be extracted.")
+                    logger.warning(
+                        "Skipped '%s': no text could be extracted.",
+                        file_path,
+                    )
 
-        logger.info(f"Successfully extracted text from {len(extracted_texts)} file(s).")
+        logger.info(
+            "Successfully extracted text from %s file(s).",
+            len(extracted_texts),
+        )
         return extracted_texts

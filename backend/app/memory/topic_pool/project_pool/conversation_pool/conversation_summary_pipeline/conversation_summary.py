@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List
 
 import numpy as np
 
-from config import Config
+from config import Config, get_logger, log_timing
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
     ConversationVectorMetaDataRepository,
 )
@@ -19,6 +20,8 @@ from memory.topic_pool.project_pool.conversation_pool.fullconversation_repositor
     utc_now,
 )
 from memory.topic_pool.project_pool.conversation_pool.snapshot import SnapShot
+
+logger = get_logger(__name__)
 
 _CHARS_PER_TOKEN = 4
 _SYSTEM_OVERHEAD_TOKENS = 200
@@ -69,6 +72,7 @@ class ConversationSummary:
                 EmbeddingManager,
             )
 
+            logger.debug("Loading the embedder for project %s", self.project_id)
             self._embedder = EmbeddingManager()
         return self._embedder
 
@@ -172,6 +176,7 @@ class ConversationSummary:
                 f"Draft model not found at {model_file}.\n"
                 "Run:  python download_models/download_draft_model.py"
             )
+        logger.info("Loading draft model from %s", model_file)
         return Llama(
             model_path=str(model_file),
             # The injected window, not the global: loading with a different
@@ -183,6 +188,7 @@ class ConversationSummary:
 
     def __unload_model(self, model) -> None:
         """Removes the model from RAM, frees VRAM KV cache if CUDA is present."""
+        logger.debug("Unloading draft model")
         del model
         gc.collect()
         try:
@@ -299,9 +305,15 @@ class ConversationSummary:
         try:
             batches = batches_future.result()
             running_summary: str | None = latest_summary
-            for batch in batches:
+            for position, batch in enumerate(batches, start=1):
                 system, user_content = self.__build_prompt(running_summary, batch)
-                running_summary = self.__run_inference(model, system, user_content)
+                with log_timing(
+                    logger,
+                    f"summarising batch {position}/{len(batches)}",
+                    level=logging.DEBUG,
+                    chars=len(batch),
+                ):
+                    running_summary = self.__run_inference(model, system, user_content)
         finally:
             self.__unload_model(model)
 
@@ -333,15 +345,31 @@ class ConversationSummary:
         """
         covered_rows = self.__get_covered_chunks(chunk_sequence_number)
         if not covered_rows:
+            logger.debug(
+                "Nothing to summarise up to sequence %d", chunk_sequence_number
+            )
             return None
 
         latest_summary = self.get_current_summary()
         conversation = " ".join(row[1] for row in covered_rows)
         summary = self.__generate_summary(latest_summary, conversation)
         if not summary:
+            # An empty completion, not an exception. Persisting it would set the
+            # watermark and mark these turns summarised by nothing.
+            logger.warning(
+                "Draft model returned an empty summary for project %s; "
+                "no snapshot taken",
+                self.project_id,
+            )
             return None
 
         self.__persist_snapshot(summary, covered_rows)
+        logger.info(
+            "Snapshot taken for project %s: %d chunk(s), %d-character summary",
+            self.project_id,
+            len(covered_rows),
+            len(summary),
+        )
         return summary
 
     def close(self) -> None:

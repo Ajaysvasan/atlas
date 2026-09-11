@@ -1,8 +1,20 @@
-import logging
 import os
 from pathlib import Path
 
 import numpy as np
+
+# Logging lives in logging_setup.py and is re-exported here, so the
+# `from config import get_logger` that every module already uses keeps working.
+# It cannot live in this file: logging_setup must not import config, or a module
+# importing config in order to log would close a cycle. The dependency runs one
+# way only, config -> logging_setup.
+from logging_setup import (
+    configure_logging,
+    get_logger,
+    log_context,
+    log_timing,
+    new_correlation_id,
+)
 
 
 class Config:
@@ -67,42 +79,12 @@ class Config:
 
 config = Config()
 
-
-def get_logger(name: str) -> logging.Logger:
-    """
-    Retrieves or initializes a logger with file and stream handlers.
-    Ensures that the log directory exists and logs are formatted meaningfully.
-    """
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        # Ensure log directory exists
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        log_file_path = (
-            os.path.join(base_dir, Config.LOG_FILE)
-            if not os.path.isabs(Config.LOG_FILE)
-            else Config.LOG_FILE
-        )
-        log_dir = os.path.dirname(log_file_path)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-
-        formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s"
-        )
-
-        # File Handler (writing to the log directory)
-        file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        file_handler.setLevel(logging.DEBUG if Config.DEBUG else logging.INFO)
-        logger.addHandler(file_handler)
-
-        # Stream Handler (console output)
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        stream_handler.setLevel(logging.INFO)
-        logger.addHandler(stream_handler)
-
-        logger.setLevel(logging.DEBUG if Config.DEBUG else logging.INFO)
-        logger.propagate = False
-
-    return logger
+__all__ = [
+    "Config",
+    "config",
+    "configure_logging",
+    "get_logger",
+    "log_context",
+    "log_timing",
+    "new_correlation_id",
+]

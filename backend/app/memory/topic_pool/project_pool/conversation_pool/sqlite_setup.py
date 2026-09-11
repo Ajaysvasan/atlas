@@ -15,6 +15,10 @@ has to set them every time.
 import sqlite3
 from pathlib import Path
 
+from config import get_logger
+
+logger = get_logger(__name__)
+
 # NORMAL rather than the FULL default, which fsyncs the write-ahead log on every
 # single commit. In WAL mode NORMAL is durable against a process crash — the log
 # is still on disk and intact — and gives that up only for an OS crash or power
@@ -32,7 +36,7 @@ def connect(db_path: str | Path, **kwargs) -> sqlite3.Connection:
     return conn
 
 
-def enable_wal(conn: sqlite3.Connection) -> str:
+def enable_wal(conn: sqlite3.Connection, db_path: str | Path | None = None) -> str:
     """Put the database into WAL mode; return the journal mode now in force.
 
     Called once, at initialisation. It cannot convert while another connection
@@ -42,6 +46,23 @@ def enable_wal(conn: sqlite3.Connection) -> str:
     than swallowed so a caller can see which one it got.
     """
     try:
-        return conn.execute("PRAGMA journal_mode = WAL;").fetchone()[0]
-    except sqlite3.OperationalError:
-        return conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        mode = conn.execute("PRAGMA journal_mode = WAL;").fetchone()[0]
+    except sqlite3.OperationalError as error:
+        mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        logger.warning(
+            "Could not switch %s to WAL (%s); running in %s mode",
+            db_path or "the conversation database",
+            error,
+            mode,
+        )
+        return mode
+    if mode.lower() != "wal":
+        # Not an exception, so without this line the database quietly runs in a
+        # journal mode where a read blocks every write — the exact contention
+        # WAL was adopted to remove — and nothing says so.
+        logger.warning(
+            "Requested WAL for %s but it reports %s mode",
+            db_path or "the conversation database",
+            mode,
+        )
+    return mode

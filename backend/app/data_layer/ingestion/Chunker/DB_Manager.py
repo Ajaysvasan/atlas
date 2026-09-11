@@ -2,8 +2,11 @@ import os
 import sqlite3
 from typing import List
 
+from config import get_logger
 from data_layer.datalayer_exceptions.datalayer_exceptions import InsertionError
 from data_layer.ingestion.nodes.nodes import Context, Document, HChunk, RChunk, Section
+
+logger = get_logger(__name__)
 
 
 class Manager:
@@ -16,6 +19,11 @@ class Manager:
         self.connection.execute("PRAGMA foreign_keys = ON;")
         self.cursor = self.connection.cursor()
         self._create_table()
+        logger.debug(
+            "Chunk store ready at %s (%s schema)",
+            db_path,
+            "hierarchical" if is_chunker_type_hierarchical else "recursive",
+        )
 
     def __create_document_htable(self):
         documentTableQuery = """
@@ -92,6 +100,7 @@ class Manager:
                 self.__create_chunk_rtable()
             self.connection.commit()
         except sqlite3.Error as e:
+            logger.error("Chunk store schema creation failed: %s", e)
             self.cursor.close()
             self.connection.close()
             raise Exception(f"Database setup failed: {e}") from e
@@ -137,6 +146,7 @@ class Manager:
             self.connection.commit()
         except Exception as e:
             self.connection.rollback()
+            logger.error("Rolled back %d row(s) into %s: %s", len(rows), table, e)
             raise InsertionError(e, table, ids[0] if ids else None)
 
     def get_section_from_context(self, sectionId: str):

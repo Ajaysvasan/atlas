@@ -35,7 +35,11 @@ class VectorDbManager:
         self.num_threads = num_threads
         self.k_neighbors = k_neighbors
         logger.info(
-            f"Initializing VectorDbManager (distance={distance_metrics}, dims={dimensions}, max_vectors={max_vectors}, threads={num_threads})"
+            "Initializing VectorDbManager (distance=%s, dims=%s, max_vectors=%s, threads=%s)",
+            distance_metrics,
+            dimensions,
+            max_vectors,
+            num_threads,
         )
         self.vector_db = vdap(
             self.distance_metrics,
@@ -59,7 +63,7 @@ class VectorDbManager:
     def insert(self, embedded_chunk_obj: EmbeddedChunk) -> None:
         vector = embedded_chunk_obj.vector
         vector_id = embedded_chunk_obj.vector_id
-        logger.debug(f"Inserting vector with vector_id='{vector_id}'")
+        logger.debug("Inserting vector with vector_id='%s'", vector_id)
         self.__insert_vector(vector, vector_id)
 
     def batch_insert(self, embedded_chunk_objs: List[EmbeddedChunk]):
@@ -68,7 +72,7 @@ class VectorDbManager:
         for embedded_chunk_obj in embedded_chunk_objs:
             vectors.append(embedded_chunk_obj.vector)
             vector_ids.append(embedded_chunk_obj.vector_id)
-        logger.info(f"Batch inserting {len(vector_ids)} vectors into index...")
+        logger.info("Batch inserting %s vectors into index...", len(vector_ids))
         self.__insert_vectors_in_batch(numpy.array(vectors, dtype=numpy.float32), vector_ids)
 
     def search_vector(self, query):
@@ -88,20 +92,20 @@ class VectorDbManager:
             self.vector_db.delete_vectors(vector_ids)
 
     def save(self, save_path=Config.INDEX_PATH):
-        logger.info(f"Saving VectorDbManager index to path '{save_path}'...")
+        logger.info("Saving VectorDbManager index to path '%s'...", save_path)
         with self.lock:
             self.vector_db.save(save_path)
         logger.info("VectorDbManager index saved successfully.")
 
     def load(self, load_path=Config.INDEX_PATH):
         try:
-            logger.info(f"Loading VectorDbManager index from path '{load_path}'...")
+            logger.info("Loading VectorDbManager index from path '%s'...", load_path)
             with self.lock:
                 idx = self.vector_db.load(load_path)
             logger.info("VectorDbManager index loaded successfully.")
             return self.vector_db.dynamic_dann
         except IndexDirectoryDoesNotExists:
             logger.warning(
-                f"Index directory '{load_path}' does not exist. Returning None."
+                "Index directory '%s' does not exist. Returning None.", load_path
             )
             return None

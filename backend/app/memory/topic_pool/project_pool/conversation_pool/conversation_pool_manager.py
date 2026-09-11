@@ -12,10 +12,12 @@ writer. This manager is the only place that wiring lives.
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
-from config import Config
+from config import Config, get_logger
 
 from .conversation_summary_pipeline.conversation_summary import ConversationSummary
 from .full_conversation_bucket import FullConversation
+
+logger = get_logger(__name__)
 
 
 class ConversationPoolManager:
@@ -64,6 +66,7 @@ class ConversationPoolManager:
         """
         if self.meta_repo.get_cumulative_vector_meta_data_ids():
             self.snap_shot.sync_cursors()
+            logger.debug("Restored snapshot cursors for project %s", self.project_id)
 
     def add_turn(self, role: str, text: str) -> int:
         """Append one turn. Returns its sequence number."""
@@ -120,7 +123,12 @@ class ConversationPoolManager:
         """
         latest = self.latest_sequence()
         if latest <= 0:
+            logger.debug("Snapshot skipped for project %s: no turns", self.project_id)
             return None
+        # `latest` only. turns_since_last_snapshot() would be the more
+        # informative field but it costs a query, and a log line must not do
+        # work the caller did not ask for.
+        logger.info("Snapshotting project %s up to sequence %d", self.project_id, latest)
         return self.summariser.take_snapshot(latest)
 
     def maybe_snapshot(self) -> str | None:

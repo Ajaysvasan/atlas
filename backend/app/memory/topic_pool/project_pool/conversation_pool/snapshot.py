@@ -15,6 +15,7 @@ never saw its own previous output.
 from pathlib import Path
 from typing import List, Tuple
 
+from config import get_logger
 from memory.memory_pool_exceptions import (
     InvalidCursorException,
     MisMatchCount,
@@ -29,6 +30,8 @@ from memory.topic_pool.project_pool.conversation_pool.conversation_data_manageme
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
     ConversationVectorMetaDataRepository,
 )
+
+logger = get_logger(__name__)
 
 
 class SnapShot:
@@ -122,13 +125,24 @@ class SnapShot:
             # Compensating delete: the metadata rolled back, so the vectors it
             # would have pointed at are unreachable garbage. Failing to remove
             # them would accumulate on every retry.
+            orphans = list(summary_vector_ids) + [cumulative_summary_vector_id]
+            logger.warning(
+                "Snapshot metadata failed for project %s; removing %d vector(s)",
+                self.project_id,
+                len(orphans),
+            )
             try:
-                self.vector_manager.batch_delete(
-                    list(summary_vector_ids) + [cumulative_summary_vector_id]
-                )
+                self.vector_manager.batch_delete(orphans)
             except Exception:
-                # The original metadata failure is the one worth reporting.
-                pass
+                # The original metadata failure is still the one that propagates,
+                # but a failed cleanup leaves vectors nothing can reach, and
+                # swallowing it silently is how they accumulate unnoticed.
+                logger.exception(
+                    "Compensating delete failed for project %s, vector ids %s. "
+                    "These vectors are now unreachable from summary_snapshot_map.",
+                    self.project_id,
+                    orphans,
+                )
             raise
 
     def add(
@@ -161,6 +175,14 @@ class SnapShot:
             self.__right_cursor = 0
         else:
             self.__right_cursor += 1
+
+        logger.debug(
+            "Snapshot added for project %s covering %d chunk(s); cursors now %d..%d",
+            self.project_id,
+            len(chunk_ids),
+            self.__left_cursor,
+            self.__right_cursor,
+        )
 
         if reset_right_pointer:
             self.__reset_right_pointer()
@@ -283,11 +305,16 @@ class SnapShot:
         best_snap_shot_idx: int | None = self.__find_best_snapshot(
             query, snap_shot_list
         )
-        return (
-            snap_shot_list[best_snap_shot_idx]
-            if best_snap_shot_idx is not None
-            else None
+        if best_snap_shot_idx is None:
+            logger.info(
+                "No snapshot matched the query across %d candidate(s)",
+                len(snap_shot_list),
+            )
+            return None
+        logger.debug(
+            "Best snapshot is index %d of %d", best_snap_shot_idx, len(snap_shot_list)
         )
+        return snap_shot_list[best_snap_shot_idx]
 
     def close(self) -> None:
         """Release the metadata connection, but only if this object opened it."""

@@ -11,8 +11,14 @@ A Python RAG (Retrieval-Augmented Generation) backend system that ingests multi-
 ```bash
 # From the app/ directory
 python main.py                    # Interactive CLI mode
-python main.py --verbose          # With debug logging
+python main.py --verbose          # Debug logging, on the console as well as the file
+python main.py --log-json         # One JSON object per line instead of text
+python main.py --log-file PATH    # Write somewhere other than log/app.log
 ```
+
+`LOG_LEVEL`, `LOG_FILE`, `LOG_CONSOLE_LEVEL`, `LOG_FORMAT=json`, `LOG_MAX_BYTES`
+and `LOG_BACKUP_COUNT` override the flags, so logging can be retuned without a
+code change.
 
 ## Running Tests
 
@@ -23,6 +29,7 @@ PYTHONPATH=. pytest test/ -v                            # All tests
 PYTHONPATH=. pytest test/data_layer_testing/ -v         # Data layer tests
 PYTHONPATH=. pytest test/memory_layer_testing/ -v       # Memory layer tests
 PYTHONPATH=. pytest test/stress_testing/ -v             # Stress tests
+PYTHONPATH=. pytest test/logging_testing/ -v            # Logging tests
 PYTHONPATH=. pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v  # Single test
 ```
 
@@ -67,6 +74,38 @@ PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DBNAM
 - `EmbeddedChunk`: numpy float32 vector, MD5 vector_id, chunk metadata
 - `Document`, `Section`, `Context`: intermediate pipeline models
 
+### Logging (`logging_setup.py`)
+
+One module owns logging. Every other module calls `get_logger(__name__)` and
+nothing else; `main.py` calls `configure_logging()` once. Handlers are installed
+on the **root** logger and module loggers reach them by propagation, which is
+what makes `--verbose` raise the level everywhere at once — under the previous
+arrangement (handlers per module, `propagate = False`) it reached only the one
+logger it was applied to, and `get_logger` created `log/` and opened a file as a
+side effect of import.
+
+- `get_logger(name)` — a bare logger, no handlers, no side effects. Safe at import.
+- `configure_logging(...)` — installs handlers. Once, from the entry point. Idempotent.
+- `log_context(**fields)` — binds fields (a query id, a node name) onto every
+  record logged inside the block, so one request can be pulled out of an
+  interleaved log. A contextvar: follows async tasks, **not** threads.
+- `log_timing(logger, name)` — logs a duration on success and on failure, plus a
+  structured `duration_ms`. `IngestionPipeline` wraps its five expensive stages.
+
+The file rotates at 10 MB keeping 5 backups; the console defaults to `WARNING`
+so it does not talk over the CLI. Noisy third-party loggers
+(`sentence_transformers`, `transformers`, `torch`, …) are pinned to `WARNING`.
+An unwritable log path or a bad `LOG_LEVEL` degrades rather than raising.
+
+`config.py` re-exports these so `from config import get_logger` keeps working;
+the implementation cannot live there because `logging_setup` must not import
+`config` (import cycle). Full contract in `docs/core_docs/logging.md`.
+
+**Conventions enforced by tests** in `test/logging_testing/`: loggers are named
+`__name__`; no module calls `basicConfig`/`addHandler`/`setLevel`; log calls use
+lazy `%s` formatting, never f-strings; and no log call builds its message by
+calling a method (a log line must not do work the caller did not ask for).
+
 ### Configuration (`config.py`)
 
 Central config class with constants:
@@ -75,6 +114,7 @@ Central config class with constants:
 - `K_NEIGHBORS`: 9
 - `MAX_VECTORS`: 1,000,000
 - `INDEX_PATH`, `DB_PATH`, `CONVERSATION` paths
+- `LOG_FILE`, `DEBUG`: defaults `main.py` hands to `configure_logging()`
 
 ### Exception Hierarchy
 
