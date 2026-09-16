@@ -12,6 +12,7 @@ Naming convention for private method access (Python name-mangling):
 """
 
 import random
+import re
 import string
 import threading
 from datetime import datetime, timedelta
@@ -25,6 +26,10 @@ import pytest
 from memory.topic_pool.project_pool.conversation_pool.conversation_summary_pipeline.conversation_summary import (
     ConversationSummary,
     _WINDOW_OVERLAP_CHUNKS,
+    render_transcript,
+)
+from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
+    Turn,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,9 +53,9 @@ _DRAFT_CTX = 131072
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _row(text: str):
-    """Mimics a DB row tuple returned by FullConversation.get_context."""
-    return (text,)
+def _turn(text: str, role: str = "user", seq: int = 1) -> Turn:
+    """A Turn as FullConversation.get_turns returns it."""
+    return Turn(seq, role, text, "2026-08-23T00:00:00+00:00", f"chunk_{seq}")
 
 
 def _make_cs(tmp_path, mock_fc, mock_mr, window=_WINDOW):
@@ -78,7 +83,7 @@ def cs(tmp_path):
         mock_mr = MockMR.return_value
         mock_mr.get_latest_summary.return_value = None
         mock_mr.get_highest_summarised_sequence.return_value = None
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance = _make_cs(tmp_path, mock_fc, mock_mr)
         yield instance, mock_fc, mock_mr
 
@@ -91,7 +96,7 @@ def cs_with_summary(tmp_path):
         mock_mr = MockMR.return_value
         mock_mr.get_latest_summary.return_value = "Prior summary text."
         mock_mr.get_highest_summarised_sequence.return_value = None
-        mock_fc.get_context.return_value = [_row("Hello"), _row("World")]
+        mock_fc.get_turns.return_value = [_turn("Hello"), _turn("World")]
         instance = _make_cs(tmp_path, mock_fc, mock_mr)
         yield instance, mock_fc, mock_mr
 
@@ -106,9 +111,9 @@ class TestGetCurrentConversation:
         # watermark=180, seq=200, window=100 → look_back = 200-100-50 = 50,
         # which is earlier than watermark+1, so the look-back wins.
         mock_mr.get_highest_summarised_sequence.return_value = 180
-        mock_fc.get_context.return_value = [_row("A")]
+        mock_fc.get_turns.return_value = [_turn("A")]
         instance.get_current_conversation(200)
-        mock_fc.get_context.assert_called_once_with(50, 200)
+        mock_fc.get_turns.assert_called_once_with(50, 200)
 
     def test_backlog_is_covered_when_nothing_is_summarised(self, cs):
         """
@@ -118,9 +123,9 @@ class TestGetCurrentConversation:
         """
         instance, mock_fc, mock_mr = cs
         mock_mr.get_highest_summarised_sequence.return_value = None
-        mock_fc.get_context.return_value = [_row("A")]
+        mock_fc.get_turns.return_value = [_turn("A")]
         instance.get_current_conversation(200)
-        mock_fc.get_context.assert_called_once_with(1, 200)
+        mock_fc.get_turns.assert_called_once_with(1, 200)
 
     def test_window_never_starts_after_the_first_unsummarised_turn(self, cs):
         """Bug 4.36 regression: no gap may open between watermark and window."""
@@ -128,23 +133,23 @@ class TestGetCurrentConversation:
         # watermark=10 but the look-back would start at 850 — 839 turns would
         # be skipped and then declared summarised.
         mock_mr.get_highest_summarised_sequence.return_value = 10
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance.get_current_conversation(1000)
-        mock_fc.get_context.assert_called_once_with(11, 1000)
+        mock_fc.get_turns.assert_called_once_with(11, 1000)
 
     def test_sequence_shorter_than_window_clamps_start_to_zero(self, cs):
         """Bug 4.29 regression: start must never go negative."""
         instance, mock_fc, _ = cs
         # seq=10, window=100 → 10 - 100 - 50 = -140 → clamped to 0
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance.get_current_conversation(10)
-        mock_fc.get_context.assert_called_once_with(0, 10)
+        mock_fc.get_turns.assert_called_once_with(0, 10)
 
     def test_sequence_zero_clamps_to_zero(self, cs):
         instance, mock_fc, _ = cs
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance.get_current_conversation(0)
-        mock_fc.get_context.assert_called_once_with(0, 0)
+        mock_fc.get_turns.assert_called_once_with(0, 0)
 
     def test_overlap_extends_lookback_by_50_chunks(self, cs):
         """Overlap constant _WINDOW_OVERLAP_CHUNKS=50 must widen the window."""
@@ -152,56 +157,63 @@ class TestGetCurrentConversation:
         # watermark well ahead of the look-back so the look-back is what applies:
         # seq=160, window=100 → start = 160 - 100 - 50 = 10
         mock_mr.get_highest_summarised_sequence.return_value = 150
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance.get_current_conversation(160)
-        mock_fc.get_context.assert_called_once_with(10, 160)
+        mock_fc.get_turns.assert_called_once_with(10, 160)
 
     def test_exact_overlap_boundary_clamps_to_zero(self, cs):
         """seq == window + overlap → start = 0 (not negative)."""
         instance, mock_fc, _ = cs
         # window=100, overlap=50 → seq=150 → start = max(0, 150-100-50) = 0
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance.get_current_conversation(150)
-        mock_fc.get_context.assert_called_once_with(0, 150)
+        mock_fc.get_turns.assert_called_once_with(0, 150)
 
-    def test_rows_joined_with_space(self, cs):
+    def test_each_turn_is_one_line_labelled_with_its_speaker(self, cs):
         instance, mock_fc, _ = cs
-        mock_fc.get_context.return_value = [_row("Hello"), _row("World"), _row("!")]
+        mock_fc.get_turns.return_value = [
+            _turn("Hello", "user", 1),
+            _turn("World", "assistant", 2),
+            _turn("!", "user", 3),
+        ]
         result = instance.get_current_conversation(200)
-        assert result == "Hello World !"
+        assert result == "User: Hello\nAssistant: World\nUser: !"
 
     def test_empty_context_returns_empty_string(self, cs):
         instance, mock_fc, _ = cs
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         result = instance.get_current_conversation(200)
         assert result == ""
 
     def test_single_row_no_extra_spaces(self, cs):
         instance, mock_fc, _ = cs
-        mock_fc.get_context.return_value = [_row("Only one")]
+        mock_fc.get_turns.return_value = [_turn("Only one")]
         result = instance.get_current_conversation(200)
-        assert result == "Only one"
+        assert result == "User: Only one"
 
     def test_unicode_rows_preserved(self, cs):
         instance, mock_fc, _ = cs
-        mock_fc.get_context.return_value = [_row("こんにちは"), _row("🌍")]
+        mock_fc.get_turns.return_value = [
+            _turn("こんにちは", "user", 1),
+            _turn("🌍", "assistant", 2),
+        ]
         result = instance.get_current_conversation(200)
-        assert result == "こんにちは 🌍"
+        assert result == "User: こんにちは\nAssistant: 🌍"
 
     def test_very_large_sequence_number(self, cs):
         """No overflow or incorrect clamping at large seq numbers."""
         instance, mock_fc, mock_mr = cs
         # watermark ahead of the look-back, so the look-back is what applies
         mock_mr.get_highest_summarised_sequence.return_value = 999_900
-        mock_fc.get_context.return_value = []
+        mock_fc.get_turns.return_value = []
         instance.get_current_conversation(1_000_000)
-        start, end = mock_fc.get_context.call_args[0]
+        start, end = mock_fc.get_turns.call_args[0]
         assert start == 1_000_000 - _WINDOW - _WINDOW_OVERLAP_CHUNKS
         assert end == 1_000_000
 
     def test_returns_str_not_list(self, cs):
         instance, mock_fc, _ = cs
-        mock_fc.get_context.return_value = [_row("A"), _row("B")]
+        mock_fc.get_turns.return_value = [_turn("A"), _turn("B")]
         result = instance.get_current_conversation(200)
         assert isinstance(result, str)
 
@@ -364,6 +376,11 @@ class TestBuildPrompt:
         _, user = self._prompt(instance, "", "chat text")
         assert "Previous summary" not in user
 
+    def test_system_prompt_asks_for_attribution_by_speaker(self, cs):
+        instance, _, _ = cs
+        system, _ = self._prompt(instance, None, "User: x")
+        assert "speaker" in system
+
     def test_previous_summary_precedes_conversation_in_user_content(self, cs):
         instance, _, _ = cs
         _, user = self._prompt(instance, "SUMMARY", "CONVO")
@@ -386,7 +403,7 @@ class TestMakeSummary:
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
-            mock_fc.get_context.return_value = [_row("Hello"), _row("World")]
+            mock_fc.get_turns.return_value = [_turn("Hello"), _turn("World")]
 
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
@@ -420,10 +437,26 @@ class TestMakeSummary:
         instance.make_summary(chunk_sequence_number=200)
         mock_mr.get_latest_summary.assert_called_once()
 
-    def test_get_context_called_once(self, llm_cs):
+    def test_get_turns_called_once(self, llm_cs):
         instance, mock_fc, *_ = llm_cs
         instance.make_summary(chunk_sequence_number=200)
-        mock_fc.get_context.assert_called_once()
+        mock_fc.get_turns.assert_called_once()
+
+    def test_the_model_is_given_a_speaker_labelled_transcript(self, llm_cs):
+        """Before 1.1 the model received "Hello World" and could not tell who
+        asked and who answered."""
+        instance, mock_fc, _, mock_llama, *_ = llm_cs
+        mock_fc.get_turns.return_value = [
+            _turn("How does DiskANN work?", "user", 1),
+            _turn("It builds a Vamana graph.", "assistant", 2),
+        ]
+        instance.make_summary(chunk_sequence_number=200)
+        messages = mock_llama.create_chat_completion.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        assert (
+            "User: How does DiskANN work?\nAssistant: It builds a Vamana graph."
+            in user_content
+        )
 
     def test_load_model_called_once(self, llm_cs):
         instance, _, _, _, mock_load, _ = llm_cs
@@ -442,7 +475,7 @@ class TestMakeSummary:
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
-            mock_fc.get_context.return_value = [_row("Hello")]
+            mock_fc.get_turns.return_value = [_turn("Hello")]
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
             mock_llama = MagicMock()
@@ -461,7 +494,7 @@ class TestMakeSummary:
         instance, mock_fc, mock_mr, mock_llama, *_ = llm_cs
         mock_mr.get_latest_summary.return_value = None
         mock_mr.get_highest_summarised_sequence.return_value = None
-        mock_fc.get_context.return_value = [_row("A"), _row("B")]
+        mock_fc.get_turns.return_value = [_turn("A"), _turn("B")]
         instance.make_summary(chunk_sequence_number=200)
         mock_llama.create_chat_completion.assert_called_once()
 
@@ -471,7 +504,7 @@ class TestMakeSummary:
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = "Previous summary."
             mock_mr.get_highest_summarised_sequence.return_value = None
-            mock_fc.get_context.return_value = [_row("New chat.")]
+            mock_fc.get_turns.return_value = [_turn("New chat.")]
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
             mock_llama = MagicMock()
@@ -502,18 +535,18 @@ class TestMultiBatchRollingSummary:
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             # 600-char conversation, will be batched
-            mock_fc.get_context.return_value = [_row("x" * 600)]
+            mock_fc.get_turns.return_value = [_turn("x" * 600)]
             instance = ConversationSummary(
                 full_conversation_dir=tmp_path,
                 project_id=_PROJ_ID,
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=100,
                 # Tiny draft context → only ~200 chars of conversation per pass
-                # (131072 - 200 - 512) * 4 ≈ huge, so we force it via __split_into_batches)
+                # (131072 - 200 - 512) * 4 ≈ huge, so we force it via __batch_turns)
                 draft_model_context_window_length=131072,
             )
 
-            # Patch __split_into_batches to return exactly 3 batches
+            # Patch __batch_turns to return exactly 3 batches
             three_batches = ["batch_1_" * 5, "batch_2_" * 5, "batch_3_" * 5]
             responses = ["sum1", "sum2", "final_sum"]
             call_count = 0
@@ -531,7 +564,7 @@ class TestMultiBatchRollingSummary:
                 instance, "_ConversationSummary__unload_model"
             ), patch.object(
                 instance,
-                "_ConversationSummary__split_into_batches",
+                "_ConversationSummary__batch_turns",
                 return_value=three_batches,
             ), patch.object(
                 instance,
@@ -550,7 +583,7 @@ class TestMultiBatchRollingSummary:
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
-            mock_fc.get_context.return_value = [_row("conversation")]
+            mock_fc.get_turns.return_value = [_turn("conversation")]
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
 
             two_batches = ["first_batch", "second_batch"]
@@ -567,7 +600,7 @@ class TestMultiBatchRollingSummary:
                 instance, "_ConversationSummary__unload_model"
             ), patch.object(
                 instance,
-                "_ConversationSummary__split_into_batches",
+                "_ConversationSummary__batch_turns",
                 return_value=two_batches,
             ), patch.object(
                 instance,
@@ -590,7 +623,7 @@ class TestStress:
         with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
-            mock_fc.get_context.return_value = [_row("chat")]
+            mock_fc.get_turns.return_value = [_turn("chat")]
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
@@ -631,7 +664,7 @@ class TestStress:
         with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
-            mock_fc.get_context.return_value = [_row("concurrent")]
+            mock_fc.get_turns.return_value = [_turn("concurrent")]
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
@@ -674,12 +707,12 @@ class TestStress:
     def test_get_current_conversation_called_with_correct_seq_in_loop(self, tmp_path):
         """
         Simulate a growing conversation: sequence numbers 10, 20 … 500.
-        Verify that get_context is always called with a non-negative start.
+        Verify that get_turns is always called with a non-negative start.
         """
         with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
-            mock_fc.get_context.return_value = []
+            mock_fc.get_turns.return_value = []
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr, window=100)
@@ -687,9 +720,9 @@ class TestStress:
             for seq in range(10, 510, 10):
                 instance.get_current_conversation(seq)
 
-            for c in mock_fc.get_context.call_args_list:
+            for c in mock_fc.get_turns.call_args_list:
                 start, _ = c[0]
-                assert start >= 0, f"Negative start passed to get_context: {start}"
+                assert start >= 0, f"Negative start passed to get_turns: {start}"
 
     def test_model_file_not_found_raises_file_not_found_error(self, tmp_path):
         """
@@ -699,7 +732,7 @@ class TestStress:
         with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
             mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
-            mock_fc.get_context.return_value = [_row("x")]
+            mock_fc.get_turns.return_value = [_turn("x")]
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             instance = _make_cs(tmp_path, mock_fc, mock_mr)
@@ -726,6 +759,11 @@ _SNAPSHOT = f"{_MOD}.SnapShot"
 _COVERED = [
     ("chunk_a", "How does DiskANN work?", "2026-08-23T00:00:00+00:00", "turn"),
     ("chunk_b", "It builds a Vamana graph.", "2026-08-23T00:00:01+00:00", "turn"),
+]
+
+_COVERED_TURNS = [
+    Turn(1, "user", "How does DiskANN work?", "2026-08-23T00:00:00+00:00", "chunk_a"),
+    Turn(2, "assistant", "It builds a Vamana graph.", "2026-08-23T00:00:01+00:00", "chunk_b"),
 ]
 
 
@@ -759,12 +797,17 @@ def snapshotting(tmp_path):
         mock_mr.get_latest_summary.return_value = None
         mock_mr.get_highest_summarised_sequence.return_value = None
         mock_fc.get_context_rows.return_value = list(_COVERED)
+        mock_fc.get_turns.return_value = list(_COVERED_TURNS)
         instance = _make_cs(tmp_path, mock_fc, mock_mr)
         instance._embedder = _fake_embedder()
+        instance.generated_from = []
+
+        def generate(self, prev, turns):
+            self.generated_from.append(turns)
+            return "A generated summary."
+
         with patch.object(
-            ConversationSummary,
-            "_ConversationSummary__generate_summary",
-            lambda self, prev, conv: "A generated summary.",
+            ConversationSummary, "_ConversationSummary__generate_summary", generate
         ):
             yield instance, mock_fc, mock_mr, mock_snap
 
@@ -784,12 +827,30 @@ class TestTakeSnapshot:
         mock_fc.get_context_rows.return_value = []
         assert instance.take_snapshot(10) is None
         mock_snap.add.assert_not_called()
+        assert instance.generated_from == []
 
     def test_covered_window_uses_overlap_and_clamps(self, snapshotting):
         instance, mock_fc, mock_mr, _ = snapshotting
         mock_mr.get_highest_summarised_sequence.return_value = 180
         instance.take_snapshot(200)  # window=100, overlap=50 -> start 50
         mock_fc.get_context_rows.assert_called_once_with(50, 200)
+
+    def test_the_model_is_given_the_covered_turns_with_their_roles(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        instance.take_snapshot(10)
+        assert instance.generated_from == [_COVERED_TURNS]
+        assert [turn.role for turn in instance.generated_from[0]] == ["user", "assistant"]
+
+    def test_prompt_and_coverage_read_the_same_window(self, snapshotting):
+        """The start depends on the watermark. Computed once, the prompt and the
+        recorded coverage cannot drift onto different windows if a snapshot
+        lands between the two reads."""
+        instance, mock_fc, mock_mr, _ = snapshotting
+        mock_mr.get_highest_summarised_sequence.return_value = 180
+        instance.take_snapshot(200)
+        mock_fc.get_context_rows.assert_called_once_with(50, 200)
+        mock_fc.get_turns.assert_called_once_with(50, 200)
+        mock_mr.get_highest_summarised_sequence.assert_called_once()
 
     def test_covered_window_reaches_back_over_a_backlog(self, snapshotting):
         """Bug 4.36 regression: the snapshot must not skip unsummarised turns."""
@@ -866,7 +927,7 @@ class TestTakeSnapshot:
         with patch.object(
             ConversationSummary,
             "_ConversationSummary__generate_summary",
-            lambda self, prev, conv: "",
+            lambda self, prev, turns: "",
         ):
             assert instance.take_snapshot(10) is None
         mock_snap.add.assert_not_called()
@@ -1041,16 +1102,18 @@ class TestDraftWindowIsHonoured:
         model.create_chat_completion.return_value = {
             "choices": [{"message": {"content": "s"}}]
         }
-        original = instance._ConversationSummary__split_into_batches
+        original = instance._ConversationSummary__batch_turns
 
-        def spy(text, max_chars, overlap):
+        def spy(turns, max_chars, overlap):
             captured["max_chars"] = max_chars
-            return original(text, max_chars, overlap)
+            return original(turns, max_chars, overlap)
 
         with patch.object(instance, "_ConversationSummary__load_model", lambda: model), \
              patch.object(instance, "_ConversationSummary__unload_model", lambda m: None), \
-             patch.object(instance, "_ConversationSummary__split_into_batches", spy):
-            instance._ConversationSummary__generate_summary(None, "some conversation")
+             patch.object(instance, "_ConversationSummary__batch_turns", spy):
+            instance._ConversationSummary__generate_summary(
+                None, [_turn("some conversation")]
+            )
 
         # (4096 - 200 - 512) * 4
         assert captured["max_chars"] == (4096 - 200 - 512) * 4
@@ -1094,10 +1157,10 @@ class TestModelIsAlwaysReleased:
         with patch.object(instance, "_ConversationSummary__load_model", lambda: model), \
              patch.object(instance, "_ConversationSummary__unload_model",
                           lambda m: unloaded.append(m)), \
-             patch.object(instance, "_ConversationSummary__split_into_batches",
+             patch.object(instance, "_ConversationSummary__batch_turns",
                           MagicMock(side_effect=ValueError("splitter blew up"))):
             with pytest.raises(ValueError, match="splitter blew up"):
-                instance._ConversationSummary__generate_summary(None, "text")
+                instance._ConversationSummary__generate_summary(None, [_turn("text")])
         assert unloaded == [model], "model leaked when batch splitting failed"
 
     def test_model_unloaded_when_inference_raises(self, cs):
@@ -1109,7 +1172,7 @@ class TestModelIsAlwaysReleased:
              patch.object(instance, "_ConversationSummary__unload_model",
                           lambda m: unloaded.append(m)):
             with pytest.raises(RuntimeError):
-                instance._ConversationSummary__generate_summary(None, "text")
+                instance._ConversationSummary__generate_summary(None, [_turn("text")])
         assert unloaded == [model]
 
 
@@ -1137,3 +1200,216 @@ class TestRepositorySharing:
             instance = _make_cs(tmp_path, None, None)
             instance.snap_shot.close()
         MockMR.return_value.close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 1.1 — the summariser reads a transcript, and batching never separates a
+# turn from its speaker
+# ---------------------------------------------------------------------------
+
+_LABELS = ("User: ", "Assistant: ", "System: ")
+
+
+def _batch(instance, turns, max_chars, overlap_chars):
+    return instance._ConversationSummary__batch_turns(turns, max_chars, overlap_chars)
+
+
+def _marked_turns(rng, count, longest):
+    """Turns whose text starts with a unique marker, so a line can be traced
+    back to the turn it came from."""
+    roles = ("user", "assistant", "system")
+    turns = []
+    for seq in range(1, count + 1):
+        filler = "".join(
+            rng.choice(string.ascii_lowercase) for _ in range(rng.randint(0, longest))
+        )
+        turns.append(Turn(seq, rng.choice(roles), f"t{seq}.{filler}", "t", f"c{seq}"))
+    return turns
+
+
+class TestRenderTranscript:
+    def test_every_role_is_labelled(self):
+        turns = [_turn("a", "user", 1), _turn("b", "assistant", 2), _turn("c", "system", 3)]
+        assert render_transcript(turns) == "User: a\nAssistant: b\nSystem: c"
+
+    def test_order_is_the_order_given(self):
+        turns = [_turn("second", "assistant", 2), _turn("first", "user", 1)]
+        assert render_transcript(turns) == "Assistant: second\nUser: first"
+
+    def test_multiline_turn_text_is_kept_whole(self):
+        assert render_transcript([_turn("line one\nline two")]) == "User: line one\nline two"
+
+    def test_no_turns_is_an_empty_transcript(self):
+        assert render_transcript([]) == ""
+
+
+class TestBatchTurns:
+    def test_a_window_that_fits_is_one_batch_equal_to_the_transcript(self, cs):
+        instance, _, _ = cs
+        turns = [_turn("How does DiskANN work?", "user", 1), _turn("A graph.", "assistant", 2)]
+        assert _batch(instance, turns, 10_000, 200) == [render_transcript(turns)]
+
+    def test_no_turns_gives_one_empty_batch(self, cs):
+        """Matches what the character splitter returned for an empty string."""
+        instance, _, _ = cs
+        assert _batch(instance, [], 100, 10) == [""]
+
+    def test_every_batch_fits(self, cs):
+        instance, _, _ = cs
+        rng = random.Random(11)
+        for _ in range(300):
+            max_chars = rng.randint(20, 300)
+            turns = _marked_turns(rng, rng.randint(1, 30), 2 * max_chars)
+            for batch in _batch(instance, turns, max_chars, rng.randint(0, 120)):
+                assert len(batch) <= max_chars
+
+    def test_every_line_opens_with_a_speaker(self, cs):
+        """The defect a character split causes: the rest of a turn opening the
+        next batch with nobody attached to it."""
+        instance, _, _ = cs
+        rng = random.Random(12)
+        for _ in range(300):
+            max_chars = rng.randint(20, 300)
+            turns = _marked_turns(rng, rng.randint(1, 30), 2 * max_chars)
+            for batch in _batch(instance, turns, max_chars, rng.randint(0, 120)):
+                for line in batch.split("\n"):
+                    assert line.startswith(_LABELS), repr(line)
+
+    def test_turns_that_fit_arrive_whole_once_each_and_in_order(self, cs):
+        instance, _, _ = cs
+        rng = random.Random(13)
+        for _ in range(300):
+            max_chars = rng.randint(40, 300)
+            # Short enough that no turn needs cutting.
+            turns = _marked_turns(rng, rng.randint(1, 30), max_chars - 30)
+            expected = render_transcript(turns).split("\n")
+            seen = []
+            for batch in _batch(instance, turns, max_chars, rng.randint(0, 120)):
+                for line in batch.split("\n"):
+                    if line not in seen:
+                        seen.append(line)
+            assert seen == expected
+
+    def test_overlap_is_whole_trailing_turns_and_stays_within_the_limit(self, cs):
+        instance, _, _ = cs
+        rng = random.Random(14)
+        for _ in range(300):
+            max_chars = rng.randint(40, 300)
+            overlap = rng.randint(0, 120)
+            turns = _marked_turns(rng, rng.randint(2, 30), max_chars - 30)
+            batches = _batch(instance, turns, max_chars, overlap)
+            for before, after in zip(batches, batches[1:]):
+                previous, following = before.split("\n"), after.split("\n")
+                carried = 0
+                for k in range(1, min(len(previous), len(following)) + 1):
+                    if previous[-k:] == following[:k]:
+                        carried = k
+                if carried:
+                    assert len("\n".join(following[:carried])) <= overlap
+                    assert carried < len(previous)
+
+    def test_a_short_reply_is_carried_next_to_the_turn_before_it(self, cs):
+        instance, _, _ = cs
+        turns = [
+            _turn(f"message number {i}", "user" if i % 2 else "assistant", i)
+            for i in range(1, 9)
+        ]
+        batches = _batch(instance, turns, 80, 30)
+        assert len(batches) > 1
+        for before, after in zip(batches, batches[1:]):
+            assert after.split("\n")[0] == before.split("\n")[-1]
+
+    def test_zero_overlap_carries_nothing(self, cs):
+        instance, _, _ = cs
+        turns = [_turn(f"message number {i}", "user", i) for i in range(1, 9)]
+        lines = [line for b in _batch(instance, turns, 80, 0) for line in b.split("\n")]
+        assert lines == render_transcript(turns).split("\n")
+
+    def test_an_oversized_turn_is_cut_with_its_label_on_every_piece(self, cs):
+        instance, _, _ = cs
+        text = "".join(string.ascii_lowercase[i % 26] for i in range(500))
+        batches = _batch(instance, [_turn(text, "assistant", 1)], 100, 20)
+        assert len(batches) > 1
+        pieces = [b[len("Assistant: "):] for b in batches]
+        assert all(b.startswith("Assistant: ") for b in batches)
+        assert all(piece in text for piece in pieces)
+        assert text.startswith(pieces[0]) and text.endswith(pieces[-1])
+
+    def test_an_oversized_turn_loses_no_text_between_pieces(self, cs):
+        """Each piece being part of the text is not enough: a piece dropped from
+        the middle leaves every remaining one still a substring. Place the pieces
+        and require each to start no later than the previous one ended."""
+        instance, _, _ = cs
+        rng = random.Random(15)
+        for _ in range(100):
+            max_chars = rng.randint(30, 150)
+            text = "".join(
+                rng.choice(string.ascii_lowercase) for _ in range(rng.randint(max_chars, 6 * max_chars))
+            )
+            batches = _batch(instance, [_turn(text, "assistant", 1)], max_chars, rng.randint(0, 60))
+            covered = 0
+            for batch in batches:
+                piece = batch[len("Assistant: "):]
+                start = text.find(piece)
+                assert 0 <= start <= covered, "text skipped between two pieces"
+                covered = max(covered, start + len(piece))
+            assert covered == len(text)
+
+    def test_a_limit_smaller_than_the_label_still_terminates_and_fits(self, cs):
+        instance, _, _ = cs
+        batches = _batch(instance, [_turn("hello there", "assistant", 1)], 3, 1)
+        assert batches and all(len(b) <= 3 for b in batches)
+
+
+class TestRealBatchingReachesTheModel:
+    """The multi-batch tests above patch the batcher to return canned strings.
+    This one lets real batching run and inspects every prompt the model gets."""
+
+    _CONVERSATION = re.compile(
+        r"(?:Conversation|New conversation):\n(.*)\n\nProduce", re.DOTALL
+    )
+
+    def test_every_prompt_carries_whole_labelled_turns_and_none_are_lost(self, tmp_path):
+        turns = [
+            _turn(f"turn {i} " + "x" * 40, "user" if i % 2 else "assistant", i)
+            for i in range(1, 21)
+        ]
+        with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
+            mock_fc = MockFC.return_value
+            mock_mr = MockMR.return_value
+            mock_mr.get_latest_summary.return_value = None
+            mock_mr.get_highest_summarised_sequence.return_value = None
+            mock_fc.get_turns.return_value = turns
+            instance = ConversationSummary(
+                full_conversation_dir=tmp_path,
+                project_id=_PROJ_ID,
+                project_name=_PROJ_NAME,
+                main_model_context_window_length=_WINDOW,
+                # (800 - 200 - 512) * 4 = 352 characters of conversation per pass
+                draft_model_context_window_length=800,
+            )
+
+        prompts = []
+        model = MagicMock()
+
+        def complete(messages, **_):
+            prompts.append(messages[1]["content"])
+            return {"choices": [{"message": {"content": "running"}}]}
+
+        model.create_chat_completion.side_effect = complete
+        with patch.object(instance, "_ConversationSummary__load_model", lambda: model), \
+             patch.object(instance, "_ConversationSummary__unload_model", lambda m: None):
+            instance.make_summary(chunk_sequence_number=20)
+
+        assert len(prompts) > 1, "the window should not have fitted in one pass"
+        expected = render_transcript(turns).split("\n")
+        seen = []
+        for prompt in prompts:
+            block = self._CONVERSATION.search(prompt).group(1)
+            assert len(block) <= 352
+            for line in block.split("\n"):
+                assert line.startswith(_LABELS), repr(line)
+                if line not in seen:
+                    seen.append(line)
+        assert seen == expected
+

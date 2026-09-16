@@ -4,16 +4,16 @@
 
 The conversation layer stores turns, summarises them on a trigger, persists
 snapshots atomically across SQLite and pgvector, and searches them — verified
-end to end. 374 memory-layer tests, 397 across the project.
+end to end. 499 memory-layer tests, 681 across the project.
 
-Three gaps remain **inside** the conversation layer; everything after that is
+Two gaps remain **inside** the conversation layer; everything after that is
 new construction on top of it.
 
 ---
 
 ## 1. Finish the conversation layer
 
-### 1.1 Make `role` readable — **blocking**
+### 1.1 Make `role` readable — done
 
 `append_turn` validates and stores a role on every turn, but no read path
 returns it. `fetch_all`, `get_ranged_chunks`, `get_ranged_rows`, `recent` and
@@ -25,15 +25,23 @@ indistinguishable — which is unusable for prompt assembly, the thing this laye
 exists to feed. Worth doing before the query pipeline is built, because prompt
 assembly will bake in assumptions about the shape either way.
 
-- [ ] `FullConversationRepository`: return `role` alongside text — either widen
-      `get_ranged_rows` (join `full_conversation` rather than reading
-      `summary_chunks` alone) or add a `get_turns(start, end)` returning
-      `(sequence_number, role, chunk, created_at)`
-- [ ] Surface it on `FullConversation` and `ConversationPoolManager`
-- [ ] Have `ConversationSummary` build its prompt from role-tagged turns instead
-      of `" ".join(...)` over bare text
-- [ ] Tests: role round-trips; ordering preserved; interleaved user/assistant
-      reconstructed correctly
+- [x] `FullConversationRepository`: `get_turns`, `get_last_n_turns`,
+      `get_turns_after`, `get_all_turns` return
+      `Turn(sequence_number, role, text, created_at, chunk_id)`.
+      `get_ranged_rows` was left alone — `insert_snapshot` writes its rows into
+      `summary_chunks` verbatim, so widening it would have broken that contract.
+- [x] Surfaced on `FullConversation`. On `ConversationPoolManager`,
+      `history`/`recent`/`context`/`since` now return `Turn` — a deliberate
+      breaking change, made while they had no callers.
+- [x] `ConversationSummary` feeds the model a speaker-labelled transcript, and
+      batches between turns so no batch opens mid-turn without a speaker.
+- [x] Tests: role round-trips; ordering ignores `created_at`; interleaved
+      user/assistant reconstructed exactly; batching properties over random
+      shapes. Every one checked against a deliberate regression.
+- [ ] The text-only readers (`fetch_all`, `get_ranged_chunks`, `get_n_chunks`,
+      `get_sequence_after`, and their bucket counterparts) no longer have a
+      caller in the source tree — only tests. Remove them, or keep them as the
+      cheap path, once the query layer shows whether anything wants text alone.
 
 ### 1.2 Wire the chunk-level drill-down — or stop paying for it
 
@@ -79,9 +87,9 @@ it is a coding task.
       Rewritten against the current APIs and against temporary directories
       instead of Config paths, so the suite no longer depends on the 2.1 path
       decision at all. 10 tests, whole suite now green.
-- [ ] No logger in `snapshot.py`, so the compensating-delete failure path in
-      `__add_snap_shot` swallows errors silently. Route it somewhere once
-      logging exists.
+- [x] No logger in `snapshot.py`, so the compensating-delete failure path in
+      `__add_snap_shot` swallowed errors silently. It now logs the orphaned
+      vector ids with `logger.exception`.
 
 ---
 
@@ -149,7 +157,8 @@ What changed, and why each mattered:
 ## 3. Retrieval and delivery
 
 - [ ] **RAG query pipeline** — query → embed → DiskANN search → retrieve chunks
-      → assemble context (with roles, from 1.1) → respond
+      → assemble context (with roles: build chat messages from `Turn`, not
+      from the summariser's transcript text) → respond
 - [ ] Bridge the two vector stores: the data layer uses DiskANN, the memory
       layer uses pgvector. Decide whether retrieval spans both.
 - [ ] `Config.MODEL_PATH` is `None` — there is a draft model for summarisation

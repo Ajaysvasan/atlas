@@ -22,6 +22,7 @@ from memory.memory_pool_exceptions import EmptyTurnContent, InvalidRole
 
 from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
+    Turn,
 )
 from memory.topic_pool.project_pool.conversation_pool.full_conversation_bucket import (
     FullConversation,
@@ -590,6 +591,138 @@ class TestGetSequenceAfter:
 
 
 # ---------------------------------------------------------------------------
+# Turns — 1.1: role is readable, not only writable
+# ---------------------------------------------------------------------------
+
+class TestTurns:
+    """Every text-only reader drops the speaker. These read it back."""
+
+    @pytest.fixture
+    def dialogue(self, repo):
+        repo.append_turns(
+            [
+                ("system", "You are a retrieval assistant."),
+                ("user", "How does DiskANN work?"),
+                ("assistant", "It builds a Vamana graph."),
+                ("user", "And search?"),
+                ("assistant", "Greedy traversal from an entry point."),
+            ]
+        )
+        return repo
+
+    def test_role_round_trips_for_every_role(self, dialogue):
+        assert [t.role for t in dialogue.get_all_turns()] == [
+            "system",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+
+    def test_interleaved_dialogue_is_reconstructed_exactly(self, dialogue):
+        assert [(t.role, t.text) for t in dialogue.get_all_turns()] == [
+            ("system", "You are a retrieval assistant."),
+            ("user", "How does DiskANN work?"),
+            ("assistant", "It builds a Vamana graph."),
+            ("user", "And search?"),
+            ("assistant", "Greedy traversal from an entry point."),
+        ]
+
+    def test_fields_match_what_was_stored(self, repo, tmp_path):
+        repo.append_turns([("user", "hello")])
+        turn = repo.get_all_turns()[0]
+        with sqlite3.connect(tmp_path / f"{PROJECT_ID}_conversation.db") as conn:
+            chunk_id, created_at = conn.execute(
+                "SELECT chunk_id, created_at FROM full_conversation WHERE sequence_number = 1"
+            ).fetchone()
+        assert turn == Turn(1, "user", "hello", created_at, chunk_id)
+
+    def test_fields_are_addressable_by_name(self, dialogue):
+        turn = dialogue.get_turns(2, 2)[0]
+        assert (turn.sequence_number, turn.role, turn.text) == (
+            2,
+            "user",
+            "How does DiskANN work?",
+        )
+
+    def test_role_stays_with_its_own_text(self, repo):
+        """Repeated text under different speakers must not trade roles."""
+        repo.append_turns([("user", "ok"), ("assistant", "ok"), ("user", "ok")])
+        assert [t.role for t in repo.get_all_turns()] == ["user", "assistant", "user"]
+
+    def test_get_turns_is_inclusive_at_both_ends(self, dialogue):
+        assert [t.sequence_number for t in dialogue.get_turns(2, 4)] == [2, 3, 4]
+
+    def test_get_turns_reversed_range_is_empty(self, dialogue):
+        assert dialogue.get_turns(4, 2) == []
+
+    def test_get_turns_out_of_bounds_is_empty(self, dialogue):
+        assert dialogue.get_turns(50, 60) == []
+
+    def test_last_n_turns_are_the_newest_returned_oldest_first(self, dialogue):
+        assert [t.sequence_number for t in dialogue.get_last_n_turns(2)] == [4, 5]
+
+    def test_last_n_larger_than_the_conversation_returns_all(self, dialogue):
+        assert len(dialogue.get_last_n_turns(100)) == 5
+
+    @pytest.mark.parametrize("n", [0, -1, -100])
+    def test_last_n_non_positive_is_empty(self, dialogue, n):
+        """LIMIT -1 is "no limit" to SQLite and would return everything."""
+        assert dialogue.get_last_n_turns(n) == []
+
+    def test_turns_after_is_strict(self, dialogue):
+        assert [t.sequence_number for t in dialogue.get_turns_after(3)] == [4, 5]
+
+    def test_turns_after_zero_returns_all(self, dialogue):
+        assert dialogue.get_turns_after(0) == dialogue.get_all_turns()
+
+    def test_empty_conversation_has_no_turns(self, repo):
+        assert repo.get_all_turns() == []
+        assert repo.get_last_n_turns(3) == []
+
+    def test_readers_agree_on_the_same_turns(self, dialogue):
+        everything = dialogue.get_all_turns()
+        assert dialogue.get_turns(1, 5) == everything
+        assert dialogue.get_last_n_turns(5) == everything
+        assert dialogue.get_turns_after(0) == everything
+
+    def test_ordering_ignores_created_at(self, repo):
+        """
+        Same guard as Bugs 4.30 / 4.31, for the turn readers: created_at runs
+        backwards relative to sequence_number and rows are inserted out of
+        order, so any ordering other than sequence_number shows up.
+        """
+        order = [3, 1, 5, 2, 4]
+        meta = [
+            _make_meta(
+                PROJECT_ID,
+                i,
+                f"c{i}",
+                role="user" if i % 2 else "assistant",
+                created_at=f"2026-08-{20 - i:02d}",
+            )
+            for i in order
+        ]
+        chunks = [_make_chunk(f"c{i}", f"Text {i}") for i in order]
+        repo.add(meta, chunks)
+        expected = [1, 2, 3, 4, 5]
+        assert [t.sequence_number for t in repo.get_all_turns()] == expected
+        assert [t.sequence_number for t in repo.get_turns(1, 5)] == expected
+        assert [t.sequence_number for t in repo.get_last_n_turns(5)] == expected
+        assert [t.sequence_number for t in repo.get_turns_after(0)] == expected
+        assert [t.role for t in repo.get_all_turns()] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user",
+        ]
+
+    def test_text_readers_are_unchanged(self, dialogue):
+        assert dialogue.fetch_all()[1] == ("How does DiskANN work?",)
+
+
+# ---------------------------------------------------------------------------
 # get_size
 # ---------------------------------------------------------------------------
 
@@ -880,3 +1013,30 @@ class TestFullConversationBucket:
         b.append_chunks(meta, chunks)
         result = b.get_full_conversation()
         assert [int(r[0]) for r in result] == list(range(1, n + 1))
+
+
+class TestBucketTurns:
+    def test_normalised_role_is_what_reads_back(self, bucket):
+        bucket.append_turn("  ASSISTANT ", "normalised on the way in")
+        assert bucket.get_all_turns()[0].role == "assistant"
+
+    def test_each_reader_carries_roles(self, bucket):
+        bucket.append_turns(
+            [("user", "q1"), ("assistant", "a1"), ("user", "q2"), ("assistant", "a2")]
+        )
+        pairs = lambda turns: [(t.role, t.text) for t in turns]
+        assert pairs(bucket.get_all_turns()) == [
+            ("user", "q1"),
+            ("assistant", "a1"),
+            ("user", "q2"),
+            ("assistant", "a2"),
+        ]
+        assert pairs(bucket.get_turns(2, 3)) == [("assistant", "a1"), ("user", "q2")]
+        assert pairs(bucket.get_last_n_turns(1)) == [("assistant", "a2")]
+        assert pairs(bucket.get_turns_since(3)) == [("assistant", "a2")]
+
+    def test_rejected_turn_leaves_no_turn_behind(self, bucket):
+        with pytest.raises(InvalidRole):
+            bucket.append_turns([("user", "fine"), ("assistent", "typo")])
+        assert bucket.get_all_turns() == []
+

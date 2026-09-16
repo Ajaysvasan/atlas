@@ -35,6 +35,8 @@ Welcome to the official API documentation for the **Final Year Project Backend A
   - All twelve data-layer exceptions, their exact messages, and the known naming problems among them.
 
 ### 4. Memory & Conversation Pool Layer
+- [Reading a Conversation (`Turn`)](../memory_layer_docs/conversation_turns.md)
+  - Role-carrying readers on `FullConversationRepository`, `FullConversation` and `ConversationPoolManager`, the speaker-labelled transcript the summariser builds, and why batching never separates a turn from its speaker.
 - [Conversation Vector Metadata Manager (`ConversationVectorMetaDataManager`)](../memory_layer_docs/conversation_vector_manager.md)
   - SQLite and memory-mapped vector management for conversational snapshots, summary vectors, and cumulative file offsets.
 - [Conversational Snapshots (`SnapShot` & `SnapShotNode`)](../memory_layer_docs/snapshot.md)

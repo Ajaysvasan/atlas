@@ -6,6 +6,7 @@ from memory.memory_pool_exceptions import EmptyTurnContent, InvalidRole
 
 from .fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
+    Turn,
 )
 
 logger = get_logger(__name__)
@@ -90,6 +91,18 @@ class FullConversation:
 
     def get_full_conversation(self):
         return self.fullConversationoRep.fetch_all()
+
+    def get_turns(self, start: int, end: int) -> List[Turn]:
+        return self.fullConversationoRep.get_turns(start, end)
+
+    def get_last_n_turns(self, n: int) -> List[Turn]:
+        return self.fullConversationoRep.get_last_n_turns(n)
+
+    def get_turns_since(self, sequence: int) -> List[Turn]:
+        return self.fullConversationoRep.get_turns_after(sequence)
+
+    def get_all_turns(self) -> List[Turn]:
+        return self.fullConversationoRep.get_all_turns()
 
     def size(self):
         return self.fullConversationoRep.get_size()

@@ -16,6 +16,7 @@ from config import Config, get_logger
 
 from .conversation_summary_pipeline.conversation_summary import ConversationSummary
 from .full_conversation_bucket import FullConversation
+from .fullconversation_repository.fullconversation_repository import Turn
 
 logger = get_logger(__name__)
 
@@ -91,17 +92,17 @@ class ConversationPoolManager:
     def size(self) -> int:
         return self.full_conversation.size()
 
-    def history(self):
-        return self.full_conversation.get_full_conversation()
+    def history(self) -> List[Turn]:
+        return self.full_conversation.get_all_turns()
 
-    def recent(self, n: int):
-        return self.full_conversation.get_last_n_chunks(n)
+    def recent(self, n: int) -> List[Turn]:
+        return self.full_conversation.get_last_n_turns(n)
 
-    def context(self, start: int, end: int):
-        return self.full_conversation.get_context(start, end)
+    def context(self, start: int, end: int) -> List[Turn]:
+        return self.full_conversation.get_turns(start, end)
 
-    def since(self, sequence: int):
-        return self.full_conversation.get_conversation_since(sequence)
+    def since(self, sequence: int) -> List[Turn]:
+        return self.full_conversation.get_turns_since(sequence)
 
     def current_summary(self) -> str | None:
         return self.summariser.get_current_summary()
@@ -128,7 +129,9 @@ class ConversationPoolManager:
         # `latest` only. turns_since_last_snapshot() would be the more
         # informative field but it costs a query, and a log line must not do
         # work the caller did not ask for.
-        logger.info("Snapshotting project %s up to sequence %d", self.project_id, latest)
+        logger.info(
+            "Snapshotting project %s up to sequence %d", self.project_id, latest
+        )
         return self.summariser.take_snapshot(latest)
 
     def maybe_snapshot(self) -> str | None:
@@ -156,8 +159,6 @@ class ConversationPoolManager:
 
     def prev(self) -> None:
         self.snap_shot.prev()
-
-    # -- lifecycle ----------------------------------------------------------
 
     def close(self) -> None:
         """Release the SQLite connection this manager holds open.

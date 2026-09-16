@@ -52,6 +52,8 @@ All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 
 Hierarchical organization: Topic → Project → Conversation → Snapshot
 
+- **FullConversation / ConversationPoolManager**: turns are written with `append_turn(role, text)` and read back as `Turn(sequence_number, role, text, created_at, chunk_id)` — `history()`, `recent(n)`, `context(start, end)`, `since(seq)` on the manager. Always order by `sequence_number`, never `created_at`. The older text-only readers on the repository and bucket drop the speaker; do not build prompts from them. See `docs/memory_layer_docs/conversation_turns.md`
+- **ConversationSummary**: feeds the draft model a speaker-labelled transcript (`render_transcript`), batched between turns so no batch opens mid-turn without its speaker
 - **Snapshot** (`memory/.../snapshot.py`): Bidirectional cursor traversal of conversation history; uses cosine similarity (torch) to find similar snapshots; stores summary and cumulative vectors
 - **ConversationVectorMetaDataRepository** (`conversation_data_management/conversationVectorMetaManager.py`): SQLite-based metadata with tables: `summary_chunks`, `summary_vector_meta_data`, `cumulative_vector_meta_data`, `summary_snapshot_map`. Thread-safe: one connection opened with `check_same_thread=False`, every statement (including its commit or rollback, and `close()`) under an `RLock`. `insert_snapshot()` writes a whole snapshot in one transaction.
 

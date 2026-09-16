@@ -2,7 +2,7 @@ import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, NamedTuple, Tuple
 
 from config import get_logger
 from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
@@ -16,6 +16,28 @@ logger = get_logger(__name__)
 # records that provenance so a future splitting strategy can coexist with rows
 # written today without a migration.
 CHUNKER_TYPE_TURN = "turn"
+
+_TURN_QUERY = """
+    SELECT f.sequence_number, f.role, s.chunk, f.created_at, f.chunk_id
+    FROM full_conversation AS f
+    JOIN summary_chunks AS s ON s.chunk_id = f.chunk_id
+"""
+
+
+class Turn(NamedTuple):
+    """One conversation turn as read back: who said what, and where it sits.
+
+    The text-only readers return bare chunk text, which loses the speaker — a
+    conversation read through them is an ordered blob in which user and
+    assistant turns cannot be told apart, and so cannot be assembled into a
+    prompt. Field names match append_turn(role, text) so a turn round-trips.
+    """
+
+    sequence_number: int
+    role: str
+    text: str
+    created_at: str
+    chunk_id: str
 
 
 def utc_now() -> str:
@@ -266,6 +288,11 @@ class FullConversationRepository:
             """)
             return cursor.fetchall()
 
+    def __select_turns(self, clause: str, params: tuple = ()) -> List[Turn]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(_TURN_QUERY + clause, params).fetchall()
+        return [Turn(*row) for row in rows]
+
     def __get_size(self):
         with connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -326,6 +353,36 @@ class FullConversationRepository:
 
     def fetch_all(self):
         return self.__get_all()
+
+    def get_turns(self, start: int, end: int) -> List[Turn]:
+        """Turns with start <= sequence_number <= end, in conversation order."""
+        return self.__select_turns(
+            "WHERE f.sequence_number >= ? AND f.sequence_number <= ? "
+            "ORDER BY f.sequence_number",
+            (start, end),
+        )
+
+    def get_last_n_turns(self, n: int) -> List[Turn]:
+        """The newest n turns, returned oldest first."""
+        # A negative n would become LIMIT -1, which SQLite reads as "no limit"
+        # and would return the entire conversation.
+        if n <= 0:
+            return []
+        turns = self.__select_turns(
+            "ORDER BY f.sequence_number DESC LIMIT ?", (n,)
+        )
+        turns.reverse()
+        return turns
+
+    def get_turns_after(self, sequence_number: int) -> List[Turn]:
+        """Turns with sequence_number strictly greater than the one given."""
+        return self.__select_turns(
+            "WHERE f.sequence_number > ? ORDER BY f.sequence_number",
+            (sequence_number,),
+        )
+
+    def get_all_turns(self) -> List[Turn]:
+        return self.__select_turns("ORDER BY f.sequence_number")
 
     def get_size(self):
         return self.__get_size()

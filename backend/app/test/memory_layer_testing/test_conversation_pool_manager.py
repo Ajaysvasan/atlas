@@ -335,7 +335,65 @@ class TestIntegration:
         manager, _ = live
         for i in range(4):
             manager.add_turn("user", f"turn {i}")
-        assert [r[0] for r in manager.history()] == [f"turn {i}" for i in range(4)]
+        assert [t.text for t in manager.history()] == [f"turn {i}" for i in range(4)]
+
+    def test_every_reader_returns_who_said_what(self, live):
+        """1.1: the readers this manager exposes are what prompts get built
+        from, and bare text cannot say which side of the conversation it was."""
+        manager, _ = live
+        manager.add_turns(
+            [("user", "q1"), ("assistant", "a1"), ("user", "q2"), ("assistant", "a2")]
+        )
+        pairs = lambda turns: [(t.role, t.text) for t in turns]
+        assert pairs(manager.history()) == [
+            ("user", "q1"),
+            ("assistant", "a1"),
+            ("user", "q2"),
+            ("assistant", "a2"),
+        ]
+        assert pairs(manager.recent(2)) == [("user", "q2"), ("assistant", "a2")]
+        assert pairs(manager.context(2, 3)) == [("assistant", "a1"), ("user", "q2")]
+        assert pairs(manager.since(3)) == [("assistant", "a2")]
+
+    def test_a_snapshot_sends_the_model_who_said_what(self, live):
+        """The whole path, not a stand-in for part of it: turns recorded through
+        the manager, the snapshot trigger firing, the window read back from
+        SQLite, batched, and handed to the model."""
+        from memory.topic_pool.project_pool.conversation_pool.conversation_summary_pipeline.conversation_summary import (
+            ConversationSummary,
+        )
+
+        manager, _ = live
+        model = _fake_llm()
+        dialogue = [
+            ("user", "How does DiskANN work?"),
+            ("assistant", "It builds a Vamana graph."),
+            ("user", "And search?"),
+            ("assistant", "Greedy traversal from an entry point."),
+            ("user", "Thanks."),
+        ]
+        with patch.object(
+            ConversationSummary, "_ConversationSummary__load_model", lambda self: model
+        ):
+            fired = [manager.record_turn(role, text)[1] for role, text in dialogue]
+
+        assert fired[-1] == "A rolled-up summary."
+        model.create_chat_completion.assert_called_once()
+        prompt = model.create_chat_completion.call_args.kwargs["messages"][1]["content"]
+        assert (
+            "User: How does DiskANN work?\n"
+            "Assistant: It builds a Vamana graph.\n"
+            "User: And search?\n"
+            "Assistant: Greedy traversal from an entry point.\n"
+            "User: Thanks."
+        ) in prompt
+
+    def test_the_summariser_receives_a_labelled_transcript(self, live):
+        manager, _ = live
+        manager.add_turns([("user", "How does DiskANN work?"), ("assistant", "A graph.")])
+        assert manager.summariser.get_current_conversation(2) == (
+            "User: How does DiskANN work?\nAssistant: A graph."
+        )
 
     def test_snapshot_now_ignores_the_threshold(self, live):
         manager, _ = live

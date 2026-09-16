@@ -17,6 +17,7 @@ from memory.topic_pool.project_pool.conversation_pool.full_conversation_bucket i
     FullConversation,
 )
 from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
+    Turn,
     utc_now,
 )
 from memory.topic_pool.project_pool.conversation_pool.snapshot import SnapShot
@@ -27,6 +28,15 @@ _CHARS_PER_TOKEN = 4
 _SYSTEM_OVERHEAD_TOKENS = 200
 _OUTPUT_RESERVE_TOKENS = 512
 _WINDOW_OVERLAP_CHUNKS = 50  # look-back overlap added to every context window
+
+
+def _speaker(turn: Turn) -> str:
+    return f"{turn.role.capitalize()}: "
+
+
+def render_transcript(turns: List[Turn]) -> str:
+    """The conversation as the draft model reads it: one labelled line per turn."""
+    return "\n".join(_speaker(turn) + turn.text for turn in turns)
 
 
 class ConversationSummary:
@@ -99,21 +109,19 @@ class ConversationSummary:
         watermark = self.summary_repo.get_highest_summarised_sequence() or 0
         return max(0, min(look_back, watermark + 1))
 
-    def __get_current_conversation(self, chunk_sequence_number: int) -> str:
+    def __window_turns(self, chunk_sequence_number: int) -> List[Turn]:
         """
-        Returns the current conversation window as a single string.
+        The turns in the current conversation window.
         Extends the window back by _WINDOW_OVERLAP_CHUNKS so no context
         is lost at window boundaries, and clamps the start to 0 so
         negative indices never reach the DB (fixes Bug 4.29).
         """
         start = self.__window_start(chunk_sequence_number)
-        rows = self.full_conversation.get_context(start, chunk_sequence_number)
-        return " ".join(row[0] for row in rows)
+        return self.full_conversation.get_turns(start, chunk_sequence_number)
 
-    def __get_covered_chunks(self, chunk_sequence_number: int):
-        """The chunk rows this snapshot will claim to cover."""
-        start = self.__window_start(chunk_sequence_number)
-        return self.full_conversation.get_context_rows(start, chunk_sequence_number)
+    def __get_current_conversation(self, chunk_sequence_number: int) -> str:
+        """The current window as a speaker-labelled transcript."""
+        return render_transcript(self.__window_turns(chunk_sequence_number))
 
     def __cumulative_vector_id(self, summary: str, time_of_snapshot: str) -> int:
         """Snapshot-unique id for the cumulative vector.
@@ -207,6 +215,9 @@ class ConversationSummary:
             "You are a concise summariser. "
             "Given the previous cumulative summary (if any) and a new block of "
             "conversation, produce a single updated cumulative summary. "
+            "Each line of the conversation begins with its speaker; keep track "
+            "of who said what, and attribute requests, decisions and answers "
+            "to the speaker they came from. "
             "Preserve key facts and decisions. Be concise."
         )
         if latest_summary:
@@ -255,6 +266,72 @@ class ConversationSummary:
             start = end - overlap_chars
         return batches
 
+    def __labelled_pieces(
+        self, turn: Turn, max_chars: int, overlap_chars: int
+    ) -> List[str]:
+        """One turn as transcript lines, each at most max_chars, each labelled."""
+        label = _speaker(turn)
+        if len(label) + len(turn.text) <= max_chars:
+            return [label + turn.text]
+        budget = max_chars - len(label)
+        if budget < 1:
+            return self.__split_into_batches(label + turn.text, max_chars, overlap_chars)
+        return [
+            label + piece
+            for piece in self.__split_into_batches(turn.text, budget, overlap_chars)
+        ]
+
+    @staticmethod
+    def __trailing_lines(lines: List[str], limit: int) -> List[str]:
+        """The longest run of whole lines from the end whose transcript fits limit."""
+        tail: List[str] = []
+        size = -1
+        for line in reversed(lines):
+            size += len(line) + 1
+            if size > limit:
+                break
+            tail.append(line)
+        tail.reverse()
+        return tail
+
+    def __batch_turns(
+        self, turns: List[Turn], max_chars: int, overlap_chars: int
+    ) -> List[str]:
+        """Pack speaker-labelled turns into transcripts of at most max_chars.
+
+        Batches break between turns, never inside one. A character split lands
+        mid-turn, and the rest of that turn then opens the next batch with no
+        speaker label, so the model attributes it to nobody — or to whoever
+        spoke before it. Overlap likewise carries whole trailing turns, up to
+        overlap_chars, rather than a slice of text; the running summary is what
+        carries context across batches, and the overlap only needs to keep a
+        short reply next to the turn it answers. A turn too long to fit a batch
+        on its own is the one thing that gets cut, and every piece keeps its
+        label.
+        """
+        max_chars = max(1, max_chars)
+        lines: List[str] = []
+        for turn in turns:
+            lines.extend(self.__labelled_pieces(turn, max_chars, overlap_chars))
+        if not lines:
+            return [""]
+
+        batches: List[str] = []
+        current: List[str] = []
+        size = 0
+        for line in lines:
+            if current and size + 1 + len(line) > max_chars:
+                batches.append("\n".join(current))
+                # Carry only as much as still leaves room for this line, so the
+                # overlap can never push a batch past max_chars.
+                room = min(overlap_chars, max_chars - len(line) - 1)
+                current = self.__trailing_lines(current, room)
+                size = len("\n".join(current))
+            size += len(line) + (1 if current else 0)
+            current.append(line)
+        batches.append("\n".join(current))
+        return batches
+
     def __run_inference(self, model, system: str, user_content: str) -> str:
         output = model.create_chat_completion(
             messages=[
@@ -267,7 +344,7 @@ class ConversationSummary:
         return output["choices"][0]["message"]["content"].strip()
 
     def __generate_summary(
-        self, latest_summary: str | None, current_conversation: str
+        self, latest_summary: str | None, turns: List[Turn]
     ) -> str:
         """
         Full LLM pipeline:
@@ -291,8 +368,8 @@ class ConversationSummary:
         with ThreadPoolExecutor(max_workers=2) as executor:
             model_future = executor.submit(self.__load_model)
             batches_future = executor.submit(
-                self.__split_into_batches,
-                current_conversation,
+                self.__batch_turns,
+                turns,
                 max_conv_chars,
                 overlap_chars,
             )
@@ -332,8 +409,8 @@ class ConversationSummary:
         cumulative summary string.
         """
         latest_summary = self.get_current_summary()
-        current_conversation = self.get_current_conversation(chunk_sequence_number)
-        return self.__generate_summary(latest_summary, current_conversation)
+        turns = self.__window_turns(chunk_sequence_number)
+        return self.__generate_summary(latest_summary, turns)
 
     def take_snapshot(self, chunk_sequence_number: int) -> str | None:
         """Summarise the window up to chunk_sequence_number and persist it.
@@ -343,7 +420,13 @@ class ConversationSummary:
         summary" the next call reads back. Returns the summary, or None when the
         window is empty and there is nothing to summarise.
         """
-        covered_rows = self.__get_covered_chunks(chunk_sequence_number)
+        # One window start for both reads. It depends on the watermark, so
+        # computing it twice could let a snapshot landing in between give the
+        # prompt and the recorded coverage two different windows.
+        start = self.__window_start(chunk_sequence_number)
+        covered_rows = self.full_conversation.get_context_rows(
+            start, chunk_sequence_number
+        )
         if not covered_rows:
             logger.debug(
                 "Nothing to summarise up to sequence %d", chunk_sequence_number
@@ -351,8 +434,8 @@ class ConversationSummary:
             return None
 
         latest_summary = self.get_current_summary()
-        conversation = " ".join(row[1] for row in covered_rows)
-        summary = self.__generate_summary(latest_summary, conversation)
+        turns = self.full_conversation.get_turns(start, chunk_sequence_number)
+        summary = self.__generate_summary(latest_summary, turns)
         if not summary:
             # An empty completion, not an exception. Persisting it would set the
             # watermark and mark these turns summarised by nothing.
