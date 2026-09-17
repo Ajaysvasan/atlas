@@ -71,6 +71,9 @@ requirement — but note it is a *design* decision (what retention policy?) befo
 it is a coding task.
 
 - [ ] Decide a retention policy
+- [ ] Settle 4.1 (conversation identity) first — until then, deleting one
+      conversation can delete vectors another conversation in the same project
+      still uses
 - [ ] `delete_conversation(project_id)` spanning SQLite **and** the vector store
       (same compensation problem as Bug 4.38 — vectors and metadata must not
       diverge)
@@ -166,6 +169,46 @@ What changed, and why each mattered:
 - [ ] **CLI** (Bugs 2.1, 2.2) — `cli_interface()` still contains `# some stuff`;
       `main.py --query` prints a placeholder
 - [ ] **FastAPI routes** — no HTTP surface exists yet
+
+---
+
+## 4. Later optimizations
+
+Deferred deliberately. Neither blocks the retrieval design, the query layer or
+MVP_V1.
+
+### 4.1 Conversation identity
+
+No `conversation_id` exists anywhere in `memory/`. Both conversation databases
+are named `{project_id}_conversation.db`, so two conversations in one project
+are kept apart only by the directory the caller passes in.
+
+The vector store does not have even that. pgvector's `vectors` table is keyed
+`(project_id, vector_id)`, and a chunk-level summary vector id is derived from
+`chunk_id`, which binds `(project_id, sequence_number, text)`. Two conversations
+in the same project whose turn 1 is the same text produce the same vector id,
+and share one row (`on conflict do nothing`). Harmless while nothing deletes —
+the embedding is identical — but a delete for one conversation removes the
+other's vector.
+
+- [ ] Decide: a `conversation_id` column in the schema and in every derived id,
+      or one directory per conversation with the directory's id bound into
+      `chunk_id` — together with the on-disk scheme in section 2
+- [ ] Must land before any deletion in 1.3
+
+### 4.2 Snapshot search round trips
+
+`SnapShot.__find_best_snapshot` calls `vector_manager.get_vector` once per
+candidate snapshot inside its scan, and `VectorRepository.batch_search` loops
+`__get_vector` in the same way — one PostgreSQL round trip per snapshot. Fine at
+tens of snapshots; linear in round trips once memory is a retrieval source.
+
+- [ ] Either fetch every candidate in one query
+      (`WHERE project_id = %s AND vector_id = ANY(%s)`), or push the ranking
+      into pgvector (`ORDER BY embedding <=> %s LIMIT k`) and stop pulling
+      vectors into Python at all
+- [ ] The second option moves similarity below the store interface — decide it
+      with the vector-store protocol from the retrieval design, not on its own
 
 ---
 
