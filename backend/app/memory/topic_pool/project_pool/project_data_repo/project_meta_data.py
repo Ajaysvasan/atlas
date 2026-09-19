@@ -15,6 +15,12 @@ That is the ordering settled for snapshots (see SnapShot.__add_snap_shot): the
 two stores cannot share a transaction, so one of the two failure modes has to be
 chosen, and an unreachable vector is recoverable where a mapping row pointing at
 a missing embedding is not.
+
+What lives where: project_table holds the project's own metadata, including its
+summary *text*; project_description_table holds its descriptions, several per
+project; project_mapping_table holds only project_id -> summary vector id. The
+summary *embedding* goes to PostgreSQL/pgvector — not to the DiskANN index,
+which indexes ingested documents and has nothing to do with project summaries.
 """
 
 import operator
@@ -98,7 +104,16 @@ class ProjectMetaData:
                 project_name text not null,
                 created_at date not null,
                 updated_at date not null,
+                project_summary text not null,
                 user_id text
+                );""")
+        curr.execute("""create table if not exists project_description_table(
+                project_id text not null,
+                project_description_id text not null,
+                project_description text not null,
+                created_at date not null,
+                primary key (project_id, project_description_id),
+                foreign key (project_id) references project_table(project_id)
                 );""")
         curr.execute("""create table if not exists project_mapping_table(
                 project_id text not null,
@@ -120,6 +135,24 @@ class ProjectMetaData:
         return value
 
     @staticmethod
+    def __validate_summary(project_summary) -> str:
+        """project_summary is NOT NULL, so refuse None here rather than at the
+        constraint, where the message names the column and not the caller."""
+        if not isinstance(project_summary, str):
+            raise ValueError(
+                f"project_summary must be a str, got {type(project_summary).__name__}"
+            )
+        return project_summary
+
+    @staticmethod
+    def __validate_description(description_id, description) -> Tuple[str, str]:
+        if not isinstance(description_id, str) or not description_id.strip():
+            raise ValueError("description_id must be a non-empty string")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("description must be a non-empty string")
+        return description_id, description
+
+    @staticmethod
     def __as_matrix(vectors) -> NDArray[float32]:
         """Accept a list of vectors or a 2-D array; hand VectorRepository an array.
 
@@ -135,6 +168,7 @@ class ProjectMetaData:
         self,
         cursor: sqlite3.Cursor,
         project_name: str,
+        project_summary: str,
         created_at: str,
         updated_at: str,
         user_id: str | None,
@@ -143,24 +177,35 @@ class ProjectMetaData:
 
         created_at and user_id are deliberately left alone on conflict:
         created_at is by definition the first write, and adding a summary vector
-        is not a transfer of ownership. Renames and updated_at do land.
+        is not a transfer of ownership. Renames, the summary and updated_at do
+        land — the summary is regenerated as the project moves on, and the row
+        holds the current one.
         """
         cursor.execute(
             """
             insert into project_table
-                (project_id, project_name, created_at, updated_at, user_id)
-            values (?, ?, ?, ?, ?)
+                (project_id, project_name, created_at, updated_at, project_summary, user_id)
+            values (?, ?, ?, ?, ?, ?)
             on conflict(project_id) do update set
-                project_name = excluded.project_name,
-                updated_at   = excluded.updated_at
+                project_name    = excluded.project_name,
+                project_summary = excluded.project_summary,
+                updated_at      = excluded.updated_at
             """,
-            (self.project_id, project_name, created_at, updated_at, user_id),
+            (
+                self.project_id,
+                project_name,
+                created_at,
+                updated_at,
+                project_summary,
+                user_id,
+            ),
         )
 
     def __write_meta_data(
         self,
         vector_ids: Sequence[int],
         project_name: str,
+        project_summary: str,
         created_at: str,
         updated_at: str,
         user_id: str | None,
@@ -178,7 +223,9 @@ class ProjectMetaData:
         assert self.__connection is not None
         cursor = self.__connection.cursor()
         try:
-            self.__upsert_project(cursor, project_name, created_at, updated_at, user_id)
+            self.__upsert_project(
+                cursor, project_name, project_summary, created_at, updated_at, user_id
+            )
             cursor.executemany(
                 """
                 insert or ignore into project_mapping_table
@@ -214,18 +261,20 @@ class ProjectMetaData:
         vector: ndarray,
         vector_id: uint32,
         project_name: str,
+        project_summary: str,
         created_at: date,
         updated_at: date,
         user_id: str,
     ) -> None:
         checked_id = self.__validate_vector_id(vector_id)
+        summary = self.__validate_summary(project_summary)
         created = as_timestamp(created_at)
         updated = as_timestamp(updated_at)
 
         self.vector_handler.insert(checked_id, vector)
         try:
             self.__write_meta_data(
-                [checked_id], project_name, created, updated, user_id
+                [checked_id], project_name, summary, created, updated, user_id
             )
         except Exception:
             self.__compensate([checked_id])
@@ -236,10 +285,12 @@ class ProjectMetaData:
         vectors: ndarray,
         vector_ids: Sequence[uint32],
         project_name: str,
+        project_summary: str,
         created_at: date,
         updated_at: date,
         user_id: str,
     ) -> None:
+        summary = self.__validate_summary(project_summary)
         matrix = self.__as_matrix(vectors)
         if len(matrix) != len(vector_ids):
             raise MisMatchCount(
@@ -260,7 +311,9 @@ class ProjectMetaData:
 
         self.vector_handler.batch_insert(checked_ids, matrix)
         try:
-            self.__write_meta_data(checked_ids, project_name, created, updated, user_id)
+            self.__write_meta_data(
+                checked_ids, project_name, summary, created, updated, user_id
+            )
         except Exception:
             self.__compensate(checked_ids)
             raise
@@ -285,6 +338,65 @@ class ProjectMetaData:
             self.__connection.rollback()
             raise
 
+    def __write_descriptions(
+        self, rows: Sequence[Tuple[str, str]], created_at: str
+    ) -> None:
+        """Insert descriptions, or refresh the text of ones already stored.
+
+        created_at survives a conflict for the same reason project_table's does:
+        it records when the description first appeared, and rewriting the text
+        does not change that. The foreign key means a description cannot be
+        written for a project that has no row yet.
+        """
+        assert self.__connection is not None
+        cursor = self.__connection.cursor()
+        try:
+            cursor.executemany(
+                """
+                insert into project_description_table
+                    (project_id, project_description_id, project_description, created_at)
+                values (?, ?, ?, ?)
+                on conflict(project_id, project_description_id) do update set
+                    project_description = excluded.project_description
+                """,
+                [
+                    (self.project_id, description_id, description, created_at)
+                    for description_id, description in rows
+                ],
+            )
+            self.__connection.commit()
+        except sqlite3.Error:
+            self.__connection.rollback()
+            raise
+
+    def __get_description(self, description_id: str) -> str | None:
+        assert self.__connection is not None
+        cursor = self.__connection.cursor()
+        cursor.execute(
+            """
+            select project_description
+            from project_description_table
+            where project_id = ? and project_description_id = ?
+            """,
+            (self.project_id, description_id),
+        )
+        row = cursor.fetchone()
+        return row[0] if row is not None else None
+
+    def __get_descriptions(self) -> List[Tuple[str, str, str]]:
+        assert self.__connection is not None
+        cursor = self.__connection.cursor()
+        cursor.execute(
+            """
+            select project_description_id, project_description, created_at
+            from project_description_table
+            where project_id = ?
+            order by datetime(created_at), created_at, rowid
+            """,
+            (self.project_id,),
+        )
+        return cursor.fetchall()
+
     def __get_summary_vector(self, vector_id: uint32) -> NDArray[float32]:
         return self.vector_handler.search(self.__validate_vector_id(vector_id))
 
@@ -302,12 +414,15 @@ class ProjectMetaData:
         )
         return [row[0] for row in cursor.fetchall()]
 
-    def __get_project(self) -> Tuple[str, str, str, str, str | None] | None:
+    def __get_project(
+        self,
+    ) -> Tuple[str, str, str, str, str, str | None] | None:
         assert self.__connection is not None
         cursor = self.__connection.cursor()
         cursor.execute(
             """
-            select project_id, project_name, created_at, updated_at, user_id
+            select project_id, project_name, created_at, updated_at,
+                   project_summary, user_id
             from project_table where project_id = ?
             """,
             (self.project_id,),
@@ -319,6 +434,7 @@ class ProjectMetaData:
         vector: ndarray,
         vector_id: uint32,
         project_name: str,
+        project_summary: str,
         created_at: date | None = None,
         updated_at: date | None = None,
         user_id: str | None = None,
@@ -326,11 +442,18 @@ class ProjectMetaData:
         """Record one summary vector for this project.
 
         Writes the embedding, creates or refreshes the project row, and maps the
-        two together. Timestamps default to now; there is no user system yet, so
-        user_id defaults to None.
+        two together. project_summary is the text the vector was embedded from,
+        and is required because project_table stores it NOT NULL. Timestamps
+        default to now; there is no user system yet, so user_id defaults to None.
         """
         self.__add_project_vector(
-            vector, vector_id, project_name, created_at, updated_at, user_id
+            vector,
+            vector_id,
+            project_name,
+            project_summary,
+            created_at,
+            updated_at,
+            user_id,
         )
 
     def add_batch_project_vector(
@@ -338,6 +461,7 @@ class ProjectMetaData:
         vectors: ndarray,
         vector_ids: Sequence[uint32],
         project_name: str,
+        project_summary: str,
         created_at: date | None = None,
         updated_at: date | None = None,
         user_id: str | None = None,
@@ -350,7 +474,13 @@ class ProjectMetaData:
         holds. An empty batch is a no-op.
         """
         self.__add_batch_project_vector(
-            vectors, vector_ids, project_name, created_at, updated_at, user_id
+            vectors,
+            vector_ids,
+            project_name,
+            project_summary,
+            created_at,
+            updated_at,
+            user_id,
         )
 
     def update_summary_vector(
@@ -386,8 +516,69 @@ class ProjectMetaData:
             return np.empty((0, Config.EMBEDDING_DIMENSIONS), dtype=float32)
         return self.vector_handler.batch_search(vector_ids)
 
-    def get_project(self) -> Tuple[str, str, str, str, str | None] | None:
-        """(project_id, project_name, created_at, updated_at, user_id), or None.
+    def add_description(
+        self,
+        description_id: str,
+        description: str,
+        created_at: date | None = None,
+    ) -> None:
+        """Store one description for this project, or refresh its text.
+
+        A project holds several, told apart by a caller-supplied id — the table
+        is keyed (project_id, project_description_id), so the same id means the
+        same description and re-writing it is an update, not a second row.
+
+        The project row must already exist: the foreign key rejects a
+        description for a project nothing has written yet. updated_at on
+        project_table is left alone; the summary-vector paths own it.
+        """
+        self.add_descriptions([(description_id, description)], created_at)
+
+    def add_descriptions(
+        self,
+        descriptions: Sequence[Tuple[str, str]],
+        created_at: date | None = None,
+    ) -> None:
+        """Store several (description_id, description) pairs in one transaction.
+
+        Every pair is validated before any is written, so a bad one partway
+        through cannot leave the first half committed. An empty sequence is a
+        no-op.
+        """
+        rows = [
+            self.__validate_description(description_id, description)
+            for description_id, description in descriptions
+        ]
+        if not rows:
+            return
+        identifiers = [description_id for description_id, _ in rows]
+        if len(set(identifiers)) != len(identifiers):
+            raise MisMatchCount(
+                "The batch repeats a description id. Each id may appear at most once."
+            )
+        self.__write_descriptions(rows, as_timestamp(created_at))
+
+    def get_description(self, description_id: str) -> str | None:
+        """One description's text, or None if this project has no such id."""
+        return self.__get_description(description_id)
+
+    def get_descriptions(self) -> List[Tuple[str, str, str]]:
+        """[(description_id, description, created_at)] for this project, oldest
+        first.
+
+        Ordered the same way project_mapping_table is read: datetime() first, so
+        a caller-supplied stamp in another format still sorts chronologically;
+        then the raw created_at, because datetime() truncates to whole seconds
+        and everything written inside one second would otherwise tie; then rowid,
+        so identical stamps keep their insertion order.
+        """
+        return self.__get_descriptions()
+
+    def get_project(
+        self,
+    ) -> Tuple[str, str, str, str, str, str | None] | None:
+        """(project_id, project_name, created_at, updated_at, project_summary,
+        user_id), or None.
 
         Without this project_table would be write-only: every path above updates
         it and nothing would ever read it back.

@@ -104,8 +104,11 @@ it is a coding task.
 `ProjectMetaData` (`project_data_repo/project_meta_data.py`) is done: it is the
 storage half of the project layer — the vector, the `project_table` row and the
 `project_mapping_table` row written together, vectors-first with a compensating
-delete, same rule as snapshots. 67 tests. `ProjectManager` is the domain object
-that should sit on top of it.
+delete, same rule as snapshots. `project_table` also holds the summary text
+(`project_summary`, required on every write), and `project_description_table`
+holds several descriptions per project, keyed `(project_id,
+project_description_id)`. 107 tests. `ProjectManager` is the domain object that
+should sit on top of it.
 
 Mostly path and identity resolution now that the layer below is settled.
 
@@ -114,6 +117,10 @@ Mostly path and identity resolution now that the layer below is settled.
 - [ ] `ProjectMetaData.__project_db` is a single shared registry file, which is
       right for "list all projects" but is the only global path left. Confirm it
       when the scheme is decided.
+- [ ] `ProjectMetaData` opens that shared file with a plain `sqlite3.connect` —
+      no lock, no WAL, and bound to the thread that opened it. Route it through
+      the same `connect()` treatment the conversation database got, before
+      `ProjectManager` opens projects concurrently.
 - [ ] `TopicManager`: create/load a topic
 - [ ] `ProjectManager`: create/load a project under a topic
 - [ ] `MemoryManager`: top-level entry point returning a

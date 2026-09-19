@@ -33,21 +33,11 @@ class VectorRepository:
         self.project_id = project_id
         load_dotenv()
         self.__db_name = os.getenv("DBNAME")
-        # DB_USER, not USER: every login shell on Linux and macOS exports USER,
-        # and load_dotenv() does not override a variable already in the
-        # environment — so the USER= line in .env was ignored and the connection
-        # was made as whoever happened to run the process. It only looked
-        # correct because that name matched a real Postgres role.
         self.__user = os.getenv("DB_USER")
         self.__password = os.getenv("PASSWORD")
         self.__host = os.getenv("HOST")
         self.__port = os.getenv("PORT")
 
-        # psycopg substitutes libpq's defaults for anything passed as None —
-        # the OS username among them — which is the same silent misconnection
-        # the rename above exists to prevent. Fail here instead, where the
-        # missing setting is named, rather than at a confusing "role does not
-        # exist" from the server.
         missing = [
             name
             for name, value in (
@@ -109,7 +99,9 @@ class VectorRepository:
             # Reported apart from a failed write: the caller can carry on
             # knowing the vector is stored, rather than compensating for it.
             self.conn.rollback()
-            logger.debug("Vector %s already present for project %s", vector_id, self.project_id)
+            logger.debug(
+                "Vector %s already present for project %s", vector_id, self.project_id
+            )
             raise DuplicateVectorException(vector_id) from e
         except Exception as e:
             self.conn.rollback()
@@ -137,9 +129,7 @@ class VectorRepository:
             )
         except Exception as e:
             self.conn.rollback()
-            logger.error(
-                "Batch insert of %d vector(s) failed: %s", len(vector_ids), e
-            )
+            logger.error("Batch insert of %d vector(s) failed: %s", len(vector_ids), e)
             raise VectorInsertionError(vector_ids, e) from e
 
     def __update_vector(self, vector: ndarray, vector_id: uint32) -> None:
