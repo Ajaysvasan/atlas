@@ -25,24 +25,31 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
 logger = get_logger(__name__)
 
 
+def register_vector_types(conn) -> None:
+    """Teach psycopg the pgvector types. Imported late so the module loads without it."""
+    from pgvector.psycopg import register_vector
+
+    register_vector(conn)
+
+
 class VectorRepository:
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
         load_dotenv()
-        self.__db_name = os.getenv("DBNAME")
+        self.__db_name = os.getenv("DB_NAME")
         self.__user = os.getenv("DB_USER")
-        self.__password = os.getenv("PASSWORD")
-        self.__host = os.getenv("HOST")
-        self.__port = os.getenv("PORT")
+        self.__password = os.getenv("DB_PASSWORD")
+        self.__host = os.getenv("DB_HOST")
+        self.__port = os.getenv("DB_PORT")
 
         missing = [
             name
             for name, value in (
-                ("DBNAME", self.__db_name),
+                ("DB_NAME", self.__db_name),
                 ("DB_USER", self.__user),
-                ("PASSWORD", self.__password),
-                ("HOST", self.__host),
-                ("PORT", self.__port),
+                ("DB_PASSWORD", self.__password),
+                ("DB_HOST", self.__host),
+                ("DB_PORT", self.__port),
             )
             if value is None
         ]
@@ -61,6 +68,11 @@ class VectorRepository:
         )
         self.curr = self.conn.cursor()
         self.__create_extension()
+        self.conn.commit()
+        # Before any statement touches a vector column: psycopg cannot adapt a
+        # numpy array on its own, and reads come back as text without this.
+        # register_vector looks up the type, so the extension must exist first.
+        register_vector_types(self.conn)
         self.__create_table()
         # Host and database only — never the password, never the whole DSN.
         logger.info(
@@ -113,7 +125,7 @@ class VectorRepository:
         """
         try:
             rows = [
-                (self.project_id, int(id), vector.tolist())
+                (self.project_id, int(id), vector)
                 for id, vector in zip(vector_ids, vectors)
             ]
             self.curr.executemany(query, rows)

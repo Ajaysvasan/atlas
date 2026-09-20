@@ -40,7 +40,6 @@ def download_draft_model() -> None:
         repo_id=Config.DRAFT_MODEL_NAME,
         filename=Config.DRAFT_MODEL_FILE,
         local_dir=str(dest_dir),
-        local_dir_use_symlinks=False,
     )
 
     print(f"\nSaved to: {downloaded_path}")

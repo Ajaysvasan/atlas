@@ -124,16 +124,18 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Criticality:** Low
 - **Priority:** P3
 - **Explanation:** The query is written as `f"""SELECT sequence_number from full_conversation where chunk_id = ?;"""` but contains no interpolation. The `f` prefix is dead, and on a query that takes user-supplied input it reads as though interpolation were intended — the pattern this file must never adopt, since it correctly uses a bound parameter here.
-### Bug 4.44: PostgreSQL Connections Opened by `SnapShot` Are Never Closed (`snapshot.py`, `conversationVectorManager.py`)
+### Bug 4.44: PostgreSQL Connections Opened by `SnapShot` Are Never Closed (`snapshot.py`, `conversationVectorManager.py`) — FIXED
 
 - **Criticality:** High
 - **Priority:** P1
+- **Status:** Fixed. `ConversationVectorManager` gained a `close()`; `SnapShot.close()` releases the vector manager it built (and the metadata repository only if it owns it); `ConversationSummary.close()` closes the snapshot as well as the shared metadata repository. `ConversationPoolManager.close()` already reached the summariser, so the whole chain now releases. Tests in `test_conversation_pool_manager.py::TestConnectionsAreReleased`, mutation-checked.
 - **Explanation:** `SnapShot.vector_manager` builds a `ConversationVectorManager` on first use, which opens a `VectorRepository` — a live psycopg connection. `ConversationVectorManager` exposes no `close()`, and `SnapShot.close()` releases only the SQLite metadata repository (`if self._owns_meta_repo: self.meta_repo.close()`). `ConversationSummary.close()` and `ConversationPoolManager.close()` reach the same SQLite repository and nothing else. Every conversation that takes a snapshot or runs a search therefore leaks one PostgreSQL connection for the life of the process, and they scale with the number of conversations opened. Verified with a fake repository: after `with ConversationPoolManager(...) as manager:` exits, the repository's `closed` flag is still `False`. `ProjectMetaData` does close its vector handler — this path simply never grew the equivalent.
 
-### Bug 4.45: `ProjectMetaData` Opens the Shared Registry Without WAL, a Lock, or Thread Safety (`project_meta_data.py`)
+### Bug 4.45: `ProjectMetaData` Opens the Shared Registry Without WAL, a Lock, or Thread Safety (`project_meta_data.py`) — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
+- **Status:** Fixed. The connection now goes through `memory/sqlite_setup.connect()` (WAL, `synchronous=NORMAL`, `foreign_keys=ON`) with `check_same_thread=False`, and every statement runs under an `RLock` through `_reading()` / `_writing()` — the same arrangement `ConversationVectorMetaDataRepository` uses. `sqlite_setup` moved from the conversation pool to `memory/` because it is now shared by both. Tests in `test_project_meta_data.py::TestConcurrency`, mutation-checked against removing the lock, the WAL call and `check_same_thread`.
 - **Explanation:** `ProjectMetaData.__init__` calls `sqlite3.connect(self.db_path)` directly: no WAL journal, no `RLock`, and `check_same_thread` left at its default, so the connection is bound to the thread that opened it. The file is a single registry shared by every project, so two `ProjectMetaData` instances writing at once contend on a rollback journal where a reader blocks a writer. This is the arrangement already fixed for the conversation database in `sqlite_setup.connect()` (WAL, `synchronous=NORMAL`, `foreign_keys=ON`) and for `ConversationVectorMetaDataRepository` (one connection under a lock). Also tracked in `todo.md` section 2.
 
 ### Bug 4.46: `ProjectVectorHandler` and `ProjectMetaData` Disagree on Summary Vectors per Project — FIXED
@@ -145,14 +147,45 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 ---
 
+### Bug 4.47: `ProjectMetaData.close()` Runs Outside the Lock and Segfaults the Interpreter (`project_meta_data.py`)
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** Every statement in this class now runs under `_lock` (Bug 4.45), but `close()` does not — it calls `self.__connection.close()` directly. Closing a SQLite connection while another thread is mid-statement on it does not raise; it crashes the process. Verified with a writer thread appending descriptions while the main thread calls `close()`: two of three runs died with `Segmentation fault (core dumped)`, exit code 139. `ConversationVectorMetaDataRepository.close()` already takes its lock for exactly this reason, with a comment recording the same crash. **Introduced by the 4.45 fix in this session** — the lock was added to the statement paths and not to teardown.
+
+### Bug 4.48: One Missing Vector Makes an Entire Topic Unroutable (`project_manager.py`, `project_vector_handler.py`)
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `score_projects()` reads each project's vectors through `get_project_vectors()`, which calls `VectorRepository.batch_search()`, which raises `VectorNotFoundEror` on the first id it cannot find. A mapping row in SQLite whose vector is absent from pgvector therefore takes down routing for **every** project in the topic, not just the damaged one. Verified: two healthy projects route fine; deleting one project's vector while leaving its mapping row makes `resolve()` raise, so the undamaged project becomes unreachable too. The two stores cannot share a transaction, so the rows can diverge — that is the premise the compensating-delete design is built on. A router should degrade to "this project scores nothing" rather than fail closed.
+
+### Bug 4.49: A Project Written With a Caller-Supplied Vector Id Cannot Be Updated Through `ProjectManager` (`project_manager.py`)
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `ProjectMetaData.add_project_vector()` takes the vector id from the caller; `ProjectManager` derives it with `summary_vector_id(project_id)`. A project created through the repository directly — which its own API invites — stores its summary vector under a different id, and `ProjectManager.update_project_summary()` then raises `VectorNotFoundEror` for a project that plainly exists. Verified. This is the remaining half of Bug 4.46: the two classes now agree on *how many* vectors a project has but not on *who assigns the id*.
+
+### Bug 4.50: Every `resolve()` Reopens the Registry Twice (`project_manager.py`, `project_meta_data.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `resolve()` calls `list_topic_projects()` and `list_topic_vector_ids()`, each of which opens its own SQLite connection, applies two pragmas, runs one query and drops it. Measured: five `resolve()` calls open ten connections. The two reads also hit the same file for related rows and could be one join. On the routing hot path this is the wrong shape. Separately, `ProjectManager.__meta()` builds a fresh `ProjectMetaData` per write, each of which re-runs `__db_init`'s three `CREATE TABLE IF NOT EXISTS` and a `PRAGMA journal_mode = WAL`.
+
+### Bug 4.51: `ProjectMetaData.__del__` Swallows Every Exception (`project_meta_data.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `__del__` wraps `close()` in `except Exception: pass`, so a connection that fails to close reports nothing. `ConversationVectorMetaDataRepository` handles the same problem differently — it uses `getattr(self, "conn", None)` so a half-constructed object has nothing to close, and lets real failures surface. The silent swallow is the pattern this project removed from `SnapShot`'s compensating delete.
+
 ---
 
 ## Section 5: Data Layer — Ingestion, Chunking & Vector Stores (`data_layer/`)
 
-### Bug 5.1: The pgvector Write and Read Paths Cannot Work Against a Real PostgreSQL Server (`vectorRepository.py`)
+### Bug 5.1: The pgvector Write and Read Paths Cannot Work Against a Real PostgreSQL Server (`vectorRepository.py`) — FIXED IN CODE, BLOCKED ON THE SERVER
 
 - **Criticality:** Critical
 - **Priority:** P0
+- **Status:** The code side is fixed — `pgvector==0.5.0` is pinned in `requirements.txt` and `register_vector_types(self.conn)` runs in `VectorRepository.__init__`, after `CREATE EXTENSION` and before any vector statement. `batch_insert` now passes numpy arrays rather than `.tolist()`, which was being sent as a PostgreSQL array. **Not yet proven end to end:** the pgvector extension is not installed on the development PostgreSQL server (`pg_available_extensions` has no `vector` row) and the `Vectors` database does not exist, so no code has yet written a vector to a real server. `scripts/smoke.py` reports both preconditions.
 - **Explanation:** Nothing registers a pgvector adapter with psycopg — `pgvector` is not in `requirements.txt`, is not installed, and `register_vector()` appears nowhere in the tree. Three consequences, none of which any test can see because `conftest.py` replaces `psycopg` with a `MagicMock`:
   1. `__insert_vector` and `__update_vector` pass a `numpy.ndarray` straight to `cursor.execute`. Verified offline: `psycopg.adapters.get_dumper(numpy.ndarray, ...)` raises `ProgrammingError: cannot adapt type 'ndarray'`. Every single-vector insert and every update fails.
   2. `__insert_batch_vector` calls `.tolist()` first, so psycopg adapts it as a PostgreSQL array and sends `{0.0,1.0}`. pgvector's input syntax is `[0.0,1.0]`, so the server rejects it. (Reasoned from the dumper output, not confirmed against a live server.)
@@ -223,9 +256,44 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 ## Section 6: Dependencies & Tooling (`requirements.txt`, `download_models/`)
 
-### Bug 6.1: `download_draft_model.py` Fails Against the Pinned `huggingface-hub` (`download_models/download_draft_model.py`)
+### Bug 6.1: `download_draft_model.py` Fails Against the Pinned `huggingface-hub` (`download_models/download_draft_model.py`) — FIXED
 
 - **Criticality:** High
 - **Priority:** P1
+- **Status:** Fixed. `local_dir_use_symlinks` removed; every remaining keyword is checked against the installed `hf_hub_download` signature.
 - **Explanation:** The script calls `hf_hub_download(..., local_dir_use_symlinks=False)`. That parameter was deprecated and then removed; `requirements.txt` pins `huggingface-hub==1.21.0`, whose `hf_hub_download` neither accepts it nor takes `**kwargs`. Verified against the installed 1.21.0: `local_dir_use_symlinks` is not in the signature, so the call raises `TypeError` before downloading anything. The draft model cannot be fetched by the documented command, which blocks `ConversationSummary` — the summariser raises `FileNotFoundError` pointing at this same script.
 
+### Bug 6.2: `HOST` Collided With conda's Own Environment Variable (`.env`, `vectorRepository.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Status:** Fixed. All five settings are now `DB_`-prefixed: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`.
+- **Explanation:** Found by running `scripts/smoke.py` for the first time. The connection failed with `failed to resolve host 'x86_64-conda-linux-gnu'` — conda exports `HOST` as its compiler triplet, and `load_dotenv()` does not override a variable already in the environment, so the `HOST=localhost` line in `.env` was silently ignored. This is the same defect the project already fixed once for `USER` -> `DB_USER`, and the same class flagged for `PORT`, which PaaS platforms set. Prefixing all five closes the category rather than the instance.
+
+### Bug 5.12: A Failed Adapter Registration Leaks the Connection (`vectorRepository.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `__init__` connects, then calls `__create_extension()`, `register_vector_types()` and `__create_table()`. If any of those raises — and `register_vector_types` will raise on a server without the pgvector extension, which is the current state of the development database — the exception propagates with `self.conn` still open and no `close()` anywhere. The object is never returned, so nothing can close it either.
+
+---
+
+## Section 7: Documentation & Test Guards
+
+### Bug 7.1: Six Docstrings Were Cut Mid-Sentence by the Trimming Pass
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** The pass that shortened every docstring to its summary kept the first *line* rather than the first *sentence*, so any docstring whose opening sentence wrapped now ends mid-clause. Affected: `normalizer._is_mostly_letters` ("fires on anything without a"), `text_extractor._flatten_json` ("stay attached to what"), `project_meta_data.__validate_topic_id` ("has no table of its own"), `project_meta_data.__validate_summary` ("rather than at the"), `conversationVectorManager.batch_delete` ("undo a partially written"), and `conversation_summary.make_summary` ("the current conversation"). **Introduced in this session.** The full text of each is recoverable from the archive taken before the pass.
+
+### Bug 7.2: The "No Raw `sqlite3.connect`" Guard Does Not Cover the Project Registry (`test_conversation_data_management.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `test_every_conversation_connection_goes_through_connect` asserts that `fullconversation_repository` and `conversationVectorMetaManager` contain no raw `sqlite3.connect()`. Since Bug 4.45, `project_meta_data.py` also opens the registry through `memory/sqlite_setup.connect()` and depends on the same per-connection pragmas — but it is not in the guard's list, so a new method there could silently get `synchronous=FULL` and foreign keys off, which is exactly the defect the guard exists to prevent.
+
+### Bug 7.3: `scripts/smoke.py` Cannot Report a Missing `psycopg` (`scripts/smoke.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `preflight()` exists to report setup problems as instructions instead of tracebacks, and it does that for a missing `pgvector`, missing `.env` keys, an unreachable server, an absent extension and an absent database. It imports `psycopg` unconditionally, though, so the one dependency it cannot report is the one it needs to do the reporting. **Introduced in this session.**

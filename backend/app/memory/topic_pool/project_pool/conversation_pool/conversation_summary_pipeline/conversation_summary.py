@@ -375,4 +375,5 @@ class ConversationSummary:
 
     def close(self) -> None:
         """Release every connection this object opened."""
+        self.snap_shot.close()
         self.summary_repo.close()

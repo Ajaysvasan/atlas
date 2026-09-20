@@ -134,14 +134,16 @@ class TestDuplicateVectorExceptionIsRaised:
     @pytest.fixture
     def repository(self, monkeypatch):
         for key, value in [
-            ("DBNAME", "db"), ("DB_USER", "u"), ("PASSWORD", "p"),
-            ("HOST", "h"), ("PORT", "5432"),
+            ("DB_NAME", "db"), ("DB_USER", "u"), ("DB_PASSWORD", "p"),
+            ("DB_HOST", "h"), ("DB_PORT", "5432"),
         ]:
             monkeypatch.setenv(key, value)
         from data_layer.vector_db_manager.repository import vectorRepository as module
 
         monkeypatch.setattr(module, "load_dotenv", lambda *a, **k: None)
         monkeypatch.setattr(module.psycopg, "connect", mock.MagicMock())
+        # The connection is a mock, so there is nothing real to register against.
+        monkeypatch.setattr(module, "register_vector_types", lambda conn: None)
         repository = module.VectorRepository("project")
         # The constructor issues its own CREATE EXTENSION / CREATE TABLE and
         # commits them; clear those so each test observes only its own calls.

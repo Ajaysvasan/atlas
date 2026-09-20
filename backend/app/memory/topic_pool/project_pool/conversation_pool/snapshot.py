@@ -279,5 +279,8 @@ class SnapShot:
 
     def close(self) -> None:
         """Release every connection this object opened."""
+        if self._vector_manager is not None:
+            self._vector_manager.close()
+            self._vector_manager = None
         if self._owns_meta_repo:
             self.meta_repo.close()

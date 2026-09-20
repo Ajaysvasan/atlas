@@ -1,6 +1,7 @@
 """Connection setup for the conversation database.
 
-See README.md in this directory.
+Shared by the conversation databases and the project registry; see
+memory/README.md.
 """
 
 import sqlite3

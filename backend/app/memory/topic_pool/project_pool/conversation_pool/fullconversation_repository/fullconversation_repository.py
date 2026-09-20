@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Tuple
 
 from config import get_logger
-from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
+from memory.sqlite_setup import (
     connect,
     enable_wal,
 )

@@ -41,3 +41,7 @@ class ConversationVectorManager:
     def get_vectors(self, vector_ids: List[uint32]) -> np.ndarray:
         """Retrieves a batch of vectors from the repository by vector_ids."""
         return self.repository.batch_search(vector_ids)
+
+    def close(self) -> None:
+        """Release the PostgreSQL connection this manager opened."""
+        self.repository.close()

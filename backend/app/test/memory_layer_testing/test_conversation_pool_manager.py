@@ -226,6 +226,7 @@ class TestSearch:
 class _FakeVectorRepository:
     def __init__(self, project_id):
         self.project_id = project_id
+        self.closed = False
         self.store = _FakeVectorRepository._shared.setdefault(project_id, {})
 
     _shared: dict = {}
@@ -243,6 +244,9 @@ class _FakeVectorRepository:
 
     def batch_search(self, vector_ids):
         return np.array([self.search(v) for v in vector_ids])
+
+    def close(self):
+        self.closed = True
 
 
 def _fake_llm():
@@ -428,3 +432,37 @@ class TestIntegration:
         assert reopened.summarised_upto() == 5
         assert reopened.current_summary() == "A rolled-up summary."
         assert reopened.search("turn") is not None
+
+
+class TestConnectionsAreReleased:
+    """Bug 4.44: SnapShot opens a PostgreSQL connection on first use and nothing
+    closed it, so one leaked per conversation for the life of the process."""
+
+    def test_closing_the_manager_closes_the_vector_store(self, tmp_path):
+        opened = []
+
+        class TrackingRepo(_FakeVectorRepository):
+            def __init__(self, project_id):
+                super().__init__(project_id)
+                self.closed = False
+                opened.append(self)
+
+            def close(self):
+                self.closed = True
+
+        with patch(_VEC_REPO, TrackingRepo):
+            with ConversationPoolManager(tmp_path, _PID, _PNAME) as manager:
+                manager.snap_shot.vector_manager  # opens the connection
+            assert opened and all(repo.closed for repo in opened)
+
+    def test_a_manager_that_never_searched_closes_cleanly(self, tmp_path):
+        with patch(_VEC_REPO, _FakeVectorRepository):
+            with ConversationPoolManager(tmp_path, _PID, _PNAME) as manager:
+                manager.add_turn("user", "no search happened")
+
+    def test_closing_twice_is_safe(self, tmp_path):
+        with patch(_VEC_REPO, _FakeVectorRepository):
+            manager = ConversationPoolManager(tmp_path, _PID, _PNAME)
+            manager.snap_shot.vector_manager  # opens the connection
+            manager.close()
+            manager.close()

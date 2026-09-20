@@ -10,6 +10,7 @@ is absent.
 """
 
 import sqlite3
+import threading
 import time
 
 import numpy as np
@@ -1061,3 +1062,92 @@ class TestSetProjectSummary:
         with pytest.raises(ValueError):
             meta.set_project_summary(bad)
 
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.45 — the shared registry is opened for concurrent use
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrency:
+    def test_the_registry_is_in_wal_mode(self, meta):
+        with sqlite3.connect(meta.db_path) as conn:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+    def test_foreign_keys_are_on_the_repositorys_own_connection(self, meta):
+        """connect() applies the pragma per connection; a raw sqlite3.connect
+        would silently get foreign keys off."""
+        meta.add_project_vector(vec(1), 11, "Alpha", "s")
+        with pytest.raises(sqlite3.IntegrityError):
+            with meta._writing() as cursor:
+                cursor.execute(
+                    "INSERT INTO project_mapping_table "
+                    "(project_id, topic_id, project_summary_vector_id, created_at) "
+                    "VALUES ('ghost', 't', 1, 'now')"
+                )
+
+    def test_a_write_from_another_thread_works(self, meta):
+        """check_same_thread=False: the connection used to be bound to whichever
+        thread opened it."""
+        errors = []
+
+        def worker():
+            try:
+                meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
+            except Exception as error:  # pragma: no cover - failure detail
+                errors.append(error)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        assert errors == []
+        assert meta.get_project().project_name == "Alpha"
+
+    def test_concurrent_writers_lose_nothing(self, meta):
+        """Without the lock, commit() and rollback() are connection-wide, so
+        threads publish each other's half-written transactions."""
+        meta.add_project_vector(vec(1), 1, "Alpha", "Alpha summary")
+        errors = []
+        barrier = threading.Barrier(8)
+
+        def worker(index):
+            try:
+                barrier.wait()
+                meta.add_description(f"d{index}", f"description {index}")
+            except Exception as error:  # pragma: no cover - failure detail
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert len(meta.get_descriptions()) == 8
+
+    def test_concurrent_readers_and_writers(self, meta):
+        meta.add_project_vector(vec(1), 1, "Alpha", "Alpha summary")
+        errors = []
+
+        def write(index):
+            try:
+                meta.add_description(f"d{index}", "text")
+            except Exception as error:  # pragma: no cover
+                errors.append(error)
+
+        def read():
+            try:
+                for _ in range(20):
+                    meta.get_descriptions()
+                    meta.get_project()
+            except Exception as error:  # pragma: no cover
+                errors.append(error)
+
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(5)]
+        threads += [threading.Thread(target=read) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []

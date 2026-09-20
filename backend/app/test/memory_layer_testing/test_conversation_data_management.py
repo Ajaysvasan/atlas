@@ -15,7 +15,7 @@ from memory.topic_pool.project_pool.conversation_pool.conversation_data_manageme
 from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
 )
-from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
+from memory.sqlite_setup import (
     connect,
     enable_wal,
 )

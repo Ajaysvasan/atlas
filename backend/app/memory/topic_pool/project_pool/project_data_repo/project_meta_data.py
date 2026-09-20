@@ -5,15 +5,18 @@ See README.md in this directory.
 
 import operator
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, NamedTuple, Sequence, Tuple
+from typing import Iterator, List, NamedTuple, Sequence, Tuple
 
 import numpy as np
 from numpy import float32, ndarray, uint32
 from numpy.typing import NDArray
 
 from config import Config, get_logger
+from memory.sqlite_setup import connect, enable_wal
 from data_layer.vector_db_manager.repository.vectorRepository import VectorRepository
 from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
 
@@ -35,7 +38,7 @@ def _registry(db_path: str | Path | None) -> sqlite3.Connection | None:
     path = Path(db_path) if db_path is not None else ProjectMetaData.default_db_path()
     if not path.exists():
         return None
-    return sqlite3.connect(path)
+    return connect(path)
 
 
 def _registry_has(cursor: sqlite3.Cursor, table: str) -> bool:
@@ -144,8 +147,9 @@ class ProjectMetaData:
         self.db_path = Path(db_path) if db_path is not None else self.__project_db
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.__connection = sqlite3.connect(self.db_path)
-        self.__connection.execute("PRAGMA foreign_keys = ON")
+        self._lock = threading.RLock()
+        self.__connection = connect(self.db_path, check_same_thread=False)
+        self.journal_mode = enable_wal(self.__connection, self.db_path)
         self.__db_init()
 
     @property
@@ -155,36 +159,54 @@ class ProjectMetaData:
             self.__project_vector_handler = VectorRepository(self.project_id)
         return self.__project_vector_handler
 
+    @contextmanager
+    def _reading(self) -> Iterator[sqlite3.Cursor]:
+        """A cursor held under the lock for as long as the caller needs it."""
+        with self._lock:
+            assert self.__connection is not None
+            yield self.__connection.cursor()
+
+    @contextmanager
+    def _writing(self) -> Iterator[sqlite3.Cursor]:
+        """A cursor under the lock, committed on success, rolled back on failure."""
+        with self._lock:
+            assert self.__connection is not None
+            cursor = self.__connection.cursor()
+            try:
+                yield cursor
+                self.__connection.commit()
+            except BaseException:
+                self.__connection.rollback()
+                raise
+
     def __db_init(self) -> None:
-        assert self.__connection is not None
-        curr = self.__connection.cursor()
-        curr.execute("""create table if not exists project_table(
-                project_id text primary key,
-                project_name text not null,
-                topic_id text not null, 
-                created_at date not null,
-                updated_at date not null,
-                project_summary text not null,
-                user_id text
-                );""")
-        curr.execute("""create table if not exists project_description_table(
-                topic_id text not null, 
-                project_id text not null,
-                project_description_id text not null,
-                project_description text not null,
-                created_at date not null,
-                primary key (project_id, project_description_id),
-                foreign key (project_id) references project_table(project_id)
-                );""")
-        curr.execute("""create table if not exists project_mapping_table(
-                project_id text not null,
-                topic_id text not null,
-                project_summary_vector_id integer not null,
-                created_at date not null,
-                primary key (project_id, project_summary_vector_id),
-                foreign key (project_id) references project_table(project_id)
-                );""")
-        self.__connection.commit()
+        with self._writing() as curr:
+            curr.execute("""create table if not exists project_table(
+                    project_id text primary key,
+                    project_name text not null,
+                    topic_id text not null, 
+                    created_at date not null,
+                    updated_at date not null,
+                    project_summary text not null,
+                    user_id text
+                    );""")
+            curr.execute("""create table if not exists project_description_table(
+                    topic_id text not null, 
+                    project_id text not null,
+                    project_description_id text not null,
+                    project_description text not null,
+                    created_at date not null,
+                    primary key (project_id, project_description_id),
+                    foreign key (project_id) references project_table(project_id)
+                    );""")
+            curr.execute("""create table if not exists project_mapping_table(
+                    project_id text not null,
+                    topic_id text not null,
+                    project_summary_vector_id integer not null,
+                    created_at date not null,
+                    primary key (project_id, project_summary_vector_id),
+                    foreign key (project_id) references project_table(project_id)
+                    );""")
 
     @staticmethod
     def __validate_vector_id(vector_id) -> int:
@@ -245,19 +267,19 @@ class ProjectMetaData:
                  project_summary, user_id)
             values (?, ?, ?, ?, ?, ?, ?)
             on conflict(project_id) do update set
-                project_name    = excluded.project_name,
-                topic_id        = excluded.topic_id,
-                project_summary = excluded.project_summary,
-                updated_at      = excluded.updated_at
+                    project_name    = excluded.project_name,
+                    topic_id        = excluded.topic_id,
+                    project_summary = excluded.project_summary,
+                    updated_at      = excluded.updated_at
             """,
             (
                 self.project_id,
-                project_name,
+                    project_name,
                 self.topic_id,
-                created_at,
-                updated_at,
-                project_summary,
-                user_id,
+                    created_at,
+                    updated_at,
+                    project_summary,
+                    user_id,
             ),
         )
         for table in ("project_mapping_table", "project_description_table"):
@@ -276,9 +298,7 @@ class ProjectMetaData:
         user_id: str | None,
     ) -> None:
         """Both metadata tables in one transaction."""
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        try:
+        with self._writing() as cursor:
             self.__upsert_project(
                 cursor, project_name, project_summary, created_at, updated_at, user_id
             )
@@ -293,10 +313,6 @@ class ProjectMetaData:
                     for vector_id in vector_ids
                 ],
             )
-            self.__connection.commit()
-        except sqlite3.Error:
-            self.__connection.rollback()
-            raise
 
     def __compensate(self, vector_ids: Sequence[int]) -> None:
         """Remove vectors whose metadata failed to land."""
@@ -380,25 +396,17 @@ class ProjectMetaData:
 
         self.vector_handler.update(checked_id, vector)
 
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        try:
+        with self._writing() as cursor:
             cursor.execute(
                 "update project_table set updated_at = ? where project_id = ?",
                 (updated, self.project_id),
             )
-            self.__connection.commit()
-        except sqlite3.Error:
-            self.__connection.rollback()
-            raise
 
     def __write_descriptions(
         self, rows: Sequence[Tuple[str, str]], created_at: str
     ) -> None:
         """Insert descriptions, or refresh the text of ones already stored."""
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        try:
+        with self._writing() as cursor:
             cursor.executemany(
                 """
                 insert into project_description_table
@@ -419,46 +427,38 @@ class ProjectMetaData:
                     for description_id, description in rows
                 ],
             )
-            self.__connection.commit()
-        except sqlite3.Error:
-            self.__connection.rollback()
-            raise
 
     def __get_description(self, description_id: str) -> str | None:
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        cursor.execute(
-            """
-            select project_description
-            from project_description_table
-            where project_id = ? and project_description_id = ?
-            """,
-            (self.project_id, description_id),
-        )
-        row = cursor.fetchone()
-        return row[0] if row is not None else None
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                select project_description
+                from project_description_table
+                where project_id = ? and project_description_id = ?
+                """,
+                (self.project_id, description_id),
+            )
+            row = cursor.fetchone()
+            return row[0] if row is not None else None
 
     def __get_descriptions(self) -> List[Tuple[str, str, str]]:
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        cursor.execute(
-            """
-            select project_description_id, project_description, created_at
-            from project_description_table
-            where project_id = ?
-            order by datetime(created_at), created_at, rowid
-            """,
-            (self.project_id,),
-        )
-        return cursor.fetchall()
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                select project_description_id, project_description, created_at
+                from project_description_table
+                where project_id = ?
+                order by datetime(created_at), created_at, rowid
+                """,
+                (self.project_id,),
+            )
+            return cursor.fetchall()
 
     def __set_project_summary(self, project_summary: str, updated_at: date | None) -> None:
         summary = self.__validate_summary(project_summary)
         updated = as_timestamp(updated_at)
 
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        try:
+        with self._writing() as cursor:
             cursor.execute(
                 "update project_table set project_summary = ?, updated_at = ? "
                 "where project_id = ?",
@@ -466,71 +466,62 @@ class ProjectMetaData:
             )
             # An UPDATE matching nothing is not an error to SQLite.
             if cursor.rowcount == 0:
-                self.__connection.rollback()
                 raise ValueError(f"No project row for {self.project_id!r}")
-            self.__connection.commit()
-        except sqlite3.Error:
-            self.__connection.rollback()
-            raise
 
     def __get_summary_vector(self, vector_id: uint32) -> NDArray[float32]:
         return self.vector_handler.search(self.__validate_vector_id(vector_id))
 
     def __get_all_summary_vector_id(self) -> List[int]:
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        cursor.execute(
-            """
-            select project_summary_vector_id
-            from project_mapping_table
-            where project_id = ?
-            order by datetime(created_at), created_at, rowid
-            """,
-            (self.project_id,),
-        )
-        return [row[0] for row in cursor.fetchall()]
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                select project_summary_vector_id
+                from project_mapping_table
+                where project_id = ?
+                order by datetime(created_at), created_at, rowid
+                """,
+                (self.project_id,),
+            )
+            return [row[0] for row in cursor.fetchall()]
 
     def __get_project(self) -> ProjectRow | None:
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        cursor.execute(
-            """
-            select project_id, project_name, topic_id, created_at, updated_at,
-                   project_summary, user_id
-            from project_table where project_id = ?
-            """,
-            (self.project_id,),
-        )
-        row = cursor.fetchone()
-        return ProjectRow(*row) if row is not None else None
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                select project_id, project_name, topic_id, created_at, updated_at,
+                       project_summary, user_id
+                from project_table where project_id = ?
+                """,
+                (self.project_id,),
+            )
+            row = cursor.fetchone()
+            return ProjectRow(*row) if row is not None else None
 
     def __get_topic_projects(self) -> List[TopicProject]:
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        cursor.execute(
-            """
-            select project_id, project_name, project_summary
-            from project_table
-            where topic_id = ?
-            order by datetime(created_at), created_at, rowid
-            """,
-            (self.topic_id,),
-        )
-        return [TopicProject(*row) for row in cursor.fetchall()]
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                select project_id, project_name, project_summary
+                from project_table
+                where topic_id = ?
+                order by datetime(created_at), created_at, rowid
+                """,
+                (self.topic_id,),
+            )
+            return [TopicProject(*row) for row in cursor.fetchall()]
 
     def __get_topic_summary_vector_ids(self) -> List[Tuple[str, int]]:
-        assert self.__connection is not None
-        cursor = self.__connection.cursor()
-        cursor.execute(
-            """
-            select project_id, project_summary_vector_id
-            from project_mapping_table
-            where topic_id = ?
-            order by project_id, datetime(created_at), created_at, rowid
-            """,
-            (self.topic_id,),
-        )
-        return cursor.fetchall()
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                select project_id, project_summary_vector_id
+                from project_mapping_table
+                where topic_id = ?
+                order by project_id, datetime(created_at), created_at, rowid
+                """,
+                (self.topic_id,),
+            )
+            return cursor.fetchall()
 
     def add_project_vector(
         self,
