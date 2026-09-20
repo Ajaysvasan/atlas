@@ -64,3 +64,10 @@ class InvalidVectorId(Exception):
             f"0..{self.max_vector_id} — the range a signed 64-bit column holds. "
             "Ids outside it wrap or overflow; mask them with Config.VECTOR_ID_MASK."
         )
+
+class EmptyQueryException(Exception):
+    def __init__(self) -> None:
+        pass
+    def __str__(self) -> str:
+        return( "The entered query is empty. Enter a valid query")
+

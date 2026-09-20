@@ -1,9 +1,6 @@
-"""
+"""vector data table
 
-vector data table
-vector_id
-vector
-
+See README.md in this directory.
 """
 
 import os
@@ -65,8 +62,7 @@ class VectorRepository:
         self.curr = self.conn.cursor()
         self.__create_extension()
         self.__create_table()
-        # Host and database only. The password is deliberately never logged, and
-        # nothing here should ever start interpolating the whole DSN.
+        # Host and database only — never the password, never the whole DSN.
         logger.info(
             "Connected to vector store %s@%s:%s (project %s)",
             self.__db_name,
@@ -96,8 +92,6 @@ class VectorRepository:
             self.curr.execute(query, (self.project_id, int(vector_id), vector))
             self.conn.commit()
         except psycopg.errors.UniqueViolation as e:
-            # Reported apart from a failed write: the caller can carry on
-            # knowing the vector is stored, rather than compensating for it.
             self.conn.rollback()
             logger.debug(
                 "Vector %s already present for project %s", vector_id, self.project_id
@@ -140,9 +134,7 @@ class VectorRepository:
         """
         try:
             self.curr.execute(query, (vector, self.project_id, int(vector_id)))
-            # An UPDATE that matches nothing is not an error to psycopg, so an
-            # id that was never inserted would silently succeed and leave the
-            # caller believing the new embedding is stored.
+            # An UPDATE matching nothing is not an error to psycopg.
             if self.curr.rowcount == 0:
                 self.conn.rollback()
                 raise VectorNotFoundEror(vector_id)
@@ -188,11 +180,7 @@ class VectorRepository:
         self.__insert_vector(vector, vector_id)
 
     def update(self, vector_id: uint32, vector: ndarray) -> None:
-        """Replace an existing embedding in place.
-
-        A single statement rather than delete-then-insert: the pair is two
-        commits, and a failure between them loses the vector entirely.
-        """
+        """Replace an existing embedding in place."""
         self.__update_vector(vector, vector_id)
 
     def delete(self, vector_id: uint32) -> None:

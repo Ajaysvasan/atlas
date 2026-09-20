@@ -136,10 +136,11 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Priority:** P2
 - **Explanation:** `ProjectMetaData.__init__` calls `sqlite3.connect(self.db_path)` directly: no WAL journal, no `RLock`, and `check_same_thread` left at its default, so the connection is bound to the thread that opened it. The file is a single registry shared by every project, so two `ProjectMetaData` instances writing at once contend on a rollback journal where a reader blocks a writer. This is the arrangement already fixed for the conversation database in `sqlite_setup.connect()` (WAL, `synchronous=NORMAL`, `foreign_keys=ON`) and for `ConversationVectorMetaDataRepository` (one connection under a lock). Also tracked in `todo.md` section 2.
 
-### Bug 4.46: `ProjectVectorHandler` and `ProjectMetaData` Disagree on Summary Vectors per Project
+### Bug 4.46: `ProjectVectorHandler` and `ProjectMetaData` Disagree on Summary Vectors per Project — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
+- **Status:** Fixed. `ProjectVectorHandler` now holds one summary vector **and** one vector per description for a project, which is the count `project_mapping_table` always allowed. Each id is derived from its source — `summary_vector_id(project_id)` and `description_vector_id(project_id, description_id)` — with the source kind and NUL-separated fields in the payload, so a description whose id is `"summary"` cannot collide with the summary. `get_project_vectors(project_id, vector_ids)` reads a batch in the order given, which is the call the query router needs; the ids come from `ProjectMetaData.get_topic_summary_vector_ids()`, because the vector store cannot enumerate. Covered by 65 tests, mutation-checked.
 - **Explanation:** `ProjectMetaData` treats a project as holding *many* summary vectors — `project_mapping_table` is keyed `(project_id, project_summary_vector_id)`, `add_project_vector` takes the id from the caller, and `get_all_summary_vector_id()` returns a list. `ProjectVectorHandler` treats a project as holding *one*, at an id it derives from the project id (`summary_vector_id()`). Both write to the same pgvector table and nothing routes between them, so there is no corruption today, but a project's vectors can be written through two different addressing schemes. The model has to be settled before `ProjectManager` is written, because it decides whether `ProjectMetaData` should delegate its vector half to the handler.
 
 ---

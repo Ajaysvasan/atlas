@@ -14,8 +14,11 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
     VectorNotFoundEror,
 )
 from memory.memory_pool_exceptions import InvalidVectorDimension
+from memory.memory_pool_exceptions import MisMatchCount
 from memory.topic_pool.project_pool.project_data_repo.project_vector_handler import (
     ProjectVectorHandler,
+    _derive,
+    description_vector_id,
     summary_vector_id,
 )
 
@@ -37,6 +40,13 @@ class FakeVectorRepository:
         if int(vector_id) in self.store:
             raise DuplicateVectorException(vector_id)
         self.store[int(vector_id)] = np.asarray(vector, dtype=np.float32)
+
+    def batch_insert(self, vector_ids, vectors):
+        for vector_id, vector in zip(vector_ids, vectors):
+            self.store.setdefault(int(vector_id), np.asarray(vector, dtype=np.float32))
+
+    def batch_search(self, vector_ids):
+        return np.array([self.search(v) for v in vector_ids])
 
     def update(self, vector_id, vector):
         if int(vector_id) not in self.store:
@@ -261,3 +271,144 @@ class TestValidation:
         with pytest.raises(InvalidVectorDimension):
             handler.update_project_summary_vector("project_a", [1.0])
         assert handler.get_project_summary_vector("project_a").tolist() == vec(1).tolist()
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.46 — a project holds one summary vector and N description vectors
+# ---------------------------------------------------------------------------
+
+
+class TestManyVectorsPerProject:
+    def test_summary_and_descriptions_coexist(self, handler):
+        """The defect: a second vector for one project had nowhere to live."""
+        handler.add_project_summary_vector("project_a", vec(1))
+        handler.add_project_description_vector("project_a", "goal", vec(2))
+        handler.add_project_description_vector("project_a", "scope", vec(3))
+        assert len(FakeVectorRepository.instances[0].store) == 3
+
+    def test_each_reads_back_as_itself(self, handler):
+        handler.add_project_summary_vector("project_a", vec(1))
+        handler.add_project_description_vector("project_a", "goal", vec(2))
+        assert handler.get_project_summary_vector("project_a").tolist() == vec(1).tolist()
+        assert handler.get_project_description_vector(
+            "project_a", "goal"
+        ).tolist() == vec(2).tolist()
+
+    def test_a_description_called_summary_does_not_collide(self, handler):
+        """The source kind is part of the derivation, so the names cannot meet."""
+        assert summary_vector_id("project_a") != description_vector_id(
+            "project_a", "summary"
+        )
+        handler.add_project_summary_vector("project_a", vec(1))
+        handler.add_project_description_vector("project_a", "summary", vec(2))
+        assert handler.get_project_summary_vector("project_a").tolist() == vec(1).tolist()
+
+    def test_the_source_kind_participates_in_the_id(self):
+        """Today the summary is told apart from a description by its empty
+        source id alone. The kind is what keeps a *third* source — a title, a
+        tag — from colliding with a description that shares its id."""
+        assert _derive("description", "p", "goal") != _derive("title", "p", "goal")
+
+    def test_ids_separate_their_fields(self, handler):
+        """NUL between the fields: ("a","bc") and ("ab","c") are different
+        inputs, the way chunk_id in the conversation layer already works."""
+        assert description_vector_id("a", "bc") != description_vector_id("ab", "c")
+
+    def test_description_ids_are_deterministic_and_distinct(self, handler):
+        assert description_vector_id("p", "goal") == description_vector_id("p", "goal")
+        assert description_vector_id("p", "goal") != description_vector_id("p", "scope")
+        assert description_vector_id("p", "goal") != description_vector_id("q", "goal")
+
+    def test_updating_one_description_leaves_the_others(self, handler):
+        handler.add_project_summary_vector("project_a", vec(1))
+        handler.add_project_description_vector("project_a", "goal", vec(2))
+        handler.add_project_description_vector("project_a", "scope", vec(3))
+        handler.update_project_description_vector("project_a", "goal", vec(9))
+        assert handler.get_project_description_vector("project_a", "goal").tolist() == vec(9).tolist()
+        assert handler.get_project_description_vector("project_a", "scope").tolist() == vec(3).tolist()
+        assert handler.get_project_summary_vector("project_a").tolist() == vec(1).tolist()
+
+    def test_deleting_one_description_leaves_the_others(self, handler):
+        handler.add_project_description_vector("project_a", "goal", vec(2))
+        handler.add_project_description_vector("project_a", "scope", vec(3))
+        handler.delete_project_description_vector("project_a", "goal")
+        with pytest.raises(VectorNotFoundEror):
+            handler.get_project_description_vector("project_a", "goal")
+        assert handler.get_project_description_vector("project_a", "scope").tolist() == vec(3).tolist()
+
+    def test_the_same_description_id_across_projects_is_separate(self, handler):
+        handler.add_project_description_vector("project_a", "goal", vec(1))
+        handler.add_project_description_vector("project_b", "goal", vec(2))
+        assert handler.get_project_description_vector("project_a", "goal").tolist() == vec(1).tolist()
+        assert handler.get_project_description_vector("project_b", "goal").tolist() == vec(2).tolist()
+
+
+class TestBatchDescriptionVectors:
+    def test_writes_them_all(self, handler):
+        handler.add_project_description_vectors(
+            "project_a", [("goal", vec(1)), ("scope", vec(2)), ("risk", vec(3))]
+        )
+        assert len(FakeVectorRepository.instances[0].store) == 3
+
+    def test_is_idempotent(self, handler):
+        """batch_insert ignores ids already held, so a retry after a partial
+        failure re-runs cleanly."""
+        handler.add_project_description_vectors("project_a", [("goal", vec(1))])
+        handler.add_project_description_vectors("project_a", [("goal", vec(1))])
+        assert len(FakeVectorRepository.instances[0].store) == 1
+
+    def test_a_repeated_id_is_refused(self, handler):
+        with pytest.raises(MisMatchCount):
+            handler.add_project_description_vectors(
+                "project_a", [("goal", vec(1)), ("goal", vec(2))]
+            )
+
+    def test_a_bad_pair_writes_nothing(self, handler):
+        with pytest.raises(InvalidVectorDimension):
+            handler.add_project_description_vectors(
+                "project_a", [("goal", vec(1)), ("scope", [1.0])]
+            )
+        assert FakeVectorRepository.instances == []
+
+    def test_an_empty_batch_is_a_no_op(self, handler):
+        handler.add_project_description_vectors("project_a", [])
+        assert FakeVectorRepository.instances == []
+
+
+class TestReadingForTheRouter:
+    def test_returns_rows_in_the_order_of_the_ids_given(self, handler):
+        """Row i matches vector_ids[i] — what lets a routing score be traced
+        back to the vector, and through it the project, that produced it."""
+        handler.add_project_summary_vector("project_a", vec(1))
+        handler.add_project_description_vectors(
+            "project_a", [("goal", vec(2)), ("scope", vec(3))]
+        )
+        ids = [
+            description_vector_id("project_a", "scope"),
+            summary_vector_id("project_a"),
+            description_vector_id("project_a", "goal"),
+        ]
+        rows = handler.get_project_vectors("project_a", ids)
+        assert rows.shape == (3, DIMENSIONS)
+        assert [row[0] for row in rows] == [3.0, 1.0, 2.0]
+
+    def test_no_ids_reads_nothing(self, handler):
+        rows = handler.get_project_vectors("project_a", [])
+        assert rows.shape == (0, DIMENSIONS)
+        assert FakeVectorRepository.instances == []
+
+    def test_an_unknown_id_raises(self, handler):
+        handler.add_project_summary_vector("project_a", vec(1))
+        with pytest.raises(VectorNotFoundEror):
+            handler.get_project_vectors("project_a", [summary_vector_id("project_b")])
+
+    @pytest.mark.parametrize("bad", [None, "", 7])
+    def test_an_unusable_project_id_is_refused(self, handler, bad):
+        with pytest.raises(ValueError):
+            handler.get_project_vectors(bad, [1])
+
+    @pytest.mark.parametrize("bad", [None, "", "  ", 7])
+    def test_an_unusable_description_id_is_refused(self, handler, bad):
+        with pytest.raises(ValueError):
+            handler.add_project_description_vector("project_a", bad, vec(1))
+

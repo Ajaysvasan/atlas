@@ -3,11 +3,6 @@ from pathlib import Path
 
 import numpy as np
 
-# Logging lives in logging_setup.py and is re-exported here, so the
-# `from config import get_logger` that every module already uses keeps working.
-# It cannot live in this file: logging_setup must not import config, or a module
-# importing config in order to log would close a cycle. The dependency runs one
-# way only, config -> logging_setup.
 from logging_setup import (
     configure_logging,
     get_logger,
@@ -18,10 +13,7 @@ from logging_setup import (
 
 
 class Config:
-    """
-    Configuration class for the backend application.
-    Modify or extend these attributes as needed for your final year project.
-    """
+    """Configuration class for the backend application."""
 
     APP_NAME = "Final Year Project Backend"
     DATASET_PATH = Path("dataset").resolve().parent / "dataset"

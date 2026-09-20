@@ -12,12 +12,7 @@ from data_layer.ingestion.metadata.metadata import (
 
 @dataclass(frozen=True)
 class SectionSpan:
-    """A heading and the body that follows it, located in normalized content.
-
-    The normalizer emits these because it is the only stage that still sees the
-    document's line structure; every offset is absolute into
-    NormalizedContent.content so a chunk can be traced back to its source.
-    """
+    """A heading and the body that follows it, located in normalized content."""
 
     name: str
     heading_start: int

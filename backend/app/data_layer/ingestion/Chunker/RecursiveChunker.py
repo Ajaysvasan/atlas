@@ -49,9 +49,7 @@ class RecursiveChunker:
         return RChunk(
             chunk,
             self.__make_chunk_meta_data(document_name, document_id),
-            # The ordinal is what keeps the id unique: a document that repeats a
-            # boilerplate paragraph would otherwise produce two chunks with the
-            # same id, and the embedder derives its vector id from the same text.
+            # The ordinal is what keeps the id unique when text repeats.
             self.__make_chunk_id(document_id, ordinal, chunk),
             start,
             end,
@@ -66,12 +64,7 @@ class RecursiveChunker:
         return None, []
 
     def __separator_pieces(self, text: str, separator: str) -> List[Tuple[int, int]]:
-        """Offsets of text split on separator, each piece keeping its own separator.
-
-        The pieces tile the text exactly. The previous implementation rebuilt
-        pieces as `part + separator`, which appended a separator the document
-        never had to whichever piece came last.
-        """
+        """Offsets of text split on separator, each piece keeping its own separator."""
         pieces: List[Tuple[int, int]] = []
         start = 0
         while True:
@@ -123,12 +116,7 @@ class RecursiveChunker:
         return spans
 
     def __apply_overlap(self, spans: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        """Extend each chunk backwards into the one before it.
-
-        Applied once over the finished spans rather than inside __split, where
-        it used to run again at every level of the recursion and duplicate the
-        same text into a chunk several times over.
-        """
+        """Extend each chunk backwards into the one before it."""
         if self.overlap <= 0 or len(spans) < 2:
             return spans
 
@@ -166,8 +154,6 @@ class RecursiveChunker:
 
     def __persist(self, chunks: List[RChunk]) -> None:
         if not self.db_path or not chunks:
-            # A chunker built without a db_path is in-memory by design (the
-            # pipeline always passes one), so this is not a warning.
             logger.debug("Recursive chunks not persisted: db_path=%s", self.db_path)
             return
         from .DB_Manager import Manager

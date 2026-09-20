@@ -1,22 +1,10 @@
-"""The project summary vector, addressed by project id.
+"""A project's vectors in pgvector: its summary and one per description.
 
-One vector per project: "the summary of project X". Every method here takes a
-project_id and no vector id, so the id has to be derived from the project —
-summary_vector_id() is that mapping, and it is what makes add/update/get/delete
-agree on which row they are talking about without a lookup table.
-
-This is the project-level counterpart to ConversationVectorManager, which wraps
-the same VectorRepository for conversation snapshots. The difference is the
-addressing: a conversation holds many vectors and the caller supplies their ids,
-while a project holds exactly one summary vector and its id is its identity.
-
-Vectors are validated here, before a connection is touched, so a malformed one
-is rejected by the memory layer's InvalidVectorDimension rather than surfacing
-later as the data layer's exception of the same name.
+See README.md in this directory.
 """
 
 import hashlib
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 from numpy import float32, ndarray
@@ -24,23 +12,29 @@ from numpy.typing import NDArray
 
 from config import Config, get_logger
 from data_layer.vector_db_manager.repository.vectorRepository import VectorRepository
-from memory.memory_pool_exceptions import InvalidVectorDimension
+from memory.memory_pool_exceptions import InvalidVectorDimension, MisMatchCount
 
 logger = get_logger(__name__)
 
+SUMMARY = "summary"
+DESCRIPTION = "description"
+
+
+def _derive(kind: str, project_id: str, source_id: str = "") -> int:
+    """The id a vector of this kind, for this source, is stored under."""
+    payload = f"{kind}\x00{project_id}\x00{source_id}".encode("utf-8")
+    packed = int.from_bytes(hashlib.sha256(payload).digest()[:8], byteorder="little")
+    return packed & Config.VECTOR_ID_MASK
+
 
 def summary_vector_id(project_id: str) -> int:
-    """The id under which a project's summary vector is stored.
+    """The id of this project's summary vector."""
+    return _derive(SUMMARY, project_id)
 
-    Derived from the project id alone: it is an identity, not content, so the
-    same project always resolves to the same row and a re-embedded summary
-    replaces its predecessor instead of accumulating beside it. Masked into the
-    non-negative signed 64-bit range both storage backends accept — see
-    Config.VECTOR_ID_MASK.
-    """
-    digest = hashlib.sha256(project_id.encode("utf-8")).digest()
-    packed = int.from_bytes(digest[:8], byteorder="little", signed=False)
-    return packed & Config.VECTOR_ID_MASK
+
+def description_vector_id(project_id: str, description_id: str) -> int:
+    """The id of the vector for one of this project's descriptions."""
+    return _derive(DESCRIPTION, project_id, description_id)
 
 
 class ProjectVectorHandler:
@@ -51,12 +45,7 @@ class ProjectVectorHandler:
         self.__repositories: Dict[str, VectorRepository] = {}
 
     def __repository(self, project_id: str) -> VectorRepository:
-        """One repository per project, held open for the handler's lifetime.
-
-        VectorRepository scopes itself to a project and opens its PostgreSQL
-        connection in the constructor, so building one per call would open and
-        drop a connection on every add, read or delete.
-        """
+        """One repository per project, held open for this object's lifetime."""
         repository = self.__repositories.get(project_id)
         if repository is None:
             logger.debug("Opening the vector store for project %s", project_id)
@@ -64,89 +53,157 @@ class ProjectVectorHandler:
             self.__repositories[project_id] = repository
         return repository
 
+    def repository_for(self, project_id: str) -> VectorRepository:
+        """The connection this handler holds for a project."""
+        return self.__repository(self.__validate_id(project_id, "project_id"))
+
     @staticmethod
-    def __validate_project_id(project_id) -> str:
-        if not isinstance(project_id, str) or not project_id.strip():
-            raise ValueError("project_id must be a non-empty string")
+    def __validate_id(value, name: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+        return value
+
+    @staticmethod
+    def __as_vector(vector) -> NDArray[float32]:
+        checked = np.asarray(vector, dtype=float32)
+        if checked.ndim != 1:
+            raise InvalidVectorDimension(checked.shape, Config.EMBEDDING_DIMENSIONS)
+        if checked.shape[0] != Config.EMBEDDING_DIMENSIONS:
+            raise InvalidVectorDimension(
+                checked.shape[0], Config.EMBEDDING_DIMENSIONS
+            )
+        return checked
+
+    def __add_vector(self, project_id: str, vector_id: int, vector) -> None:
+        # On its own line: in `self.__repository(id).insert(..., self.__as_vector(v))`
+        # Python resolves the call target first, so a bad vector would have
+        # opened a connection before being rejected.
+        checked = self.__as_vector(vector)
+        self.__repository(project_id).insert(vector_id, checked)
+
+    def __update_vector(self, project_id: str, vector_id: int, vector) -> str:
+        checked = self.__as_vector(vector)
+        self.__repository(project_id).update(vector_id, checked)
         return project_id
 
-    @staticmethod
-    def __as_vector(project_summary_vector) -> NDArray[float32]:
-        vector = np.asarray(project_summary_vector, dtype=float32)
-        if vector.ndim != 1:
-            raise InvalidVectorDimension(vector.shape, Config.EMBEDDING_DIMENSIONS)
-        if vector.shape[0] != Config.EMBEDDING_DIMENSIONS:
-            raise InvalidVectorDimension(
-                vector.shape[0], Config.EMBEDDING_DIMENSIONS
-            )
-        return vector
+    def __delete_vector(self, project_id: str, vector_id: int) -> None:
+        self.__repository(project_id).delete(vector_id)
 
-    # Adds new project summary vector
-    def __add_project_summary_vector(
-        self, project_id: str, project_summary_vector: List[float32] | ndarray
-    ) -> None:
-        checked_id = self.__validate_project_id(project_id)
-        vector = self.__as_vector(project_summary_vector)
-        self.__repository(checked_id).insert(summary_vector_id(checked_id), vector)
+    def __get_vector(self, project_id: str, vector_id: int) -> NDArray[float32]:
+        return self.__repository(project_id).search(vector_id)
 
-    # This method returns the project id after updating the project summary vector
-    def __update_project_summary_vector(
-        self, project_id: str, project_summary_vector: List[float32] | ndarray
-    ) -> str:
-        checked_id = self.__validate_project_id(project_id)
-        vector = self.__as_vector(project_summary_vector)
-        self.__repository(checked_id).update(summary_vector_id(checked_id), vector)
-        return checked_id
-
-    def __delete_project_summary_vector(self, project_id: str) -> None:
-        checked_id = self.__validate_project_id(project_id)
-        self.__repository(checked_id).delete(summary_vector_id(checked_id))
-
-    def __get_project_summary_vector(self, project_id: str) -> NDArray[float32]:
-        checked_id = self.__validate_project_id(project_id)
-        return self.__repository(checked_id).search(summary_vector_id(checked_id))
+    # -- the project's summary ----------------------------------------------
 
     def add_project_summary_vector(
         self, project_id: str, project_summary_vector: List[float32] | ndarray
     ) -> None:
-        """Store this project's summary vector.
-
-        Raises DuplicateVectorException if the project already has one — the
-        slot is taken, and replacing it is update_project_summary_vector's job
-        rather than something an "add" should do silently.
-        """
-        self.__add_project_summary_vector(project_id, project_summary_vector)
+        """Store this project's summary vector. Raises DuplicateVectorException if it has one."""
+        checked = self.__validate_id(project_id, "project_id")
+        self.__add_vector(checked, summary_vector_id(checked), project_summary_vector)
 
     def update_project_summary_vector(
         self, project_id: str, project_summary_vector: List[float32] | ndarray
     ) -> str:
-        """Replace this project's summary vector in place. Returns the project id.
-
-        A single UPDATE rather than delete-then-insert: the pair is two commits,
-        and a failure between them loses the vector entirely. Raises
-        VectorNotFoundEror if the project has no summary vector yet.
-        """
-        return self.__update_project_summary_vector(project_id, project_summary_vector)
+        """Replace this project's summary vector in place. Returns the project id."""
+        checked = self.__validate_id(project_id, "project_id")
+        return self.__update_vector(
+            checked, summary_vector_id(checked), project_summary_vector
+        )
 
     def delete_project_summary_vector(self, project_id: str) -> None:
-        """Remove this project's summary vector.
-
-        Idempotent: a project that has none is not an error, because the caller
-        that wants it gone does not care whether it was there.
-        """
-        self.__delete_project_summary_vector(project_id)
+        """Remove this project's summary vector. Idempotent."""
+        checked = self.__validate_id(project_id, "project_id")
+        self.__delete_vector(checked, summary_vector_id(checked))
 
     def get_project_summary_vector(self, project_id: str) -> ndarray:
         """This project's summary vector. Raises VectorNotFoundEror if absent."""
-        return self.__get_project_summary_vector(project_id)
+        checked = self.__validate_id(project_id, "project_id")
+        return self.__get_vector(checked, summary_vector_id(checked))
+
+    # -- the project's descriptions -----------------------------------------
+
+    def add_project_description_vector(
+        self,
+        project_id: str,
+        description_id: str,
+        description_vector: List[float32] | ndarray,
+    ) -> None:
+        """Store the vector for one of this project's descriptions."""
+        checked = self.__validate_id(project_id, "project_id")
+        source = self.__validate_id(description_id, "description_id")
+        self.__add_vector(
+            checked, description_vector_id(checked, source), description_vector
+        )
+
+    def add_project_description_vectors(
+        self,
+        project_id: str,
+        descriptions: Sequence[Tuple[str, List[float32] | ndarray]],
+    ) -> None:
+        """Store several (description_id, vector) pairs. Idempotent; an empty sequence is a no-op."""
+        checked = self.__validate_id(project_id, "project_id")
+        rows = [
+            (
+                description_vector_id(
+                    checked, self.__validate_id(description_id, "description_id")
+                ),
+                self.__as_vector(vector),
+            )
+            for description_id, vector in descriptions
+        ]
+        if not rows:
+            return
+        identifiers = [vector_id for vector_id, _ in rows]
+        if len(set(identifiers)) != len(identifiers):
+            raise MisMatchCount(
+                "The batch repeats a description id. Each id may appear at most once."
+            )
+        self.__repository(checked).batch_insert(
+            identifiers, np.array([vector for _, vector in rows], dtype=float32)
+        )
+
+    def update_project_description_vector(
+        self,
+        project_id: str,
+        description_id: str,
+        description_vector: List[float32] | ndarray,
+    ) -> str:
+        """Replace one description's vector in place. Returns the project id."""
+        checked = self.__validate_id(project_id, "project_id")
+        source = self.__validate_id(description_id, "description_id")
+        return self.__update_vector(
+            checked, description_vector_id(checked, source), description_vector
+        )
+
+    def delete_project_description_vector(
+        self, project_id: str, description_id: str
+    ) -> None:
+        """Remove one description's vector. Idempotent."""
+        checked = self.__validate_id(project_id, "project_id")
+        source = self.__validate_id(description_id, "description_id")
+        self.__delete_vector(checked, description_vector_id(checked, source))
+
+    def get_project_description_vector(
+        self, project_id: str, description_id: str
+    ) -> ndarray:
+        """One description's vector. Raises VectorNotFoundEror if absent."""
+        checked = self.__validate_id(project_id, "project_id")
+        source = self.__validate_id(description_id, "description_id")
+        return self.__get_vector(checked, description_vector_id(checked, source))
+
+    # -- reading a whole project's vectors ----------------------------------
+
+    def get_project_vectors(
+        self, project_id: str, vector_ids: Sequence[int]
+    ) -> NDArray[float32]:
+        """The embeddings behind these ids, in the order given."""
+        checked = self.__validate_id(project_id, "project_id")
+        if not vector_ids:
+            return np.empty((0, Config.EMBEDDING_DIMENSIONS), dtype=float32)
+        return self.__repository(checked).batch_search(list(vector_ids))
 
     def close(self) -> None:
-        """Release every connection this handler opened.
-
-        One per project touched, so without this they are only reclaimed
-        whenever the garbage collector happens to run and they scale with the
-        number of projects a process has seen.
-        """
+        """Release every connection this object opened."""
         for repository in self.__repositories.values():
             repository.close()
         self.__repositories.clear()

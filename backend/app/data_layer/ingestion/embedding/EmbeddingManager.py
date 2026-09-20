@@ -14,8 +14,6 @@ from data_layer.ingestion.nodes.nodes import EmbeddedChunk, HChunk, RChunk
 
 logger = get_logger(__name__)
 
-# Re-exported so callers of this module can reason about the id range without
-# reaching for Config. See Config.VECTOR_ID_MASK for the rationale.
 VECTOR_ID_MASK = Config.VECTOR_ID_MASK
 
 
@@ -26,25 +24,15 @@ class EmbeddingManager:
         embeddding_dimension: int = Config.EMBEDDING_DIMENSIONS,
     ):
         self.model_name = model_name
-        # Worth timing: this pulls ~100MB of weights and dominates the cost of a
-        # short run, so an ingestion that looks slow is usually this line.
         with log_timing(logger, "loading embedding model", model=model_name):
             self.model = SentenceTransformer(model_name)
         self.embedding_dimension = embeddding_dimension
 
     def __generate_vector_id(self, chunk_id: str) -> int:
-        """Derive the vector id from the chunk id, never from the chunk text.
-
-        Chunk text repeats — a licence header, a boilerplate paragraph, a "yes"
-        turn — and hashing it produced one vector id for several distinct
-        chunks, so all but one of them were unreachable in the index. The chunk
-        ids the chunkers emit already bind position as well as content.
-        """
+        """Derive the vector id from the chunk id, never from the chunk text."""
         hash_bytes = hashlib.md5(chunk_id.encode("utf-8")).digest()
         uint64_id = int.from_bytes(hash_bytes[:8], byteorder="little", signed=False)
-        # Clearing the top bit keeps the id non-negative AND inside the signed
-        # 64-bit range both storage backends accept. Without this, ~49% of ids
-        # raise "Python int too large to convert to SQLite INTEGER" on insert.
+        # Without the mask ~49% of ids overflow a signed 64-bit column.
         return uint64_id & VECTOR_ID_MASK
 
     def __create_meta_data(self, chunk_id: str, chunk: str) -> EmbeddedChunkMetaData:
@@ -107,12 +95,7 @@ class EmbeddingManager:
         )
 
     def embed_text(self, text: str, chunk_id: str | None = None) -> EmbeddedChunk:
-        """Embed a raw string that is not a pipeline chunk.
-
-        The memory layer needs this for conversation summaries and turns, which
-        never pass through the Chunker and so are not HChunk/RChunk. When
-        chunk_id is omitted it is derived from the content.
-        """
+        """Embed a raw string that is not a pipeline chunk."""
         return self.__embed_text(text, chunk_id)
 
     def embed_texts(

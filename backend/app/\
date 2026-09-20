@@ -1,0 +1,25 @@
+from data_layer.ingestion.nodes.nodes import EmbeddedChunk
+from memory.memory_pool_exceptions import EmptyQueryException
+
+from .project_data_repo.project_meta_data import ProjectMetaData
+from .project_data_repo.project_vector_handler import ProjectVectorHandler
+from data_layer.ingestion.embedding.EmbeddingManager import EmbeddingManager
+from typing import List
+from numpy import ndarray , float32
+from pathlib import Path
+from config import Config
+
+class ProjectManager:
+    # we need both the query as string and also as the vector
+    __project_db = Config.DATA_DIR / Path("project_db/project.sql")
+    def __init__(self , topic_id : str , query : str):
+        self.topic_id = topic_id
+        self.query = query
+
+    def __query_embedder(self) -> EmbeddedChunk:
+        if self.query is None or self.query == "":
+            raise EmptyQueryException()
+        embedding_manager = EmbeddingManager()
+        return embedding_manager.embed_text(self.query)
+    def __is_project_exists(self) -> str:
+        return ""

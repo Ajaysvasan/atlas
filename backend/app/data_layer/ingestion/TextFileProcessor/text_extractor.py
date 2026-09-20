@@ -21,13 +21,7 @@ OFFICE_BINARY_EXTENSIONS = {".doc", ".odt", ".odp", ".ods", ".rtf", ".epub", ".x
 
 
 class TextExtractor:
-    """Turns a file of any type into plain text.
-
-    Extensions with a structure worth exploiting (PDF, Office, HTML, JSON,
-    notebooks) get a dedicated reader; everything else — source code, logs,
-    configuration, TeX, subtitles, formats nobody has thought of yet — is
-    decoded as text. Only bytes that are not text at all are rejected.
-    """
+    """Turns a file of any type into plain text."""
 
     def __init__(self):
         self._handlers = {
@@ -51,12 +45,7 @@ class TextExtractor:
             return file.read()
 
     def _decode(self, raw: bytes, file_path: str) -> str:
-        """Decode bytes to text, or raise if they are not text at all.
-
-        chardet is consulted only after the common encodings fail, because it
-        guesses from statistics and will happily label a binary blob as some
-        obscure codepage.
-        """
+        """Decode bytes to text, or raise if they are not text at all."""
         # A byte order mark is the only trustworthy signal for the wide
         # encodings: utf-16 accepts almost any even-length input, so trying it
         # blind turns a Latin-1 document into CJK without raising anything.
@@ -225,11 +214,7 @@ class TextExtractor:
             return ""
 
     def _extract_from_markup(self, file_path: str) -> str:
-        """HTML and XML with the tags removed.
-
-        Markup used to be read as plain text, so every tag and inline script was
-        chunked and embedded alongside the prose it surrounds.
-        """
+        """HTML and XML with the tags removed."""
         markup = self._extract_from_txt(file_path)
         try:
             from bs4 import BeautifulSoup
@@ -254,8 +239,7 @@ class TextExtractor:
             return markup
 
     def _flatten_json(self, value, prefix: str = "") -> List[str]:
-        """One "a.b.c: value" line per leaf, so the keys stay attached to what
-        they label once the document is split into chunks."""
+        """One "a.b.c: value" line per leaf, so the keys stay attached to what"""
         if isinstance(value, dict):
             lines: List[str] = []
             for key, item in value.items():

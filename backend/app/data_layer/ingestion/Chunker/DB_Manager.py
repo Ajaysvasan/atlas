@@ -132,13 +132,7 @@ class Manager:
         return rows
 
     def __insert_many(self, query: str, rows: list, table: str, ids: list):
-        """Insert rows in one statement, ignoring ones already stored.
-
-        Every id here is derived from the document's content plus the position
-        of the row within it, so a conflict means the identical row is already
-        present — which is what re-ingesting an unchanged folder does, and what
-        used to abort the whole run on a primary key violation.
-        """
+        """Insert rows in one statement, ignoring ones already stored."""
         if not rows:
             return
         try:

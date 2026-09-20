@@ -89,13 +89,7 @@ class HierarchicalChunker:
     def __find_sections(
         self, doc: Document, spans: tuple[SectionSpan, ...]
     ) -> List[Section]:
-        """Turn the normalizer's section spans into Section rows.
-
-        The spans are used as given rather than re-derived here: this stage sees
-        text whose line structure the normalizer has already reshaped, so any
-        heading regex run at this point disagrees with the one that decided the
-        document was hierarchical in the first place.
-        """
+        """Turn the normalizer's section spans into Section rows."""
         sections: List[Section] = []
 
         if not spans:

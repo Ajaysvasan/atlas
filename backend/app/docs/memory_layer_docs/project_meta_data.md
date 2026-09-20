@@ -7,8 +7,10 @@ storage half of the project layer: what a project is, what describes it, and
 which summary vectors belong to it. `ProjectManager` — still a stub — is the
 domain object meant to sit on top of it.
 
-One instance is scoped to one `project_id`, the same scoping `VectorRepository`
-uses to partition the vector table. The SQLite file itself is a shared registry
+One instance is scoped to one `project_id` **and its `topic_id`** —
+`ProjectMetaData(project_id, topic_id, ...)`. A project belongs to exactly one
+topic, and `topic_id` is `NOT NULL` in all three tables, so it is supplied once
+at construction rather than per call. The SQLite file itself is a shared registry
 holding every project, which is what makes "list all projects" answerable later.
 
 ---
@@ -17,7 +19,7 @@ holding every project, which is what makes "list all projects" answerable later.
 
 | Store | Holds |
 | :--- | :--- |
-| `project_table` (SQLite) | One row per project: name, timestamps, the summary **text**, owner |
+| `project_table` (SQLite) | One row per project: name, topic, timestamps, the summary **text**, owner |
 | `project_description_table` (SQLite) | Several descriptions per project |
 | `project_mapping_table` (SQLite) | `project_id` → summary vector id |
 | `vectors` (PostgreSQL/pgvector) | The summary **embedding** |
@@ -31,6 +33,7 @@ ingested documents and has nothing to do with project summaries.
 create table if not exists project_table(
     project_id text primary key,
     project_name text not null,
+    topic_id text not null,
     created_at date not null,
     updated_at date not null,
     project_summary text not null,
@@ -38,6 +41,7 @@ create table if not exists project_table(
 );
 
 create table if not exists project_description_table(
+    topic_id text not null,
     project_id text not null,
     project_description_id text not null,
     project_description text not null,
@@ -48,12 +52,32 @@ create table if not exists project_description_table(
 
 create table if not exists project_mapping_table(
     project_id text not null,
+    topic_id text not null,
     project_summary_vector_id integer not null,
     created_at date not null,
     primary key (project_id, project_summary_vector_id),
     foreign key (project_id) references project_table(project_id)
 );
 ```
+
+### The topic column in the child tables
+
+Both child tables carry their own copy of `topic_id`, which is derivable from
+`project_table` by a join. It is denormalised on purpose: routing a query scores
+every summary vector under one topic, and that read is then a single statement
+against `project_mapping_table` with no join.
+
+A denormalised copy is only safe if it moves when the project moves, so
+`__upsert_project` rewrites both child tables' `topic_id` in the same
+transaction whenever a write carries a different topic than the row holds. Left
+out, those rows keep answering for the topic the project has left. Note this
+holds for writes that go through `ProjectMetaData` — a raw `UPDATE` elsewhere
+can still desynchronise them.
+
+`topic_id` has no foreign key, because there is no topic table yet
+(`TopicManager` is still a stub). The only thing standing between a typo and a
+project filed under a topic that does not exist is the non-empty check in the
+constructor.
 
 Both child tables key on `project_id` first, so two projects may reuse the same
 description id or the same vector id without colliding — and content-derived
@@ -122,7 +146,8 @@ seconds, so the raw column is what orders everything written inside one second;
 
 | Method | Returns |
 | :--- | :--- |
-| `get_project()` | `(project_id, project_name, created_at, updated_at, project_summary, user_id)` or `None` |
+| `get_project()` | A `ProjectRow` — `project_id, project_name, topic_id, created_at, updated_at, project_summary, user_id` — or `None`. A `NamedTuple`, so `row.topic_id` works and indexing still does too |
+| `get_topic_summary_vector_ids()` | `[(project_id, vector_id)]` for **every project under this topic**, which is what routing needs: it scores all the topic's vectors and must know which project each one belongs to |
 | `get_summary_vector(vector_id)` | One embedding. Raises `VectorNotFoundEror` if absent |
 | `get_all_summary_vector_id()` | Every vector id, oldest first — from SQLite alone, no PostgreSQL round trip |
 | `get_all_summary_vector()` | Every embedding, oldest first; row *i* matches id *i* |
@@ -133,24 +158,41 @@ seconds, so the raw column is what orders everything written inside one second;
 ## `ProjectVectorHandler` (`project_vector_handler.py`)
 
 A sibling module, and the project-level counterpart to
-`ConversationVectorManager`: one summary vector per project, addressed by
-project id.
+`ConversationVectorManager`. A project holds **one summary vector and one vector
+per description** — the count `project_mapping_table` has always allowed.
 
 ```python
 handler = ProjectVectorHandler()
 handler.add_project_summary_vector(project_id, vector)
-handler.update_project_summary_vector(project_id, vector)   # -> project_id
-handler.get_project_summary_vector(project_id)              # -> ndarray
-handler.delete_project_summary_vector(project_id)
-handler.close()                                             # or use it as a context manager
+handler.add_project_description_vector(project_id, description_id, vector)
+handler.add_project_description_vectors(project_id, [(description_id, vector), ...])
+handler.get_project_vectors(project_id, vector_ids)   # batch, in the order given
+handler.close()                                       # or use it as a context manager
 ```
 
-**The id is derived, not passed.** Every method takes a project id and no vector
-id, so `summary_vector_id(project_id)` resolves "the summary of project X" to
-one deterministic row — `sha256(project_id)` folded into
-`Config.VECTOR_ID_MASK`. The project id is an identity rather than content, so
-the same project always lands on the same row and a re-embedded summary replaces
-its predecessor instead of accumulating beside it.
+Each kind has the same four operations (`add`, `update`, `delete`, `get`).
+
+**Ids are derived from the source, not passed.** No method takes a vector id:
+
+| Source | Id |
+| :--- | :--- |
+| the project's summary | `summary_vector_id(project_id)` |
+| one description | `description_vector_id(project_id, description_id)` |
+
+Both fold `sha256` into `Config.VECTOR_ID_MASK`. The payload is
+`kind \x00 project_id \x00 source_id`: NUL separates the fields so `("a","bc")`
+and `("ab","c")` stay different inputs, and the kind is what keeps a future
+third source — a title, a tag — from colliding with a description that shares
+its id. Deriving rather than storing means add, update, get and delete agree on
+which row they mean without a lookup, and a vector can be regenerated from the
+text it came from after an embedding model change.
+
+**Enumeration lives in SQLite, not here.** `VectorRepository` can only fetch by
+id — it has no "list this project's vectors" — so the router gets its ids from
+`ProjectMetaData.get_topic_summary_vector_ids()` and passes them to
+`get_project_vectors()`, which returns row *i* for `vector_ids[i]`. That
+ordering is what lets a similarity score be traced back to the vector, and
+through it the project, that produced it.
 
 | Call | Behaviour |
 | :--- | :--- |
@@ -167,16 +209,18 @@ a malformed call costs no connection. A bad width raises the memory layer's
 handler keeps one repository per project it has touched rather than building one
 per call. `close()` releases them all.
 
-### Overlap with `ProjectMetaData`
+### How it lines up with `ProjectMetaData`
 
-The two disagree about how many summary vectors a project has.
-`project_mapping_table` holds *many* per project — `get_all_summary_vector_id()`
-returns a list, and `add_project_vector` takes the id from the caller. The
-handler holds *one*, at an id it derives. Both work; they are separate entry
-points to the same pgvector table and nothing routes between them yet. Which
-model the project layer settles on is worth deciding before `ProjectManager` is
-written, because it decides whether `ProjectMetaData` should delegate its vector
-half to this handler.
+They now agree on the count: many vectors per project, one per source. What is
+still split is who writes what. `ProjectMetaData` owns the SQLite side and takes
+a vector id from the caller; the handler owns the pgvector side and derives its
+own. Nothing routes between them yet, so a project's vectors can still be
+written through two paths — pass `summary_vector_id(project_id)` into
+`ProjectMetaData.add_project_vector` to keep the two in step by hand.
+
+The remaining step is delegation: `ProjectMetaData` calling the handler for its
+vector half instead of holding its own `VectorRepository`. Worth doing when
+`ProjectManager` is written, since that is the first caller that touches both.
 
 ---
 

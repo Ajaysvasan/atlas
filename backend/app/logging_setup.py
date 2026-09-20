@@ -1,23 +1,6 @@
 """Application-wide logging.
 
-Two entry points, and the split between them is the whole design.
-
-`get_logger(__name__)` is what every module calls. It returns a bare logger:
-no handlers, no files opened, no global state touched. Importing a module
-therefore stays free of side effects — the helper this replaces created `log/`
-and opened a file handle at import time, so merely importing `config` in a test
-wrote to disk.
-
-`configure()` is what the process entry point calls, once. It installs the
-handlers on the *root* logger and every module logger reaches them by
-propagation. That is what makes a single `--verbose` flag work everywhere:
-raising the root level raises it for data_layer, memory and cli at the same
-time. The previous arrangement gave each module its own handlers with
-`propagate = False`, so the flag reached only the one logger it was applied to
-and every other module stayed at INFO.
-
-Nothing here imports from this project. config.py re-exports `get_logger`, and
-a module that imported config in order to log would otherwise close a cycle.
+See README.md in this directory.
 """
 
 from __future__ import annotations
@@ -37,9 +20,6 @@ from typing import Any, Dict, Iterator, Mapping
 DEFAULT_LOG_FILE = "log/app.log"
 DEFAULT_LEVEL = "INFO"
 
-# The console is a different audience from the file. A person running the CLI
-# wants their own output back, not a running commentary, so the terminal gets
-# warnings and worse while the file keeps everything.
 DEFAULT_CONSOLE_LEVEL = "WARNING"
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
@@ -52,9 +32,6 @@ TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 # module would credit is this file. Three frames up is the caller's `with`.
 _TIMING_STACKLEVEL = 3
 
-# Model loading and HTTP clients narrate themselves at INFO and DEBUG. Left
-# alone they bury this project's own output the moment --verbose is passed,
-# which is exactly when someone is trying to read it.
 QUIET_LIBRARIES = (
     "asyncio",
     "chardet",
@@ -80,31 +57,19 @@ _context: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar(
 _configure_lock = threading.RLock()
 _configured = False
 
-# Everything the logging module itself puts on a record. Anything outside this
-# set arrived through `extra=` and belongs in the structured output.
+# Anything outside this set arrived through `extra=`.
 _RESERVED = frozenset(
     vars(logging.LogRecord("", 0, "", 0, "", (), None))
 ) | {"asctime", "message", "context", "context_fields", "taskName"}
 
 
 def get_logger(name: str) -> logging.Logger:
-    """The logger for one module. Call it as `get_logger(__name__)`.
-
-    Deliberately a thin wrapper: the dotted module name is what gives the log
-    its hierarchy, and handlers belong to `configure()`, not here.
-    """
+    """The logger for one module. Call it as `get_logger(__name__)`."""
     return logging.getLogger(name)
 
 
 class _ContextFilter(logging.Filter):
-    """Stamps the ambient context fields onto every record a handler sees.
-
-    On the handler rather than on a logger, because logger-level filters do not
-    run for records that arrive by propagation — and in this project every
-    record arrives that way. Doing it in a filter rather than inside the
-    formatter also keeps the fields correct if a handler ever defers formatting
-    to another thread.
-    """
+    """Stamps the ambient context fields onto every record a handler sees."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         fields: Dict[str, Any] = dict(_context.get())
@@ -117,11 +82,7 @@ class _ContextFilter(logging.Filter):
 
 
 class JsonFormatter(logging.Formatter):
-    """One JSON object per line, for when logs are shipped rather than read.
-
-    Context fields and anything passed through `extra=` are merged in at the top
-    level so a log search can filter on them directly.
-    """
+    """One JSON object per line, for when logs are shipped rather than read."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: Dict[str, Any] = {
@@ -150,12 +111,7 @@ def _env(name: str, fallback):
 
 
 def _level(value, fallback: int) -> int:
-    """Accept a level as either a name or a number; fall back rather than raise.
-
-    A typo in LOG_LEVEL must not stop the process from starting — logging is
-    diagnostics, and taking the application down to report a bad diagnostic
-    setting trades a small problem for a total one.
-    """
+    """Accept a level as either a name or a number; fall back rather than raise."""
     if value is None:
         return fallback
     if isinstance(value, int):
@@ -177,17 +133,7 @@ def configure(
     capture_warnings: bool = True,
     force: bool = False,
 ) -> logging.Logger:
-    """Install the handlers. Call once, from the process entry point.
-
-    Repeat calls are ignored rather than stacking a second set of handlers,
-    which is what duplicates every line in the log. Pass force=True to replace
-    the existing configuration instead — tests do, entry points should not.
-
-    Every argument falls back to an environment variable and then to a module
-    default, so a deployment can retune logging without a code change:
-    LOG_LEVEL, LOG_FILE, LOG_CONSOLE_LEVEL, LOG_FORMAT (text|json),
-    LOG_MAX_BYTES, LOG_BACKUP_COUNT.
-    """
+    """Install the handlers. Call once, from the process entry point."""
     global _configured
 
     with _configure_lock:
@@ -209,9 +155,8 @@ def configure(
         )
 
         root = logging.getLogger()
-        # The root logger gates before any handler is consulted, so it has to
-        # sit at the most permissive level of the two; each handler then filters
-        # down to its own audience.
+        # The root gates before any handler is consulted, so it takes the
+        # lower of the two; each handler then filters down to its own audience.
         root.setLevel(min(file_level, console_lvl) if console else file_level)
 
         path = Path(_env("LOG_FILE", log_file) or DEFAULT_LOG_FILE)
@@ -239,8 +184,6 @@ def configure(
             for name in QUIET_LIBRARIES:
                 logging.getLogger(name).setLevel(logging.WARNING)
 
-        # warnings.warn() otherwise goes to stderr unformatted and never reaches
-        # the file, so a DeprecationWarning from a long batch run is lost.
         logging.captureWarnings(capture_warnings)
 
         _configured = True
@@ -248,13 +191,7 @@ def configure(
 
 
 def _file_handler(path, level, formatter, max_bytes, backup_count):
-    """A rotating file handler, or None if the file cannot be opened.
-
-    Rotation because the previous configuration appended to one file forever.
-    None rather than an exception because an unwritable log directory — a
-    read-only mount, a container running as another uid — is not a reason for
-    the application to refuse to start; the console handler still reports.
-    """
+    """A rotating file handler, or None if the file cannot be opened."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
@@ -262,8 +199,6 @@ def _file_handler(path, level, formatter, max_bytes, backup_count):
             maxBytes=max_bytes,
             backupCount=backup_count,
             encoding="utf-8",
-            # Nothing is created until something is actually logged, so
-            # configure() on its own leaves no file behind.
             delay=True,
         )
     except OSError as error:
@@ -278,12 +213,7 @@ def _file_handler(path, level, formatter, max_bytes, backup_count):
 
 
 def reset() -> None:
-    """Remove and close the handlers configure() installed.
-
-    Tests need it between configurations; leaving the handlers attached would
-    leak a file descriptor per run and keep writing to a temporary directory
-    that has already been deleted.
-    """
+    """Remove and close the handlers configure() installed."""
     global _configured
 
     with _configure_lock:
@@ -300,12 +230,7 @@ def is_configured() -> bool:
 
 
 def set_level(level, console_level=None) -> None:
-    """Retune levels after configure(), which is what --verbose does.
-
-    Reaches the handlers as well as the root logger: the root level only decides
-    what is offered to a handler, and a handler pinned at WARNING would drop
-    debug records that the root had just started admitting.
-    """
+    """Retune levels after configure(), which is what --verbose does."""
     resolved = _level(level, logging.INFO)
     root = logging.getLogger()
     root.setLevel(resolved)
@@ -321,17 +246,7 @@ def set_level(level, console_level=None) -> None:
 
 @contextmanager
 def log_context(**fields: Any) -> Iterator[Dict[str, Any]]:
-    """Attach fields to every record logged inside the block.
-
-    What makes a concurrent pipeline readable: bind a query id once at the top
-    and every line from every stage carries it, so one request can be pulled out
-    of an interleaved log without threading an id through each call signature.
-
-    Nesting layers fields onto whatever is already bound. The binding is a
-    contextvar, so it follows async tasks but *not* threads — a worker started
-    with Thread or submitted to an executor begins empty, and has to bind its
-    own context or be launched through `contextvars.copy_context().run(...)`.
-    """
+    """Attach fields to every record logged inside the block."""
     merged = {**_context.get(), **fields}
     token = _context.set(merged)
     try:
@@ -353,11 +268,7 @@ def new_correlation_id() -> str:
 def log_timing(
     logger: logging.Logger, operation: str, level: int = logging.INFO, **fields: Any
 ) -> Iterator[None]:
-    """Time a block and log how long it took, whether or not it succeeded.
-
-    The duration also goes out as a `duration_ms` field, so the JSON handler
-    emits something aggregatable rather than a number embedded in prose.
-    """
+    """Time a block and log how long it took, whether or not it succeeded."""
     started = time.perf_counter()
     try:
         yield
@@ -383,6 +294,4 @@ def log_timing(
         )
 
 
-# The name config.py and main.py import it under. `configure` reads well inside
-# this module and ambiguously outside it, where several things get configured.
 configure_logging = configure

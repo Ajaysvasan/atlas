@@ -12,9 +12,6 @@ from memory.topic_pool.project_pool.conversation_pool.sqlite_setup import (
 
 logger = get_logger(__name__)
 
-# A conversation turn is stored whole: one turn -> one chunk. `chunker_type`
-# records that provenance so a future splitting strategy can coexist with rows
-# written today without a migration.
 CHUNKER_TYPE_TURN = "turn"
 
 _TURN_QUERY = """
@@ -25,13 +22,7 @@ _TURN_QUERY = """
 
 
 class Turn(NamedTuple):
-    """One conversation turn as read back: who said what, and where it sits.
-
-    The text-only readers return bare chunk text, which loses the speaker — a
-    conversation read through them is an ordered blob in which user and
-    assistant turns cannot be told apart, and so cannot be assembled into a
-    prompt. Field names match append_turn(role, text) so a turn round-trips.
-    """
+    """One conversation turn as read back: who said what, and where it sits."""
 
     sequence_number: int
     role: str
@@ -41,13 +32,7 @@ class Turn(NamedTuple):
 
 
 def utc_now() -> str:
-    """Canonical timestamp for every row this repository writes.
-
-    created_at is a caller-supplied TEXT column, which is what made Bug 4.31
-    possible. Stamping it here — in one ISO-8601 UTC format, sortable as text —
-    removes the caller's ability to get it wrong. Ordering still keys off
-    sequence_number; this is for display and auditing.
-    """
+    """Canonical timestamp for every row this repository writes."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -86,21 +71,13 @@ class FullConversationRepository:
             """)
             conn.commit()
 
-    # [ (project_id , sequence_number , chunk_id , role , created_at)] -> full_conversaton_meta_datas
-    # [(chunk_id , chunk , created_at , chunker_type)] -> chunks
     def __add_chunks(
         self,
         full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
         chunks: List[Tuple[str, str, str, str]],
     ) -> None:
         with connect(self.db_path) as conn:
-            # full_conversation.chunk_id has an FK onto summary_chunks, so the
-            # parent rows must land first. Previously the order was inverted and
-            # only "worked" because this connection had foreign_keys off — the
-            # PRAGMA is per-connection, and only __init_db set it — so an orphan
-            # meta row was accepted, then silently dropped by every reader's
-            # JOIN, consuming its sequence_number forever. connect() now applies
-            # it everywhere, which is the point of routing every open through it.
+            # summary_chunks is the FK parent, so its rows must land first.
             try:
                 cursor = conn.cursor()
                 cursor.executemany(
@@ -122,14 +99,7 @@ class FullConversationRepository:
                 raise e
 
     def __make_chunk_id(self, sequence_number: int, text: str) -> str:
-        """Deterministic, collision-free id for one conversation turn.
-
-        Content alone is not enough: chunk_id is a PRIMARY KEY and a speaker may
-        legitimately repeat themselves ("ok", "yes"), which would abort the whole
-        batch on IntegrityError. Binding project_id and sequence_number makes the
-        id unique per turn while staying reproducible. NUL separates the fields
-        so they cannot run together into a colliding payload.
-        """
+        """Deterministic, collision-free id for one conversation turn."""
         payload = f"{self.project_id}\x00{sequence_number}\x00{text}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -147,9 +117,8 @@ class FullConversationRepository:
         created_at = utc_now()
         conn = connect(self.db_path, isolation_level=None)
         try:
-            # BEGIN IMMEDIATE takes the write lock up front, so the MAX() read
-            # and the INSERT cannot interleave with another writer and hand out
-            # the same sequence_number twice.
+            # The write lock up front, so the MAX() read and the INSERT cannot
+            # interleave with another writer and reuse a sequence_number.
             conn.execute("BEGIN IMMEDIATE;")
             try:
                 cursor = conn.cursor()
@@ -202,8 +171,6 @@ class FullConversationRepository:
             return []
         with connect(self.db_path) as conn:
             cursor = conn.cursor()
-            # Take the newest n by sequence_number (DESC + LIMIT), then re-sort
-            # ascending so the caller receives them in conversation order.
             cursor.execute(
                 """
                 SELECT chunk FROM (
@@ -238,12 +205,7 @@ class FullConversationRepository:
             return cursor.fetchall()
 
     def __get_ranged_rows(self, start: int, end: int):
-        """Full chunk rows for a range, not just the text.
-
-        A snapshot has to record which chunks it covers, so it needs chunk_id,
-        created_at and chunker_type alongside the text that get_ranged_chunks
-        returns on its own.
-        """
+        """Full chunk rows for a range, not just the text."""
         with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -311,27 +273,15 @@ class FullConversationRepository:
         full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
         chunks: List[Tuple[str, str, str, str]],
     ) -> None:
-        """it supports only batch insertion , since we add the chunks only after a conversation , so no individual insertion is needed rather batch insertion is enough
-        [ (project_id , sequence_number , chunk_id , role , created_at)] -> full_conversaton_meta_datas
-         [(chunk_id , chunk , created_at , chunker_type)] -> chunks"""
+        """it supports only batch insertion , since we add the chunks only after a conversation , so no individual insertion is needed rather batch insertion is enough"""
         self.__add_chunks(full_conversaton_meta_datas, chunks)
 
     def append_turns(self, turns: List[Tuple[str, str]]) -> List[int]:
-        """Append conversation turns and return their allocated sequence numbers.
-
-        `turns` is [(role, text)]. sequence_number, chunk_id and created_at are
-        derived here rather than by the caller — they are all things the caller
-        has no reliable way to know. Roles are validated one layer up, in
-        FullConversation.
-        """
+        """Append conversation turns and return their allocated sequence numbers."""
         return self.__append_turns(turns)
 
     def next_sequence_number(self) -> int:
-        """The sequence_number the next appended turn will receive.
-
-        Advisory only — read outside the write lock. append_turns() allocates
-        its own under BEGIN IMMEDIATE.
-        """
+        """The sequence_number the next appended turn will receive."""
         with connect(self.db_path) as conn:
             return self.__next_sequence_number(conn.cursor())
 

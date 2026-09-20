@@ -23,11 +23,15 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
 from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
 from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
     ProjectMetaData,
+    ProjectRow,
+    list_topic_projects,
+    list_topic_vector_ids,
     as_timestamp,
     utc_now,
 )
 
 PROJECT_ID = "unit_test_project"
+TOPIC_ID = "unit_test_topic"
 DIMENSIONS = Config.EMBEDDING_DIMENSIONS
 
 
@@ -98,7 +102,7 @@ def db_path(tmp_path):
 @pytest.fixture
 def meta(db_path, fake_vectors):
     m = ProjectMetaData(
-        PROJECT_ID, db_path=db_path, vector_repository=fake_vectors
+        PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
     )
     yield m
     m.close()
@@ -121,7 +125,9 @@ def _raise_boom(*args, **kwargs):
 class TestSchema:
     def test_creates_missing_parent_directory(self, db_path, fake_vectors):
         assert not db_path.parent.exists()
-        m = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        m = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         assert db_path.exists()
         m.close()
 
@@ -155,7 +161,9 @@ class TestSchema:
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO project_description_table "
-                    "VALUES ('ghost', 'd1', 'text', 'now')"
+                    "(project_id, topic_id, project_description_id, "
+                    "project_description, created_at) "
+                    "VALUES ('ghost', 'topic', 'd1', 'text', 'now')"
                 )
 
     def test_project_summary_is_not_null(self, meta):
@@ -180,14 +188,20 @@ class TestSchema:
             conn.execute("PRAGMA foreign_keys = ON")
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
-                    "INSERT INTO project_mapping_table VALUES ('ghost', 1, 'now')"
+                    "INSERT INTO project_mapping_table "
+                    "(project_id, topic_id, project_summary_vector_id, created_at) "
+                    "VALUES ('ghost', 'topic', 1, 'now')"
                 )
 
     def test_init_is_idempotent(self, db_path, fake_vectors):
-        first = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        first = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         first.add_project_vector(vec(1), 1, "Alpha", "Alpha summary")
         first.close()
-        second = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        second = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         assert second.get_all_summary_vector_id() == [1]
         second.close()
 
@@ -204,17 +218,18 @@ class TestAddProjectVector:
         assert fake_vectors.store[11].tolist() == vec(1).tolist()
         assert meta.get_all_summary_vector_id() == [11]
         project = meta.get_project()
-        assert project[0] == PROJECT_ID
-        assert project[1] == "Alpha"
-        assert project[4] == "Alpha summary"
-        assert project[5] == "u1"
+        assert project.project_id == PROJECT_ID
+        assert project.project_name == "Alpha"
+        assert project.topic_id == TOPIC_ID
+        assert project.project_summary == "Alpha summary"
+        assert project.user_id == "u1"
 
     def test_timestamps_default_to_now(self, meta):
         before = utc_now()
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         project = meta.get_project()
-        assert project[2] >= before
-        assert project[3] >= before
+        assert project.created_at >= before
+        assert project.updated_at >= before
 
     def test_explicit_timestamps_are_stored(self, meta):
         meta.add_project_vector(
@@ -226,8 +241,8 @@ class TestAddProjectVector:
             updated_at="2026-02-02",
         )
         project = meta.get_project()
-        assert project[2] == "2026-01-01"
-        assert project[3] == "2026-02-02"
+        assert project.created_at == "2026-01-01"
+        assert project.updated_at == "2026-02-02"
 
     def test_second_vector_reuses_the_project_row(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
@@ -259,20 +274,20 @@ class TestProjectUpsert:
 
     def test_rename_lands(self, renamed):
         _, second = renamed
-        assert second[1] == "Alpha Renamed"
+        assert second.project_name == "Alpha Renamed"
 
     def test_created_at_is_preserved(self, renamed):
         first, second = renamed
-        assert second[2] == first[2]
+        assert second.created_at == first.created_at
 
     def test_updated_at_advances(self, renamed):
         first, second = renamed
-        assert second[3] > first[3]
+        assert second.updated_at > first.updated_at
 
     def test_ownership_is_not_transferred(self, renamed):
         """Recording a summary vector must not reassign the project."""
         _, second = renamed
-        assert second[5] == "owner"
+        assert second.user_id == "owner"
 
 
 # ---------------------------------------------------------------------------
@@ -309,10 +324,10 @@ class TestAddBatchProjectVector:
 
     def test_empty_batch_does_not_touch_updated_at(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
-        before = meta.get_project()[3]
+        before = meta.get_project().updated_at
         time.sleep(0.01)
         meta.add_batch_project_vector([], [], "Alpha", "Alpha summary")
-        assert meta.get_project()[3] == before
+        assert meta.get_project().updated_at == before
 
     def test_count_mismatch_raises(self, meta, fake_vectors):
         with pytest.raises(MisMatchCount):
@@ -375,10 +390,10 @@ class TestUpdateSummaryVector:
 
     def test_bumps_updated_at(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
-        before = meta.get_project()[3]
+        before = meta.get_project().updated_at
         time.sleep(0.01)
         meta.update_summary_vector(11, vec(99))
-        assert meta.get_project()[3] > before
+        assert meta.get_project().updated_at > before
 
     def test_unknown_id_raises(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
@@ -498,10 +513,10 @@ class TestIsolation:
     def test_two_projects_may_share_a_vector_id(self, db_path):
         """Content-derived ids collide across projects; the PK is composite."""
         first = ProjectMetaData(
-            "project_a", db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         second.add_project_vector(vec(2), 11, "Beta", "Beta summary")
@@ -513,10 +528,10 @@ class TestIsolation:
 
     def test_one_project_does_not_see_another_s_vectors(self, db_path):
         first = ProjectMetaData(
-            "project_a", db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "Alpha summary")
         assert second.get_all_summary_vector_id() == []
@@ -525,14 +540,18 @@ class TestIsolation:
         second.close()
 
     def test_state_survives_reopen(self, db_path, fake_vectors):
-        first = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        first = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         first.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "Alpha summary", user_id="u1")
         first.close()
 
-        second = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        second = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         assert second.get_all_summary_vector_id() == [11, 12]
         assert second.get_project()[1] == "Alpha"
-        assert second.get_project()[5] == "u1"
+        assert second.get_project().user_id == "u1"
         second.close()
 
 
@@ -552,16 +571,16 @@ class TestLifecycle:
 
     def test_close_does_not_build_a_vector_repository(self, db_path):
         """Constructing one opens PostgreSQL — closing must not require it."""
-        m = ProjectMetaData(PROJECT_ID, db_path=db_path)
+        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=db_path)
         m.close()
 
     def test_construction_does_not_build_a_vector_repository(self, db_path):
-        m = ProjectMetaData(PROJECT_ID, db_path=db_path)
+        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=db_path)
         assert m._ProjectMetaData__project_vector_handler is None
         m.close()
 
     def test_reads_work_without_a_vector_repository(self, db_path):
-        m = ProjectMetaData(PROJECT_ID, db_path=db_path)
+        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=db_path)
         assert m.get_all_summary_vector_id() == []
         assert m.get_project() is None
         assert m._ProjectMetaData__project_vector_handler is None
@@ -569,7 +588,7 @@ class TestLifecycle:
 
     def test_context_manager_closes(self, db_path, fake_vectors):
         with ProjectMetaData(
-            PROJECT_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
         ) as m:
             m.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         assert m._ProjectMetaData__connection is None
@@ -579,7 +598,7 @@ class TestLifecycle:
         broken = tmp_path / "a_file"
         broken.write_text("not a directory")
         with pytest.raises(OSError):
-            ProjectMetaData(PROJECT_ID, db_path=broken / "nested" / "project.sql")
+            ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=broken / "nested" / "project.sql")
 
 
 # ---------------------------------------------------------------------------
@@ -616,18 +635,18 @@ class TestTimestamps:
 class TestProjectSummary:
     def test_summary_is_stored_and_read_back(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "The project summarises itself.")
-        assert meta.get_project()[4] == "The project summarises itself."
+        assert meta.get_project().project_summary == "The project summarises itself."
 
     def test_batch_writes_the_summary_too(self, meta):
         meta.add_batch_project_vector([vec(1)], [11], "Alpha", "Batch summary")
-        assert meta.get_project()[4] == "Batch summary"
+        assert meta.get_project().project_summary == "Batch summary"
 
     def test_a_later_write_replaces_the_summary(self, meta):
         """The summary is regenerated as the project moves on; the row holds the
         current one, the way project_name holds the current name."""
         meta.add_project_vector(vec(1), 11, "Alpha", "First summary")
         meta.add_project_vector(vec(2), 12, "Alpha", "Second summary")
-        assert meta.get_project()[4] == "Second summary"
+        assert meta.get_project().project_summary == "Second summary"
 
     def test_replacing_the_summary_preserves_created_at_and_owner(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "First", user_id="owner")
@@ -635,8 +654,8 @@ class TestProjectSummary:
         time.sleep(0.01)
         meta.add_project_vector(vec(2), 12, "Alpha", "Second", user_id="someone_else")
         second = meta.get_project()
-        assert second[2] == first[2]
-        assert second[5] == "owner"
+        assert second.created_at == first.created_at
+        assert second.user_id == "owner"
 
     @pytest.mark.parametrize("bad", [None, 7, b"bytes", ["a"]])
     def test_a_non_string_summary_is_refused(self, meta, bad):
@@ -773,16 +792,16 @@ class TestDescriptions:
 
     def test_descriptions_do_not_move_updated_at(self, described):
         """The summary-vector paths own updated_at; a description is additive."""
-        before = described.get_project()[3]
+        before = described.get_project().updated_at
         described.add_description("goal", "text")
-        assert described.get_project()[3] == before
+        assert described.get_project().updated_at == before
 
     def test_one_project_does_not_see_another_s_descriptions(self, db_path):
         first = ProjectMetaData(
-            "project_a", db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         second.add_project_vector(vec(2), 12, "Beta", "Beta summary")
@@ -796,10 +815,10 @@ class TestDescriptions:
 
     def test_two_projects_may_share_a_description_id(self, db_path):
         first = ProjectMetaData(
-            "project_a", db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         second.add_project_vector(vec(2), 12, "Beta", "Beta summary")
@@ -812,12 +831,233 @@ class TestDescriptions:
         second.close()
 
     def test_descriptions_survive_a_reopen(self, db_path, fake_vectors):
-        first = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        first = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         first.add_description("goal", "Persisted.")
         first.close()
 
-        second = ProjectMetaData(PROJECT_ID, db_path=db_path, vector_repository=fake_vectors)
+        second = ProjectMetaData(
+            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        )
         assert second.get_description("goal") == "Persisted."
         second.close()
+
+
+# ---------------------------------------------------------------------------
+# topic_id — a project belongs to one topic, and the child tables carry a copy
+# ---------------------------------------------------------------------------
+
+
+class TestTopicId:
+    def test_the_project_row_carries_its_topic(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
+        assert meta.get_project().topic_id == TOPIC_ID
+
+    def test_mapping_rows_carry_the_topic(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
+        with sqlite3.connect(meta.db_path) as conn:
+            rows = conn.execute(
+                "select topic_id from project_mapping_table where project_id = ?",
+                (PROJECT_ID,),
+            ).fetchall()
+        assert rows == [(TOPIC_ID,)]
+
+    def test_description_rows_carry_the_topic(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
+        meta.add_description("goal", "Answer questions.")
+        with sqlite3.connect(meta.db_path) as conn:
+            rows = conn.execute(
+                "select topic_id from project_description_table where project_id = ?",
+                (PROJECT_ID,),
+            ).fetchall()
+        assert rows == [(TOPIC_ID,)]
+
+    def test_batch_writes_carry_the_topic(self, meta):
+        meta.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "Alpha summary")
+        with sqlite3.connect(meta.db_path) as conn:
+            topics = {
+                row[0]
+                for row in conn.execute("select topic_id from project_mapping_table")
+            }
+        assert topics == {TOPIC_ID}
+
+    def test_moving_a_project_moves_its_children(self, db_path, fake_vectors):
+        """The child tables hold their own copy of topic_id so a topic's vectors
+        can be read without a join. Left unsynchronised, those rows keep
+        answering for the topic the project has left."""
+        first = ProjectMetaData(PROJECT_ID, "topic_a", db_path=db_path, vector_repository=fake_vectors)
+        first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
+        first.add_description("goal", "Answer questions.")
+        first.close()
+
+        moved = ProjectMetaData(PROJECT_ID, "topic_b", db_path=db_path, vector_repository=fake_vectors)
+        moved.add_project_vector(vec(2), 12, "Alpha", "Alpha summary")
+
+        assert moved.get_project().topic_id == "topic_b"
+        with sqlite3.connect(db_path) as conn:
+            mapped = {r[0] for r in conn.execute("select topic_id from project_mapping_table")}
+            described = {r[0] for r in conn.execute("select topic_id from project_description_table")}
+        assert mapped == {"topic_b"}
+        assert described == {"topic_b"}
+        assert moved.get_topic_summary_vector_ids() == [(PROJECT_ID, 11), (PROJECT_ID, 12)]
+        moved.close()
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", 7])
+    def test_an_unusable_topic_id_is_refused(self, db_path, fake_vectors, bad):
+        with pytest.raises(ValueError):
+            ProjectMetaData(PROJECT_ID, bad, db_path=db_path, vector_repository=fake_vectors)
+
+
+class TestTopicWideReads:
+    """What the router needs: every summary vector under one topic, and which
+    project each belongs to."""
+
+    @pytest.fixture
+    def topic(self, db_path):
+        made = []
+
+        def build(project_id, topic_id):
+            m = ProjectMetaData(
+                project_id, topic_id, db_path=db_path,
+                vector_repository=FakeVectorRepository(project_id),
+            )
+            made.append(m)
+            return m
+
+        yield build
+        for m in made:
+            m.close()
+
+    def test_returns_every_project_in_the_topic(self, topic):
+        alpha, beta = topic("project_a", "topic_a"), topic("project_b", "topic_a")
+        alpha.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "s")
+        beta.add_project_vector(vec(3), 13, "Beta", "s")
+        assert alpha.get_topic_summary_vector_ids() == [
+            ("project_a", 11),
+            ("project_a", 12),
+            ("project_b", 13),
+        ]
+
+    def test_another_topic_is_not_included(self, topic):
+        alpha, other = topic("project_a", "topic_a"), topic("project_c", "topic_b")
+        alpha.add_project_vector(vec(1), 11, "Alpha", "s")
+        other.add_project_vector(vec(2), 12, "Gamma", "s")
+        assert alpha.get_topic_summary_vector_ids() == [("project_a", 11)]
+        assert other.get_topic_summary_vector_ids() == [("project_c", 12)]
+
+    def test_an_empty_topic_reads_empty(self, topic):
+        assert topic("project_a", "topic_a").get_topic_summary_vector_ids() == []
+
+    def test_every_vector_is_attributed_to_its_own_project(self, topic):
+        """Two projects may hold the same vector id — the pair is what makes a
+        hit resolvable back to a project."""
+        alpha, beta = topic("project_a", "topic_a"), topic("project_b", "topic_a")
+        alpha.add_project_vector(vec(1), 11, "Alpha", "s")
+        beta.add_project_vector(vec(2), 11, "Beta", "s")
+        assert sorted(alpha.get_topic_summary_vector_ids()) == [
+            ("project_a", 11),
+            ("project_b", 11),
+        ]
+
+
+class TestProjectRow:
+    def test_is_addressable_by_name(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary", user_id="u1")
+        row = meta.get_project()
+        assert (row.project_id, row.project_name, row.topic_id) == (
+            PROJECT_ID,
+            "Alpha",
+            TOPIC_ID,
+        )
+
+    def test_still_behaves_as_a_tuple(self, meta):
+        """Adding topic_id shifted every index after it; code that unpacks or
+        indexes the row keeps working."""
+        meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary", user_id="u1")
+        row = meta.get_project()
+        project_id, name, topic, created, updated, summary, user = row
+        assert isinstance(row, tuple) and len(row) == 7
+        assert (project_id, name, topic, summary, user) == (
+            PROJECT_ID, "Alpha", TOPIC_ID, "Alpha summary", "u1",
+        )
+
+    def test_a_missing_project_is_none(self, meta):
+        assert meta.get_project() is None
+
+
+# ---------------------------------------------------------------------------
+# Topic-wide reads and the text-only summary update
+# ---------------------------------------------------------------------------
+
+
+class TestTopicRegistryFunctions:
+    def test_list_projects_is_scoped_to_the_topic(self, db_path, fake_vectors):
+        for project_id, topic in (("p1", "topic_a"), ("p2", "topic_a"), ("p3", "topic_b")):
+            m = ProjectMetaData(project_id, topic, db_path=db_path,
+                                vector_repository=FakeVectorRepository(project_id))
+            m.add_project_vector(vec(1), hash(project_id) % 10_000, project_id.upper(), "s")
+            m.close()
+        assert [p.project_id for p in list_topic_projects("topic_a", db_path)] == ["p1", "p2"]
+        assert [p.project_id for p in list_topic_projects("topic_b", db_path)] == ["p3"]
+
+    def test_list_projects_carries_name_and_summary(self, db_path, fake_vectors):
+        m = ProjectMetaData("p1", "topic_a", db_path=db_path, vector_repository=fake_vectors)
+        m.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
+        m.close()
+        assert list_topic_projects("topic_a", db_path)[0] == ("p1", "Alpha", "Alpha summary")
+
+    def test_reading_before_anything_is_written_is_empty(self, db_path):
+        """The router asks what a topic holds on the first query, before any
+        writer has created the file. That is an empty answer, not an error."""
+        assert not db_path.exists()
+        assert list_topic_projects("topic_a", db_path) == []
+        assert list_topic_vector_ids("topic_a", db_path) == []
+        assert not db_path.exists(), "a read must not create the registry"
+
+    def test_vector_ids_are_scoped_to_the_topic(self, db_path, fake_vectors):
+        m = ProjectMetaData("p1", "topic_a", db_path=db_path, vector_repository=fake_vectors)
+        m.add_project_vector(vec(1), 11, "Alpha", "s")
+        m.close()
+        assert list_topic_vector_ids("topic_a", db_path) == [("p1", 11)]
+        assert list_topic_vector_ids("topic_b", db_path) == []
+
+
+class TestSetProjectSummary:
+    def test_replaces_the_text(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "First")
+        meta.set_project_summary("Second")
+        assert meta.get_project().project_summary == "Second"
+
+    def test_touches_no_vector(self, meta, fake_vectors):
+        """add_project_vector also writes the summary, but inserts a vector
+        alongside it — which would collide with the one already stored."""
+        meta.add_project_vector(vec(1), 11, "Alpha", "First")
+        meta.set_project_summary("Second")
+        assert list(fake_vectors.store) == [11]
+
+    def test_advances_updated_at(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "First")
+        before = meta.get_project().updated_at
+        time.sleep(0.01)
+        meta.set_project_summary("Second")
+        assert meta.get_project().updated_at > before
+
+    def test_leaves_the_name_alone(self, meta):
+        meta.add_project_vector(vec(1), 11, "Alpha", "First")
+        meta.set_project_summary("Second")
+        assert meta.get_project().project_name == "Alpha"
+
+    def test_a_project_that_does_not_exist_raises(self, meta):
+        """An UPDATE matching nothing is not an error to SQLite, so without the
+        rowcount check this would report success and store nothing."""
+        with pytest.raises(ValueError):
+            meta.set_project_summary("Second")
+
+    @pytest.mark.parametrize("bad", [None, 7])
+    def test_a_non_string_summary_is_refused(self, meta, bad):
+        meta.add_project_vector(vec(1), 11, "Alpha", "First")
+        with pytest.raises(ValueError):
+            meta.set_project_summary(bad)
 

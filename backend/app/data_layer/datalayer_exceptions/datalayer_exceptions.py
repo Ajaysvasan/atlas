@@ -11,13 +11,7 @@ class InvalidFileType(Exception):
 
 
 class VectorInsertionError(Exception):
-    """A vector write failed, in either vector store.
-
-    `cause` carries the driver exception separately from `vector_id`, which
-    used to hold whichever of the two the raising site happened to have: the
-    DiskANN driver passed an id, the pgvector repository passed the psycopg
-    error, so anything reading the attribute got one or the other.
-    """
+    """A vector write failed, in either vector store."""
 
     MAX_IDS_SHOWN = 5
 
@@ -83,13 +77,7 @@ class VectorNotFoundEror(Exception):
 
 
 class DuplicateVectorException(Exception):
-    """`VectorRepository.insert` was given an id the project already stores.
-
-    Distinct from VectorInsertionError so a caller can tell "already written"
-    from "the write failed", which matters to the vectors-first snapshot path:
-    the first needs no compensating delete, the second does. batch_insert does
-    not raise it — that path is `on conflict do nothing` by design.
-    """
+    """`VectorRepository.insert` was given an id the project already stores."""
 
     def __init__(self, vector_id: uint32) -> None:
         self.vector_id = vector_id
@@ -120,11 +108,7 @@ class InvalidVectorDimension(Exception):
 
 
 class InvalidVectorID(Exception):
-    """No `vector_meta_data` row exists for the requested id.
-
-    The name says invalid, the condition is missing; it is kept because every
-    `except InvalidVectorID` in the tree would break with it renamed.
-    """
+    """No `vector_meta_data` row exists for the requested id."""
 
     def __init__(self, vectorID) -> None:
         self.vectorId = vectorID

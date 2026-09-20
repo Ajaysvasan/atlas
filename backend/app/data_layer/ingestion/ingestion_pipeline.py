@@ -38,10 +38,7 @@ class IngestionPipeline:
         logger.debug("Ingestion pipeline ready")
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:
-        """Returns the files that are within that specified path
-        This function can be used when there are multiple files that are
-        present in a same directory
-        """
+        """Returns the files that are within that specified path"""
         return self.f_loader.load_files(folder_path)
 
     def extract_text_from_file(self, file_path: str) -> Tuple[str, str]:

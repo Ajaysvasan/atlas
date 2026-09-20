@@ -98,7 +98,7 @@ it is a coding task.
 
 ## 2. The layers above (Bug 4.1)
 
-`MemoryManager`, `TopicManager`, `ProjectManager` are still `pass`.
+`MemoryManager` and `TopicManager` are still `pass`. `ProjectManager` is built.
 `ConversationPoolManager` is done and is what they should hand back.
 
 `ProjectMetaData` (`project_data_repo/project_meta_data.py`) is done: it is the
@@ -121,8 +121,33 @@ Mostly path and identity resolution now that the layer below is settled.
       no lock, no WAL, and bound to the thread that opened it. Route it through
       the same `connect()` treatment the conversation database got, before
       `ProjectManager` opens projects concurrently.
+- [x] `ProjectManager`: routes a query to an existing project, or reports that
+      none matches. `route()` returns a `project_id` or `None`; `resolve()`
+      carries the score, margin, ambiguity flag and ranked candidates.
+      `create_project()` and `update_project_summary()` are the doors the
+      thinking layer comes back through. Architecture in
+      `memory/topic_pool/project_pool/README.md`.
+- [ ] **Pending: thinking layer integration.** `ProjectManager.route()` stops at
+      a `pass` on the no branch — that is where the thinking layer will name and
+      summarise a new project before `create_project()` stores it. Neither the
+      thinking layer nor its wiring to the conversation layer exists yet.
+      - When replacing that `pass`, **write the `return`**. `route()` currently
+        returns `None` by falling off the end, not because of the `pass`, so
+        `self.thinking_layer.create_project_for(...)` without a `return` still
+        returns `None` and no test or type checker complains.
+      - The same seam is where the conversation layer gets handed the project,
+        and where the project summary flows back through
+        `update_project_summary()`.
+- [ ] Decide `ProjectManager`'s public surface. `route()`, `resolve()`,
+      `projects()`, `score_projects()`, `create_project()`,
+      `update_project_summary()` and `query_vector()` are all public. The flow
+      only needs `route()`; the rest exist for the thinking layer and for
+      escalating an ambiguous match. Narrow it once the thinking layer shows
+      which it actually calls.
+- [ ] The routing thresholds (`SIMILARITY_FLOOR`, `AMBIGUITY_MARGIN`) are
+      guesses. They need 30-50 queries labelled with the project they belong to
+      before they mean anything.
 - [ ] `TopicManager`: create/load a topic
-- [ ] `ProjectManager`: create/load a project under a topic
 - [ ] `MemoryManager`: top-level entry point returning a
       `ConversationPoolManager` for a given topic/project/conversation
 - [ ] Fix the per-project path collision `Config.CONVERSATION` used to cause —

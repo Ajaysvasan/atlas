@@ -1,12 +1,6 @@
-"""
-One conversation's worth of memory, assembled into a single object.
+"""One conversation's worth of memory, assembled into a single object.
 
-FullConversation (storage), ConversationSummary (summarisation) and SnapShot
-(snapshot history and search) each work in isolation but have to be wired
-together consistently: the same directory, the same project identity, and one
-shared SnapShot so its cursors survive between calls. Building them ad hoc is
-how the summariser ended up reading a different database than the snapshot
-writer. This manager is the only place that wiring lives.
+See README.md in this directory.
 """
 
 from pathlib import Path
@@ -59,12 +53,7 @@ class ConversationPoolManager:
         self.__restore_cursors()
 
     def __restore_cursors(self) -> None:
-        """Point the snapshot cursors at history already on disk.
-
-        Cursors are in-memory only, so a manager constructed against an existing
-        project starts at -1/-1 and search() would scan an empty range even with
-        snapshots stored.
-        """
+        """Point the snapshot cursors at history already on disk."""
         if self.meta_repo.get_cumulative_vector_meta_data_ids():
             self.snap_shot.sync_cursors()
             logger.debug("Restored snapshot cursors for project %s", self.project_id)
@@ -77,11 +66,7 @@ class ConversationPoolManager:
         return self.full_conversation.append_turns(turns)
 
     def record_turn(self, role: str, text: str) -> Tuple[int, str | None]:
-        """Append a turn and snapshot if enough have accumulated.
-
-        The one call a caller needs per conversation turn. Returns
-        (sequence_number, summary) where summary is None if no snapshot was due.
-        """
+        """Append a turn and snapshot if enough have accumulated."""
         sequence = self.add_turn(role, text)
         return sequence, self.maybe_snapshot()
 
@@ -118,10 +103,7 @@ class ConversationPoolManager:
         return self.turns_since_last_snapshot() >= self.snapshot_every_n_turns
 
     def snapshot_now(self) -> str | None:
-        """Snapshot the current window regardless of the trigger threshold.
-
-        Returns the new summary, or None when there is nothing to summarise.
-        """
+        """Snapshot the current window regardless of the trigger threshold."""
         latest = self.latest_sequence()
         if latest <= 0:
             logger.debug("Snapshot skipped for project %s: no turns", self.project_id)
@@ -161,13 +143,7 @@ class ConversationPoolManager:
         self.snap_shot.prev()
 
     def close(self) -> None:
-        """Release the SQLite connection this manager holds open.
-
-        One manager per live conversation, so without an explicit release the
-        connections are only reclaimed whenever the garbage collector happens to
-        run __del__ — and they scale with concurrent conversations until the
-        process runs out of file descriptors.
-        """
+        """Release every connection this object opened."""
         self.summariser.close()
 
     def __enter__(self) -> "ConversationPoolManager":

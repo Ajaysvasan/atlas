@@ -1,14 +1,6 @@
-"""
-Installs llama-cpp-python with the correct hardware backend:
-  - NVIDIA GPU (CUDA)  → builds with GGML_CUDA=on
-  - AMD GPU   (ROCm)   → builds with GGML_HIPBLAS=on
-  - Apple Silicon      → builds with GGML_METAL=on
-  - CPU fallback       → plain pip install (no GPU acceleration)
+"""Installs llama-cpp-python with the correct hardware backend:
 
-Usage (from any directory):
-    python download_models/install_llama_cpp.py
-
-The script detects the hardware automatically — no flags needed.
+See README.md in this directory.
 """
 
 import os
@@ -49,10 +41,7 @@ def has_apple_silicon() -> bool:
 
 
 def detect_cuda_version() -> str | None:
-    """
-    Returns the CUDA version string (e.g. '12.1') if nvcc or nvidia-smi
-    can report it, otherwise None.
-    """
+    """Returns the CUDA version string (e.g. '12.1') if nvcc or nvidia-smi"""
     # Try nvcc first — most reliable
     if shutil.which("nvcc"):
         result = _run(["nvcc", "--version"])

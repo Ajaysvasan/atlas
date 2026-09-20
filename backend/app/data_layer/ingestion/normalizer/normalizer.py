@@ -26,8 +26,7 @@ _SENTENCE_TAIL = (".", ",", ";", ":", "!", "?")
 
 
 def _is_mostly_letters(line: str) -> bool:
-    """Guards the ALL CAPS rule, which otherwise fires on anything without a
-    lowercase letter — a spreadsheet row like "Q1 | 1.2M" included."""
+    """Guards the ALL CAPS rule, which otherwise fires on anything without a"""
     letters = sum(1 for char in line if char.isalpha())
     visible = sum(1 for char in line if not char.isspace())
     return (
@@ -37,12 +36,7 @@ def _is_mostly_letters(line: str) -> bool:
 
 
 def _heading_name(line: str) -> str | None:
-    """The heading this line announces, or None if it is body text.
-
-    Three shapes are recognised because real documents use all of them:
-    markdown `# Title`, numbered `1.2 Title`, and ALL CAPS. Setext underlines
-    need the following line, so they are handled by the caller.
-    """
+    """The heading this line announces, or None if it is body text."""
     stripped = line.strip()
     if not stripped or len(stripped) > HEADING_MAX_LENGTH:
         return None
@@ -120,12 +114,7 @@ class TextNormalizer:
         return re.sub(r"[^a-zA-Z0-9\s.,!?;:\-\']", "", text)
 
     def _remove_extra_whitespace(self, text: str) -> str:
-        """Collapse runs of spaces and tabs, leaving line breaks alone.
-
-        A plain \\s+ collapse here is what used to flatten every document to a
-        single line, after which no heading regex, paragraph split or "\\n\\n"
-        chunk separator downstream could ever match.
-        """
+        """Collapse runs of spaces and tabs, leaving line breaks alone."""
         return re.sub(r"[^\S\n]+", " ", text)
 
     def __process_line(self, line: str) -> str:
@@ -156,12 +145,7 @@ class TextNormalizer:
         return line
 
     def __group_lines(self, text: str) -> List[Tuple[bool, List[str]]]:
-        """Split raw text into (is_heading, lines) blocks.
-
-        Runs before any lexical transform, so ALL CAPS headings are still
-        recognisable even when the profile lowercases, and `#` is still there
-        when the profile strips punctuation.
-        """
+        """Split raw text into (is_heading, lines) blocks."""
         lines = re.sub(r"\r\n?", "\n", text).split("\n")
         blocks: List[Tuple[bool, List[str]]] = []
         body: List[str] = []

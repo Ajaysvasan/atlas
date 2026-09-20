@@ -12,9 +12,7 @@ logger = get_logger("backend_main")
 
 
 def parse_arguments():
-    """
-    Parse command line arguments.
-    """
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Final Year Project Backend - Command Line Interface"
     )
@@ -34,16 +32,9 @@ def parse_arguments():
 
 
 def main():
-    """
-    Main runner function.
-    """
+    """Main runner function."""
     args = parse_arguments()
 
-    # The one place handlers are installed, and the reason --verbose now reaches
-    # the whole application: the level is set on the root logger before any
-    # module logs, and every module logger propagates to it. Previously the flag
-    # was applied to this file's logger alone, so data_layer and memory stayed
-    # at INFO no matter what was passed.
     configure_logging(
         level=logging.DEBUG if (args.verbose or Config.DEBUG) else logging.INFO,
         console_level=logging.DEBUG if args.verbose else None,

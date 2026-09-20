@@ -1,15 +1,6 @@
-"""
-Snapshot navigation over a project's cumulative summary history.
+"""Snapshot navigation over a project's cumulative summary history.
 
-A snapshot is one cumulative summary vector (the whole summary) plus one
-summary vector per conversation chunk it covers, linked through
-summary_snapshot_map. search() locates the best snapshot by cumulative vector;
-the map then allows drilling into the chunks that snapshot summarised.
-
-The conversation directory is supplied by the caller. It used to be read from
-Config.CONVERSATION, a single global path, which meant SnapShot wrote to a
-different database than ConversationSummary read from — the rolling summary
-never saw its own previous output.
+See README.md in this directory.
 """
 
 from pathlib import Path
@@ -46,16 +37,10 @@ class SnapShot:
         self.project_id = project_id
         self.project_name = project_name
 
-        # Held for the lifetime of the object rather than rebuilt per call. A
-        # caller that already has a repository for this database should pass it
-        # in: building a second one opens a redundant connection to the same
-        # file, and connections then scale with the number of live objects.
         self._owns_meta_repo = meta_repo is None
         self.meta_repo = meta_repo or ConversationVectorMetaDataRepository(
             self.conversation_dir, project_id
         )
-        # Built on first use: this one opens a PostgreSQL connection, and cursor
-        # navigation never needs it.
         self._vector_manager: ConversationVectorManager | None = None
 
         self.__left_cursor: int = -1
@@ -96,19 +81,12 @@ class SnapShot:
             for i in range(len(summary_vector_ids))
         ]
 
-        # Vectors first, metadata second. The reverse order would let a vector
-        # failure leave metadata pointing at vectors that do not exist, which
-        # breaks search(); this way a failure leaves only unreachable vectors,
-        # and those are then deleted below.
         self.vector_manager.batch_insert(summary_vector_ids, summary_vectors)
         self.vector_manager.insert(
             cumulative_summary_vector_id, cumulative_summary_vector
         )
 
         try:
-            # One transaction for the whole metadata side. Previously these were
-            # four independently committing calls, so a failure partway through
-            # left a snapshot that half-existed.
             self.meta_repo.insert_snapshot(
                 chunks=chunks,
                 cumulative_row=(
@@ -122,9 +100,8 @@ class SnapShot:
                 map_rows=map_list,
             )
         except Exception:
-            # Compensating delete: the metadata rolled back, so the vectors it
-            # would have pointed at are unreachable garbage. Failing to remove
-            # them would accumulate on every retry.
+            # Compensating delete: the metadata rolled back, so these vectors
+            # are now unreachable.
             orphans = list(summary_vector_ids) + [cumulative_summary_vector_id]
             logger.warning(
                 "Snapshot metadata failed for project %s; removing %d vector(s)",
@@ -134,9 +111,6 @@ class SnapShot:
             try:
                 self.vector_manager.batch_delete(orphans)
             except Exception:
-                # The original metadata failure is still the one that propagates,
-                # but a failed cleanup leaves vectors nothing can reach, and
-                # swallowing it silently is how they accumulate unnoticed.
                 logger.exception(
                     "Compensating delete failed for project %s, vector ids %s. "
                     "These vectors are now unreachable from summary_snapshot_map.",
@@ -224,24 +198,12 @@ class SnapShot:
         raise NullPointerException("No snap shots found")
 
     def sync_cursors(self) -> None:
-        """Point the cursors at the full stored history.
-
-        Cursors live in memory only, so a freshly constructed SnapShot starts at
-        -1/-1 and search() would scan nothing even with snapshots on disk. Call
-        this after constructing one against an existing project.
-        """
+        """Point the cursors at the full stored history."""
         self.__reset_left_pointer()
         self.__reset_right_pointer()
 
     def __ensure_cursors(self, snap_shot_list) -> None:
-        """Open the cursors onto stored history if they were never set.
-
-        Cursors live in memory only, so an object built against an existing
-        project starts at -1/-1. Left alone, __find_best_snapshot would evaluate
-        `snap_shot_list[-1]` — Python negative indexing silently picking the
-        LAST snapshot instead of signalling an empty range — do pointless work
-        against it, and then return None regardless.
-        """
+        """Open the cursors onto stored history if they were never set."""
         if self.__left_cursor < 0 or self.__right_cursor < 0:
             if len(snap_shot_list) == 0:
                 raise NullPointerException("No snap shots found")
@@ -298,9 +260,8 @@ class SnapShot:
         return best_snap_shot_idx if best_snap_shot_idx > -1 else None
 
     def search(self, query: ndarray):
-        # Fetched once and passed down (Bug 4.24): querying separately here and
-        # inside __find_best_snapshot allowed a concurrent insert to shift the
-        # list between the two reads, applying an index to the wrong rows.
+        # Fetched once and passed down (Bug 4.24): two reads let a concurrent
+        # insert shift the list between them.
         snap_shot_list = self.__get_snap_shot()
         best_snap_shot_idx: int | None = self.__find_best_snapshot(
             query, snap_shot_list
@@ -317,6 +278,6 @@ class SnapShot:
         return snap_shot_list[best_snap_shot_idx]
 
     def close(self) -> None:
-        """Release the metadata connection, but only if this object opened it."""
+        """Release every connection this object opened."""
         if self._owns_meta_repo:
             self.meta_repo.close()

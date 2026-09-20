@@ -1,19 +1,12 @@
-"""
-Downloads the draft summarisation model (GGUF) from HuggingFace Hub
-into the path declared in Config.DRAFT_MODEL_PATH.
+"""Downloads the draft summarisation model (GGUF) from HuggingFace Hub
 
-Usage (from the app/ directory):
-    python download_models/download_draft_model.py
-
-The script is idempotent — if the file already exists at the target path
-it prints a message and exits without re-downloading.
+See README.md in this directory.
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Allow imports from the app/ root when run directly
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import Config  # noqa: E402

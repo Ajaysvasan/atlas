@@ -16,39 +16,28 @@ class ConversationVectorManager:
         self.repository = VectorRepository(self.project_id)
 
     def insert(self, vector_id: uint32, vector: np.ndarray) -> np.uint32:
-        """
-        Inserts a single vector by generating the vector_id automatically.
-        """
+        """Inserts a single vector by generating the vector_id automatically."""
         self.repository.insert(vector_id, vector)
         return vector_id
 
     def batch_insert(
         self, vector_ids: List[np.uint32], vectors: np.ndarray
     ) -> List[np.uint32]:
-        """
-        Inserts a batch of vectors by generating vector_ids automatically.
-        """
+        """Inserts a batch of vectors by generating vector_ids automatically."""
         self.repository.batch_insert(vector_ids, vectors)
         return vector_ids
 
     def batch_delete(self, vector_ids: List[np.uint32]) -> None:
-        """
-        Removes vectors from the repository. Used to undo a partially written
-        snapshot when its metadata transaction fails.
-        """
+        """Removes vectors from the repository. Used to undo a partially written"""
         logger.debug(
             "Deleting %d vector(s) for project %s", len(vector_ids), self.project_id
         )
         self.repository.batch_delete(vector_ids)
 
     def get_vector(self, vector_id: uint32) -> np.ndarray:
-        """
-        Retrieves a single vector from the repository by vector_id.
-        """
+        """Retrieves a single vector from the repository by vector_id."""
         return self.repository.search(vector_id)
 
     def get_vectors(self, vector_ids: List[uint32]) -> np.ndarray:
-        """
-        Retrieves a batch of vectors from the repository by vector_ids.
-        """
+        """Retrieves a batch of vectors from the repository by vector_ids."""
         return self.repository.batch_search(vector_ids)

@@ -2,12 +2,7 @@ from typing import List, Tuple
 
 
 def sliding_windows(text: str, size: int, overlap: int) -> List[Tuple[int, int]]:
-    """Offsets of successive windows over text, none longer than size.
-
-    A window is pulled back to the last whitespace it contains so words are not
-    cut in half; a run with no whitespace in it (a base64 blob, a minified
-    line) has nothing to pull back to and is split at exactly size.
-    """
+    """Offsets of successive windows over text, none longer than size."""
     if size <= 0:
         raise ValueError(f"chunk size must be positive, got {size}")
     if not 0 <= overlap < size:

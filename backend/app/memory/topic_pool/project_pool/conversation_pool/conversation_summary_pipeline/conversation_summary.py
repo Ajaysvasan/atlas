@@ -62,17 +62,12 @@ class ConversationSummary:
         )
         self.draft_model_context_window_length = draft_model_context_window_length
 
-        # Same directory as the summary repo, so the snapshot it writes is the
-        # one get_latest_summary() reads back on the next round. The repository
-        # is handed over rather than rebuilt, so both sides share one connection.
         self.snap_shot = SnapShot(
             conversation_dir=full_conversation_dir,
             project_id=project_id,
             project_name=project_name,
             meta_repo=self.summary_repo,
         )
-        # SentenceTransformer weights are ~100MB; only pay for them if a
-        # snapshot is actually taken.
         self._embedder = None
 
     @property
@@ -87,19 +82,7 @@ class ConversationSummary:
         return self._embedder
 
     def __window_start(self, chunk_sequence_number: int) -> int:
-        """Where the summarisation window begins.
-
-        The look-back alone is not enough. It is anchored to the newest turn, so
-        whenever more unsummarised turns have piled up than the window spans —
-        a bulk import, a large snapshot_every_n_turns, a period where
-        snapshotting failed — every turn older than the window was skipped,
-        while the watermark still advanced to the newest one and declared them
-        summarised. They could never be recovered.
-
-        Starting no later than the first unsummarised turn closes that gap; the
-        window may then be larger than the look-back, which is what the batching
-        in __generate_summary is for.
-        """
+        """Where the summarisation window begins."""
         look_back = max(
             0,
             chunk_sequence_number
@@ -110,12 +93,7 @@ class ConversationSummary:
         return max(0, min(look_back, watermark + 1))
 
     def __window_turns(self, chunk_sequence_number: int) -> List[Turn]:
-        """
-        The turns in the current conversation window.
-        Extends the window back by _WINDOW_OVERLAP_CHUNKS so no context
-        is lost at window boundaries, and clamps the start to 0 so
-        negative indices never reach the DB (fixes Bug 4.29).
-        """
+        """The turns in the current conversation window."""
         start = self.__window_start(chunk_sequence_number)
         return self.full_conversation.get_turns(start, chunk_sequence_number)
 
@@ -124,16 +102,7 @@ class ConversationSummary:
         return render_transcript(self.__window_turns(chunk_sequence_number))
 
     def __cumulative_vector_id(self, summary: str, time_of_snapshot: str) -> int:
-        """Snapshot-unique id for the cumulative vector.
-
-        The embedder derives ids from content, which is right for chunks — the
-        same text should map to the same vector — but wrong here:
-        cumulative_vector_id is a PRIMARY KEY and two snapshots can legitimately
-        produce identical summary text (a conversation whose gist stops
-        changing, at temperature 0.1). That collided with IntegrityError and
-        lost the snapshot. Binding the timestamp makes the id unique per
-        snapshot while staying deterministic.
-        """
+        """Snapshot-unique id for the cumulative vector."""
         payload = f"{self.project_id}\x00{time_of_snapshot}\x00{summary}"
         digest = hashlib.sha256(payload.encode("utf-8")).digest()
         return (
@@ -142,12 +111,7 @@ class ConversationSummary:
         )
 
     def __persist_snapshot(self, summary: str, covered_rows) -> None:
-        """Embed the summary and its covered chunks, then store the snapshot.
-
-        Two levels are written: one cumulative vector for the summary as a whole
-        (what SnapShot.search() ranks on) and one vector per covered chunk
-        (reachable afterwards through summary_snapshot_map).
-        """
+        """Embed the summary and its covered chunks, then store the snapshot."""
         time_of_snapshot = utc_now()
         cumulative = self.embedder.embed_text(summary)
         chunk_embeddings = self.embedder.embed_texts(
@@ -187,9 +151,6 @@ class ConversationSummary:
         logger.info("Loading draft model from %s", model_file)
         return Llama(
             model_path=str(model_file),
-            # The injected window, not the global: loading with a different
-            # n_ctx than the token budget below assumed would let a prompt sized
-            # against the budget overflow the model's actual context.
             n_ctx=self.draft_model_context_window_length,
             verbose=False,
         )
@@ -239,21 +200,13 @@ class ConversationSummary:
     def __split_into_batches(
         self, text: str, max_chars: int, overlap_chars: int
     ) -> List[str]:
-        """
-        Splits text into batches each at most max_chars long.
-        Adjacent batches share overlap_chars of text so no context
-        is dropped at batch boundaries.
-        """
+        """Splits text into batches each at most max_chars long."""
         max_chars = max(1, max_chars)
         if len(text) <= max_chars:
             return [text]
 
-        # The cursor advances by (max_chars - overlap_chars) each pass. If the
-        # overlap were allowed to reach or exceed the batch size that step would
-        # be zero or negative, and since a batch is appended every iteration the
-        # loop would never terminate — it consumes memory until the process is
-        # killed rather than raising, so nothing upstream could catch it.
-        # Clamping keeps progress strictly positive.
+        # An overlap at or above the batch size makes the step zero or
+        # negative, and the loop never terminates.
         overlap_chars = max(0, min(overlap_chars, max_chars - 1))
 
         batches: List[str] = []
@@ -297,18 +250,7 @@ class ConversationSummary:
     def __batch_turns(
         self, turns: List[Turn], max_chars: int, overlap_chars: int
     ) -> List[str]:
-        """Pack speaker-labelled turns into transcripts of at most max_chars.
-
-        Batches break between turns, never inside one. A character split lands
-        mid-turn, and the rest of that turn then opens the next batch with no
-        speaker label, so the model attributes it to nobody — or to whoever
-        spoke before it. Overlap likewise carries whole trailing turns, up to
-        overlap_chars, rather than a slice of text; the running summary is what
-        carries context across batches, and the overlap only needs to keep a
-        short reply next to the turn it answers. A turn too long to fit a batch
-        on its own is the one thing that gets cut, and every piece keeps its
-        label.
-        """
+        """Pack speaker-labelled turns into transcripts of at most max_chars."""
         max_chars = max(1, max_chars)
         lines: List[str] = []
         for turn in turns:
@@ -346,15 +288,7 @@ class ConversationSummary:
     def __generate_summary(
         self, latest_summary: str | None, turns: List[Turn]
     ) -> str:
-        """
-        Full LLM pipeline:
-        - Thread A loads the model while Thread B computes conversation batches.
-        - Batches are processed sequentially; each batch's output becomes the
-          running summary fed into the next batch (rolling summarisation).
-        - If the combined token budget fits in one pass, only one inference call
-          is made.
-        - Model is unloaded and VRAM freed unconditionally before returning.
-        """
+        """Full LLM pipeline:"""
         available_tokens = (
             self.draft_model_context_window_length
             - _SYSTEM_OVERHEAD_TOKENS
@@ -364,7 +298,6 @@ class ConversationSummary:
         max_conv_chars = max(1, (available_tokens - summary_tokens) * _CHARS_PER_TOKEN)
         overlap_chars = _WINDOW_OVERLAP_CHUNKS * _CHARS_PER_TOKEN
 
-        # Thread A: load model | Thread B: split conversation into batches
         with ThreadPoolExecutor(max_workers=2) as executor:
             model_future = executor.submit(self.__load_model)
             batches_future = executor.submit(
@@ -375,10 +308,8 @@ class ConversationSummary:
             )
             model = model_future.result()
 
-        # Everything after the model exists belongs inside the guard. Resolving
-        # the batches future out here previously meant that if it raised, the
-        # finally below was never reached and a multi-gigabyte model stayed
-        # resident with its VRAM unreleased.
+        # Inside the guard: if resolving the batches raises out here, the
+        # finally never runs and the model stays resident.
         try:
             batches = batches_future.result()
             running_summary: str | None = latest_summary
@@ -403,26 +334,15 @@ class ConversationSummary:
         return self.__get_latest_summary()
 
     def make_summary(self, chunk_sequence_number: int) -> str:
-        """
-        Fetches the latest cumulative summary and the current conversation
-        window, then runs the draft-model LLM pipeline and returns the new
-        cumulative summary string.
-        """
+        """Fetches the latest cumulative summary and the current conversation"""
         latest_summary = self.get_current_summary()
         turns = self.__window_turns(chunk_sequence_number)
         return self.__generate_summary(latest_summary, turns)
 
     def take_snapshot(self, chunk_sequence_number: int) -> str | None:
-        """Summarise the window up to chunk_sequence_number and persist it.
-
-        This is the round trip make_summary() alone never completed: the summary
-        is embedded, stored as a snapshot, and becomes the "previous cumulative
-        summary" the next call reads back. Returns the summary, or None when the
-        window is empty and there is nothing to summarise.
-        """
-        # One window start for both reads. It depends on the watermark, so
-        # computing it twice could let a snapshot landing in between give the
-        # prompt and the recorded coverage two different windows.
+        """Summarise the window up to chunk_sequence_number and persist it."""
+        # One start for both reads: it depends on the watermark, which a
+        # snapshot landing in between would move.
         start = self.__window_start(chunk_sequence_number)
         covered_rows = self.full_conversation.get_context_rows(
             start, chunk_sequence_number
@@ -437,8 +357,6 @@ class ConversationSummary:
         turns = self.full_conversation.get_turns(start, chunk_sequence_number)
         summary = self.__generate_summary(latest_summary, turns)
         if not summary:
-            # An empty completion, not an exception. Persisting it would set the
-            # watermark and mark these turns summarised by nothing.
             logger.warning(
                 "Draft model returned an empty summary for project %s; "
                 "no snapshot taken",
@@ -456,5 +374,5 @@ class ConversationSummary:
         return summary
 
     def close(self) -> None:
-        """Release the metadata connection shared with the SnapShot."""
+        """Release every connection this object opened."""
         self.summary_repo.close()

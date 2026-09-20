@@ -49,9 +49,6 @@ class Chunker:
         hierarchical_chunker_list, recursive_chunker_list = (
             self.__hierarchical_and_recursive_objects(normalised_content)
         )
-        # The routing split is worth a line on its own: a corpus that lands
-        # entirely on the recursive side means the normaliser found no headings
-        # anywhere, which is a normaliser problem showing up as bad retrieval.
         logger.debug(
             "Routing %d document(s): %d hierarchical, %d recursive",
             len(normalised_content),

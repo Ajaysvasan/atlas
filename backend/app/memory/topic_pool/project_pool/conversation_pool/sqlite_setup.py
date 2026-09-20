@@ -1,15 +1,6 @@
 """Connection setup for the conversation database.
 
-Two classes open `<project_id>_conversation.db`: ConversationVectorMetaDataRepository
-holds one long-lived connection for snapshot metadata, and FullConversationRepository
-opens a short-lived one per call for conversation turns. Both go through `connect()`
-so the pragmas cannot drift apart between them.
-
-The two kinds of setting behave differently, which is why they are separate calls:
-`journal_mode` is written into the database file and survives every later open, so
-`enable_wal()` only has to succeed once; `synchronous` and `foreign_keys` are
-properties of a connection and reset to their defaults on every open, so `connect()`
-has to set them every time.
+See README.md in this directory.
 """
 
 import sqlite3
@@ -19,12 +10,6 @@ from config import get_logger
 
 logger = get_logger(__name__)
 
-# NORMAL rather than the FULL default, which fsyncs the write-ahead log on every
-# single commit. In WAL mode NORMAL is durable against a process crash — the log
-# is still on disk and intact — and gives that up only for an OS crash or power
-# loss, where the last few committed transactions can be rolled back. The
-# database is never corrupted either way. On a long-lived connection this is
-# worth roughly two orders of magnitude in commit throughput.
 SYNCHRONOUS = "NORMAL"
 
 
@@ -37,14 +22,7 @@ def connect(db_path: str | Path, **kwargs) -> sqlite3.Connection:
 
 
 def enable_wal(conn: sqlite3.Connection, db_path: str | Path | None = None) -> str:
-    """Put the database into WAL mode; return the journal mode now in force.
-
-    Called once, at initialisation. It cannot convert while another connection
-    holds a write transaction, and losing that race is not a failure: the
-    database stays in its previous journal mode — slower under concurrency,
-    equally correct — and the next open tries again. The mode is returned rather
-    than swallowed so a caller can see which one it got.
-    """
+    """Put the database into WAL mode; return the journal mode now in force."""
     try:
         mode = conn.execute("PRAGMA journal_mode = WAL;").fetchone()[0]
     except sqlite3.OperationalError as error:
@@ -57,9 +35,7 @@ def enable_wal(conn: sqlite3.Connection, db_path: str | Path | None = None) -> s
         )
         return mode
     if mode.lower() != "wal":
-        # Not an exception, so without this line the database quietly runs in a
-        # journal mode where a read blocks every write — the exact contention
-        # WAL was adopted to remove — and nothing says so.
+        # Not an exception, so the fallback is otherwise silent.
         logger.warning(
             "Requested WAL for %s but it reports %s mode",
             db_path or "the conversation database",

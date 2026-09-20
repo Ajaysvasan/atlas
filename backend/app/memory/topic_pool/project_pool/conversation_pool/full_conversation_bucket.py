@@ -48,11 +48,7 @@ class FullConversation:
         return self.append_turns([(role, text)])[0]
 
     def append_turns(self, turns: Iterable[Tuple[str, str]]) -> List[int]:
-        """Append several turns in one transaction, in the order given.
-
-        Every turn is validated before any is written, so a bad role partway
-        through a batch cannot leave the first half committed.
-        """
+        """Append several turns in one transaction, in the order given."""
         validated = [self.__validate_turn(role, text) for role, text in turns]
         sequences = self.fullConversationoRep.append_turns(validated)
         logger.debug("Appended %d turn(s) up to sequence %s", len(sequences), sequences[-1] if sequences else None)
@@ -66,11 +62,7 @@ class FullConversation:
         full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
         chunks: List[Tuple[str, str, str, str]],
     ) -> None:
-        """Low-level insert with caller-supplied ids, sequences and timestamps.
-
-        Prefer append_turn/append_turns; this stays for callers that already
-        hold fully-formed rows (bulk import, tests, migrations).
-        """
+        """Low-level insert with caller-supplied ids, sequences and timestamps."""
         self.fullConversationoRep.add(full_conversaton_meta_datas, chunks)
 
     def get_chunk_order(self, chunk_id: str) -> int:

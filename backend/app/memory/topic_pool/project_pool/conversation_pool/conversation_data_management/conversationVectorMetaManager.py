@@ -14,21 +14,7 @@ logger = get_logger(__name__)
 
 
 class ConversationVectorMetaDataRepository:
-    """Snapshot metadata for one project, in SQLite.
-
-    Safe to share across threads. One instance is normally held for the
-    lifetime of a SnapShot and handed to ConversationSummary as well, so it is
-    reachable from whichever thread drives either of them. Two things make that
-    work: the connection is opened with check_same_thread off, and every
-    statement runs under `_lock`. The lock is not optional — commit() and
-    rollback() apply to the whole connection rather than to one cursor, so
-    unsynchronised threads sharing a connection would publish each other's
-    half-written transactions and roll back each other's finished ones.
-
-    The lock does not extend to other connections on the same database file.
-    FullConversationRepository writes to it too, on its own short-lived
-    connections, and those are serialised by SQLite's own file locking.
-    """
+    """Snapshot metadata for one project, in SQLite."""
 
     def __init__(
         self,
@@ -38,22 +24,15 @@ class ConversationVectorMetaDataRepository:
         self._lock = threading.RLock()
         self.project_id = project_id
 
-        # Ensure directories exist
         self.conversation_dir = Path(conversation_path)
         self.conversation_dir.mkdir(parents=True, exist_ok=True)
 
-        # Store all new schema tables in the summary DB
         self.db_path = self.conversation_dir / f"{project_id}_conversation.db"
         self._init_db()
 
     @contextmanager
     def _reading(self) -> Iterator[sqlite3.Cursor]:
-        """A cursor held under the lock for as long as the caller needs it.
-
-        The fetch has to happen inside the lock too, not just the execute: a
-        cursor is a view onto the shared connection, and another thread's write
-        can invalidate it between the two.
-        """
+        """A cursor held under the lock for as long as the caller needs it."""
         with self._lock:
             yield self.conn.cursor()
 
@@ -71,8 +50,7 @@ class ConversationVectorMetaDataRepository:
                 raise
 
     def _init_db(self):
-        # check_same_thread=False is what allows the shared instance described
-        # in the class docstring; _lock is what makes it correct.
+        # check_same_thread=False allows the shared instance; _lock makes it correct.
         self.conn = connect(self.db_path, check_same_thread=False)
         self.journal_mode = enable_wal(self.conn, self.db_path)
         cursor = self.conn.cursor()
@@ -123,14 +101,7 @@ class ConversationVectorMetaDataRepository:
         )
 
     def batch_insert_summary_chunks(self, records: List[Tuple[str, str, str, str]]):
-        """records: [(chunk_id, chunk, created_at, chunker_type), ...]
-
-        Idempotent. This repository shares its database file — and this table —
-        with FullConversationRepository, so the chunks a snapshot covers are
-        normally already present, written by append_turn(). Re-inserting them
-        raised UNIQUE constraint failed and aborted every snapshot taken over
-        stored turns; the existing rows are already correct, so ignore the clash.
-        """
+        """records: [(chunk_id, chunk, created_at, chunker_type), ...]"""
         with self._writing() as cursor:
             cursor.executemany(
                 "INSERT OR IGNORE INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
@@ -140,12 +111,7 @@ class ConversationVectorMetaDataRepository:
     def batch_insert_summary_vector_meta_data(
         self, records: List[Tuple[int, str, str]]
     ):
-        """records: [(summary_vector_id, chunk_id, project_id), ...]
-
-        Idempotent. summary_vector_id is derived from chunk content, and
-        consecutive snapshot windows overlap by design, so the same chunk
-        legitimately reappears in a later snapshot with the same id.
-        """
+        """records: [(summary_vector_id, chunk_id, project_id), ...]"""
         new_records = [(int(r[0]), r[1], r[2]) for r in records]
         with self._writing() as cursor:
             cursor.executemany(
@@ -261,11 +227,7 @@ class ConversationVectorMetaDataRepository:
             )
 
     def batch_insert_map_table(self, records: List[Tuple[int, int]]):
-        """records: [(cumulative_vector_id, summary_vector_id), ...]
-
-        Idempotent against the UNIQUE (cumulative_vector_id, summary_vector_id)
-        constraint, so re-mapping an overlapping chunk is a no-op.
-        """
+        """records: [(cumulative_vector_id, summary_vector_id), ...]"""
         new_records = [(int(record[0]), int(record[1])) for record in records]
         with self._writing() as cursor:
             cursor.executemany(
@@ -280,18 +242,7 @@ class ConversationVectorMetaDataRepository:
         summary_vector_rows: List[Tuple[int, str, str]],
         map_rows: List[Tuple[int, int]],
     ):
-        """Write one complete snapshot in a single transaction.
-
-        The four inserts used to be separate public calls, each committing on
-        its own. A failure partway through left a snapshot that half-existed —
-        chunks and vector metadata committed with no cumulative row to reach
-        them by — and every retry added more orphans. Batched here, the whole
-        snapshot lands or none of it does.
-
-        Ordering matters within the transaction: summary_chunks is the FK parent
-        of summary_vector_meta_data, which is in turn referenced by
-        summary_snapshot_map along with cumulative_vector_meta_data.
-        """
+        """Write one complete snapshot in a single transaction."""
         with self._writing() as cursor:
             cursor.executemany(
                 "INSERT OR IGNORE INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
@@ -323,16 +274,7 @@ class ConversationVectorMetaDataRepository:
         )
 
     def get_highest_summarised_sequence(self) -> int | None:
-        """Highest conversation sequence_number any snapshot has covered.
-
-        No column records a snapshot's range, but summary_vector_meta_data holds
-        one row per covered chunk and full_conversation lives in this same
-        database file, so the watermark is a single join. Returns None when
-        nothing has been summarised yet.
-
-        The table check keeps this usable when the metadata repository is
-        constructed on its own, before any conversation rows exist.
-        """
+        """Highest conversation sequence_number any snapshot has covered."""
         with self._reading() as cursor:
             has_conversation = cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='full_conversation'"

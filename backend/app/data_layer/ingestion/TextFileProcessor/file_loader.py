@@ -32,13 +32,7 @@ IGNORED_DIRECTORIES = {
 
 
 class FileLoader:
-    """Collects candidate documents from a directory tree.
-
-    The policy is open: anything that is not a known binary format is offered to
-    the extractor, which decides whether it can turn the bytes into text. An
-    allowlist here would have to be extended for every new format the extractor
-    learns, and silently dropped the rest without saying so.
-    """
+    """Collects candidate documents from a directory tree."""
 
     def __init__(
         self,
@@ -93,10 +87,8 @@ class FileLoader:
     def __scan_directory(
         self, path: str, loaded_files: Dict[str, List[Path]], visited: Set[str]
     ) -> None:
-        # Symlinked directories are resolved and remembered: a link pointing at
-        # an ancestor otherwise recurses until Python's stack limit, and the
-        # RecursionError was caught below as if it were an unreadable folder,
-        # so the scan returned a partial tree and reported success.
+        # Resolved and remembered: a link to an ancestor otherwise recurses
+        # until the stack limit.
         real_path = os.path.realpath(path)
         if real_path in visited:
             logger.debug("Skipped already visited directory: '%s'", path)
