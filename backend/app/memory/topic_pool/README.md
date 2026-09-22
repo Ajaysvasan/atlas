@@ -16,17 +16,20 @@ comparison meaningful.
 
 ## State
 
-`topic_manager.py` is an empty stub (**bug 4.1**). There is no topic table
-either: `topic_id` is stored as plain text on every project row and on both
-project child tables, with no foreign key behind it. The only guard against a
-typo is a non-empty check in `ProjectMetaData`.
+`TopicManager` is built: it creates a topic, reads its id back, and soft-deletes
+it. `topic_pool_repo/` holds the storage behind it — see its README.
 
-## What `TopicManager` has to do when it is written
+What is still missing:
 
-- Create and load a topic, and decide where a topic's data lives on disk.
-- Hand `(topic_id, query)` down to `ProjectManager`.
-- Settle whether topics get their own table, which is what would let `topic_id`
-  become a foreign key.
+- **Nothing hands `(topic_id, query)` down to `ProjectManager` yet.** The two
+  layers exist and do not talk.
+- `topic_id` on the project tables is still plain text with no foreign key onto
+  `topics_mapping_table`, so a project can name a topic that does not exist. The
+  two databases are separate files, which is why the constraint cannot simply be
+  added.
+- The on-disk scheme for topic -> project -> conversation directories is still
+  undecided (`todo.md` section 2), and `Config.TOPIC` was added for it but is not
+  read by anything — the handler builds its own default path.
 
 That on-disk scheme is the open decision blocking this layer; see `todo.md`
 section 2. Related: **4.1 Conversation identity** in `todo.md` — there is no
@@ -37,4 +40,5 @@ only by the directory the caller passes.
 
 | Directory | Does |
 | :--- | :--- |
+| `topic_pool_repo/` | The topics table and the handler that owns it |
 | `project_pool/` | Projects: routing, registry, and the conversations under them |

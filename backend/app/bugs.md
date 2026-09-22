@@ -177,6 +177,48 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Priority:** P3
 - **Explanation:** `__del__` wraps `close()` in `except Exception: pass`, so a connection that fails to close reports nothing. `ConversationVectorMetaDataRepository` handles the same problem differently — it uses `getattr(self, "conn", None)` so a half-constructed object has nothing to close, and lets real failures surface. The silent swallow is the pattern this project removed from `SnapShot`'s compensating delete.
 
+### Bug 4.52: Two Threads Can Create the Same Topic Twice (`topic_manager.py`)
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `create_new_topic()` checks `__is_topic_exists()` and then inserts, with nothing holding the two together. `topic_name` carries no UNIQUE constraint — it cannot, because soft delete deliberately leaves old rows with the same name — so nothing at the database level catches the second write. Verified by widening the window between the check and the insert: two threads both created `'same'`, leaving **two active rows with the same topic name and different ids**. `get_topic_id()` then returns whichever `LIMIT 1` happens to pick, and every project filed under the other id becomes unreachable. The same check-then-write shape is in `soft_delete()` and, in the project layer, in `ProjectManager.create_project()`.
+
+### Bug 4.53: `TopicManager` Raises Bare `Exception` (`topic_manager.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** All three failure paths raise `Exception("The topic doesn't exists")`, `Exception("topic already exists")` and `Exception("the topic doesn't exists")`. A caller cannot distinguish "no such topic" from "already exists" without matching on message text, and `except Exception` around a call swallows programming errors alongside them. `memory/memory_pool_exceptions.py` already holds eight domain exceptions built for exactly this. The messages are also inconsistently capitalised and read "doesn't exists".
+
+### Bug 4.54: Every Topic Operation Runs Its Query Twice (`topic_manager.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** Measured with a SQLite trace callback: `get_topic_id()` issues **two** SELECTs — one to check existence, one to fetch the id that the first query already had in reach — and `soft_delete()` issues two SELECTs plus the UPDATE. Beyond the wasted round trips, the gap between the check and the act is the window Bug 4.52 exploits. One query returning the id or `None` answers both questions atomically.
+
+### Bug 4.55: `TopicManager.query` Is Stored and Never Read (`topic_manager.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** The constructor validates `query`, rejects it when empty, assigns `self.query` — and nothing ever reads it. It is presumably there for the handoff to `ProjectManager`, which takes `(topic_id, query)`, but that wiring does not exist yet. Same defect as Bug 4.19 (`project_name` on `ConversationVectorManager`): a required constructor argument that forces callers to supply something the class does not use.
+
+### Bug 4.56: Nothing Can List the Topics (`topic_pool_meta_handler.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** The handler can test one topic's existence and fetch its id, both by name. There is no way to ask what topics exist. `MemoryManager` — the layer above, still a stub — has to resolve a topic before it can name one, and the CLI will need to show the user what is there. The rows are present; only the reader is missing.
+
+### Bug 4.57: `topic_id` on the Project Tables Has No Referent (`project_meta_data.py`, `topic_pool_meta_handler.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `project_table`, `project_description_table` and `project_mapping_table` all carry `topic_id text not null`, and `topics_mapping_table` now exists with `topic_id` as its primary key — but they live in **different SQLite files** (`project_db/project.sql` and `topic_db/topic.sql`), so no foreign key can join them. A project can name a topic that was never created, or one that has been soft-deleted, and nothing notices. The only guard is the non-empty check in `ProjectMetaData.__validate_topic_id`. Whether the two registries should share one file is part of the on-disk scheme decision in `todo.md` section 2.
+
+### Bug 4.58: `utc_now` Is Defined Four Times (`memory/`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** Byte-identical copies live in `topic_manager.py`, `topic_pool_meta_handler.py`, `project_meta_data.py` and `fullconversation_repository.py`. The docstring on one of them calls it "canonical timestamp for every row this repository writes", which is exactly the thing four copies cannot guarantee — a change to the format in one leaves the other three writing the old one, into columns that are compared as text.
+
 ---
 
 ## Section 5: Data Layer — Ingestion, Chunking & Vector Stores (`data_layer/`)
@@ -286,11 +328,11 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Priority:** P3
 - **Explanation:** The pass that shortened every docstring to its summary kept the first *line* rather than the first *sentence*, so any docstring whose opening sentence wrapped now ends mid-clause. Affected: `normalizer._is_mostly_letters` ("fires on anything without a"), `text_extractor._flatten_json` ("stay attached to what"), `project_meta_data.__validate_topic_id` ("has no table of its own"), `project_meta_data.__validate_summary` ("rather than at the"), `conversationVectorManager.batch_delete` ("undo a partially written"), and `conversation_summary.make_summary` ("the current conversation"). **Introduced in this session.** The full text of each is recoverable from the archive taken before the pass.
 
-### Bug 7.2: The "No Raw `sqlite3.connect`" Guard Does Not Cover the Project Registry (`test_conversation_data_management.py`)
+### Bug 7.2: The "No Raw `sqlite3.connect`" Guard Covers Two Modules Out of Four (`test_conversation_data_management.py`)
 
 - **Criticality:** Low
 - **Priority:** P3
-- **Explanation:** `test_every_conversation_connection_goes_through_connect` asserts that `fullconversation_repository` and `conversationVectorMetaManager` contain no raw `sqlite3.connect()`. Since Bug 4.45, `project_meta_data.py` also opens the registry through `memory/sqlite_setup.connect()` and depends on the same per-connection pragmas — but it is not in the guard's list, so a new method there could silently get `synchronous=FULL` and foreign keys off, which is exactly the defect the guard exists to prevent.
+- **Explanation:** `test_every_conversation_connection_goes_through_connect` inspects `fullconversation_repository` and `conversationVectorMetaManager` only. Two more modules now open SQLite through `memory/sqlite_setup.connect()` and depend on the same per-connection pragmas: `project_meta_data.py` (since Bug 4.45) and `topic_pool_meta_handler.py`. Neither is in the guard's list, so a new method in either could silently get `synchronous=FULL` and foreign keys off — the exact defect the guard exists to prevent. Verified by reading the module list the test imports.
 
 ### Bug 7.3: `scripts/smoke.py` Cannot Report a Missing `psycopg` (`scripts/smoke.py`)
 
