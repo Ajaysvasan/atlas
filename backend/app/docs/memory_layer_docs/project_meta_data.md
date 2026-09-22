@@ -4,8 +4,8 @@
 
 `memory/topic_pool/project_pool/project_data_repo/project_meta_data.py` is the
 storage half of the project layer: what a project is, what describes it, and
-which summary vectors belong to it. `ProjectManager` — still a stub — is the
-domain object meant to sit on top of it.
+which summary vectors belong to it. `ProjectManager` is the domain object that
+sits on top of it, routing a query to one of these projects.
 
 One instance is scoped to one `project_id` **and its `topic_id`** —
 `ProjectMetaData(project_id, topic_id, ...)`. A project belongs to exactly one
@@ -75,7 +75,9 @@ holds for writes that go through `ProjectMetaData` — a raw `UPDATE` elsewhere
 can still desynchronise them.
 
 `topic_id` has no foreign key, because there is no topic table yet
-(`TopicManager` is still a stub). The only thing standing between a typo and a
+(`TopicManager` owns `topics_mapping_table`, but it lives in a different SQLite
+file, so no foreign key can reach it — bug 4.57). The only thing standing
+between a typo and a
 project filed under a topic that does not exist is the non-empty check in the
 constructor.
 
@@ -237,7 +239,7 @@ See `todo.md` section 2.
 
 ## Tests
 
-`test/memory_layer_testing/test_project_meta_data.py` — 107 tests. The vector
+`test/memory_layer_testing/test_project_meta_data.py` — 139 tests. The vector
 store is a stateful fake rather than a `MagicMock`: every bug that mattered in
 this layer was the two stores disagreeing, and a mock records calls without
 holding state, so it cannot show a disagreement.

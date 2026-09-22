@@ -98,7 +98,7 @@ it is a coding task.
 
 ## 2. The layers above (Bug 4.1)
 
-`MemoryManager` and `TopicManager` are still `pass`. `ProjectManager` is built.
+`MemoryManager` is still `pass`. `TopicManager` and `ProjectManager` are built.
 `ConversationPoolManager` is done and is what they should hand back.
 
 `ProjectMetaData` (`project_data_repo/project_meta_data.py`) is done: it is the
@@ -147,7 +147,14 @@ Mostly path and identity resolution now that the layer below is settled.
 - [ ] The routing thresholds (`SIMILARITY_FLOOR`, `AMBIGUITY_MARGIN`) are
       guesses. They need 30-50 queries labelled with the project they belong to
       before they mean anything.
-- [ ] `TopicManager`: create/load a topic
+- [x] `TopicManager`: create, load and soft-delete a topic, over
+      `topic_pool_repo/TopicPoolMetaHandler`. 24 tests. Architecture in
+      `memory/topic_pool/README.md` and `topic_pool_repo/README.md`.
+- [ ] **Pending: topic -> project handoff.** `TopicManager` holds `query` and
+      never reads it; `ProjectManager` takes `(topic_id, query)`. Nothing passes
+      one to the other yet (bug 4.55).
+- [ ] `Config.TOPIC` was added for the on-disk scheme and is read by nothing —
+      `TopicPoolMetaHandler` builds `data/topic_db/topic.sql` itself.
 - [ ] `MemoryManager`: top-level entry point returning a
       `ConversationPoolManager` for a given topic/project/conversation
 - [ ] Fix the per-project path collision `Config.CONVERSATION` used to cause —

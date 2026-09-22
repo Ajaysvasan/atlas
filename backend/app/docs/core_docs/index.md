@@ -41,6 +41,8 @@ Welcome to the official API documentation for the **Final Year Project Backend A
   - SQLite and memory-mapped vector management for conversational snapshots, summary vectors, and cumulative file offsets.
 - [Conversational Snapshots (`SnapShot` & `SnapShotNode`)](../memory_layer_docs/snapshot.md)
   - Bidirectional cursor-based snapshot history tracker and cosine similarity search engine.
+- [Topics (`TopicManager` & `TopicPoolMetaHandler`)](../memory_layer_docs/topic_manager.md)
+  - Creating, reading and soft-deleting a topic; the `topics_mapping_table` schema and the locking the shared connection needs.
 - [Project Registry (`ProjectMetaData`)](../memory_layer_docs/project_meta_data.md)
   - `project_table`, `project_description_table` and `project_mapping_table`, the summary text and its embedding, and the vectors-first write with a compensating delete.
 - [Memory Pool Exceptions (`memory_pool_exceptions.py`)](../memory_layer_docs/memory_pool_exceptions.md)

@@ -79,7 +79,7 @@ Raised by `VectorDb_diskann.load()` when the index **directory** does not exist.
 ## pgvector store
 
 ### `class MissingDatabaseConfiguration(Exception)`
-Raised by `VectorRepository.__init__` when any of `DBNAME`, `DB_USER`, `PASSWORD`, `HOST`, `PORT` is absent from the environment.
+Raised by `VectorRepository.__init__` when any of `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT` is absent from the environment.
 
 | Constructor | `__init__(self, missing_keys) -> None` |
 | :--- | :--- |

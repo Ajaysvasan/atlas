@@ -67,7 +67,7 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 - **Criticality:** Medium
 - **Priority:** P2
-- **Explanation:** Three core memory management classes remain completely empty (just containing `pass`), leaving the upper levels of the hierarchy unimplemented: `MemoryManager` (`memory_manager.py`), `ProjectManager` (`project_manager.py`), and `TopicManager` (`topic_manager.py`). `ConversationPoolManager` is now implemented — it owns the `FullConversation` / `ConversationSummary` / `SnapShot` trio for a single conversation, restores snapshot cursors on construction, and applies the `SNAPSHOT_EVERY_N_TURNS` trigger policy. The remaining three need to resolve per-topic and per-project directories and hand a `ConversationPoolManager` back to callers.
+- **Explanation:** `MemoryManager` (`memory_manager.py`) is still an empty class containing `pass`, so the top of the hierarchy has no entry point: nothing resolves a topic/project/conversation triple and hands back a `ConversationPoolManager`. The rest is now implemented — `TopicManager` creates, reads and soft-deletes topics; `ProjectManager` routes a query to a project within a topic; `ConversationPoolManager` owns the `FullConversation` / `ConversationSummary` / `SnapShot` trio for one conversation. What is missing besides `MemoryManager` is the wiring *between* the built layers: nothing passes `(topic_id, query)` from the topic layer to the project layer, and `ProjectManager.route()` stops at a `pass` where the thinking layer will go.
 
 ---
 

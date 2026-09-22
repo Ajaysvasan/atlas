@@ -73,7 +73,9 @@ Stores the parameters and constructs `dann.DynamicMemoryIndex(...)` directly. It
 ## `class VectorRepository` (`repository/vectorRepository.py`)
 The memory layer's pgvector store. One row per `(project_id, vector_id)` in a `vectors` table; `psycopg` 3 connection held for the object's lifetime.
 
-Connection settings come from `.env` via `python-dotenv`: `DBNAME`, `DB_USER`, `PASSWORD`, `HOST`, `PORT`. Any missing key raises `MissingDatabaseConfiguration` at construction, naming the absent keys.
+Connection settings come from `.env` via `python-dotenv`: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Any missing key raises `MissingDatabaseConfiguration` at construction, naming the absent keys. The `DB_` prefix is load-bearing: `load_dotenv()` will not override a variable the environment already has, and `USER`, `HOST` and `PORT` are all set by something (bug 6.2).
+
+`register_vector_types(self.conn)` runs in the constructor, after `CREATE EXTENSION` and before any statement touches a vector column. Without it psycopg cannot adapt a numpy array at all, and a `vector` column reads back as text (bug 5.1).
 
 > **On `DB_USER`.** The key is deliberately not `USER`. Every login shell exports `USER`, and `load_dotenv()` does not override a variable already in the environment, so the `.env` value was ignored and the connection was made as whoever ran the process.
 

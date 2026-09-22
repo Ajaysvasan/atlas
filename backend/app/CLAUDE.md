@@ -56,6 +56,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 - **ConversationSummary**: feeds the draft model a speaker-labelled transcript (`render_transcript`), batched between turns so no batch opens mid-turn without its speaker
 - **ProjectMetaData** (`project_data_repo/project_meta_data.py`): the project registry, scoped to one project *and its topic* — `ProjectMetaData(project_id, topic_id, ...)`. `add_project_vector(vector, vector_id, project_name, project_summary)` writes the embedding to pgvector, then the project row and mapping row in one SQLite transaction, with a compensating delete if the metadata fails. Descriptions are several per project, keyed `(project_id, project_description_id)`. Both child tables carry a denormalised `topic_id`, kept in step by the upsert, so `get_topic_summary_vector_ids()` answers "every summary vector in this topic, and whose it is" without a join — the read the query router needs. `get_project()` returns a `ProjectRow`. See `docs/memory_layer_docs/project_meta_data.md`
 - **ProjectVectorHandler** (`project_data_repo/project_vector_handler.py`): a project's vectors — one for its summary, one per description. Ids are derived from the source (`summary_vector_id(project_id)`, `description_vector_id(project_id, description_id)`), never passed, so add/update/get/delete agree without a lookup. `get_project_vectors(project_id, ids)` reads a batch in the order given; the ids come from `ProjectMetaData.get_topic_summary_vector_ids()` because the vector store cannot enumerate. Keeps one `VectorRepository` per project rather than one per call
+- **TopicManager** (`topic_pool/topic_manager.py`): create, read and soft-delete a topic, over `TopicPoolMetaHandler` (`topic_pool_repo/`). Reads filter on `is_active = 't'`, so a soft-deleted topic is invisible while its row stays. The connection is opened `check_same_thread=False` and every statement — including `close()` — runs under an `RLock`
 - **ProjectManager** (`topic_pool/project_pool/project_manager.py`): routes `(topic_id, query)` to an existing project. `route()` -> `project_id` or `None`; `resolve()` -> `ProjectMatch` with score, margin, `ambiguous` and ranked candidates. A project scores as its best-matching vector, not its average. The no branch is a `pass` pending the thinking layer. Architecture lives in `memory/topic_pool/project_pool/README.md` — **module READMEs hold architecture, data flow and design rationale; `docs/` stays the API reference; code comments are only for logic that reads wrong without one**
 - **Snapshot** (`memory/.../snapshot.py`): Bidirectional cursor traversal of conversation history; uses cosine similarity (torch) to find similar snapshots; stores summary and cumulative vectors
 - **ConversationVectorMetaDataRepository** (`conversation_data_management/conversationVectorMetaManager.py`): SQLite-based metadata with tables: `summary_chunks`, `summary_vector_meta_data`, `cumulative_vector_meta_data`, `summary_snapshot_map`. Thread-safe: one connection opened with `check_same_thread=False`, every statement (including its commit or rollback, and `close()`) under an `RLock`. `insert_snapshot()` writes a whole snapshot in one transaction.
@@ -67,10 +68,11 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 | DiskANN index | `data/disk_ann_index/` | Approximate nearest neighbor vector search |
 | SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one |
 | SQLite (memory) | `data/memory/topic_pool/.../conversation_pool/{project_id}_conversation.db` | Conversation turns **and** snapshot metadata, in one file shared by `FullConversationRepository` and `ConversationVectorMetaDataRepository`. Every open goes through `sqlite_setup.connect()`: WAL journal (so `.db-wal` and `.db-shm` sit alongside it), `synchronous=NORMAL`, `foreign_keys=ON` |
+| SQLite (topics) | `data/topic_db/topic.sql` | Every topic: `topics_mapping_table` (`topic_pool_meta_handler.py`). Soft delete flips `is_active`; rows are never removed |
 | SQLite (projects) | `data/project_db/project.sql` | Shared registry of every project: `project_table` (incl. `project_summary` text), `project_description_table`, `project_mapping_table` (`project_meta_data.py`) |
 | PostgreSQL | localhost:5432, DB `Vectors` | Vector repository via pgvector (`vectorRepository.py`) |
 
-PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DBNAME`, `DB_USER`, `PASSWORD`, `HOST`, `PORT`. `DB_USER` is deliberately not `USER` — login shells export `USER`, and `load_dotenv()` will not override it.
+PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Every one is `DB_`-prefixed on purpose — `load_dotenv()` does not override a variable already in the environment, and the unprefixed names are ones other things set: login shells export `USER`, conda exports `HOST` as its compiler triplet, PaaS platforms set `PORT` (bug 6.2).
 
 ### Key Data Models
 
@@ -131,7 +133,7 @@ Central config class with constants:
 
 **P2 — Unimplemented:**
 - Bug 2.1/2.2: `cli/cli_interface.py` query loop is a placeholder (`# some stuff`) — no downstream pipeline integration
-- Bug 4.1: `MemoryManager`, `ProjectManager`, `TopicManager` are still empty stub classes. `ConversationPoolManager` and `ConversationSummary` are implemented.
+- Bug 4.1: `MemoryManager` is still an empty stub class. `TopicManager`, `ProjectManager`, `ConversationPoolManager` and `ConversationSummary` are implemented; nothing yet wires the topic layer to the project layer.
 
 **P3:**
 - DiskANN index not persisted/reloaded correctly between sessions

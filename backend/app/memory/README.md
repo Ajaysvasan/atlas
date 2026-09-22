@@ -18,12 +18,14 @@ Topic
 
 ```
 memory_manager.py        PENDING - the top-level entry point
+sqlite_setup.py          every SQLite open in this layer goes through it
 topic_pool/
-  topic_manager.py       PENDING - create/load a topic
+  topic_manager.py       create/load/soft-delete a topic  (built)
+  topic_pool_repo/       the topics table                 (built)
   project_pool/
-    project_manager.py   routes a query to a project  (built)
-    project_data_repo/   the project registry          (built)
-    conversation_pool/   turns, summaries, snapshots   (built)
+    project_manager.py   routes a query to a project      (built)
+    project_data_repo/   the project registry             (built)
+    conversation_pool/   turns, summaries, snapshots      (built)
 memory_pool_exceptions.py
 ```
 
@@ -33,7 +35,9 @@ memory_pool_exceptions.py
 | :--- | :--- |
 | Conversation storage, summarisation, snapshots | Built and tested |
 | Project registry and query routing | Built and tested |
-| `MemoryManager`, `TopicManager` | Empty stubs (**bug 4.1**) |
+| Topics: create, read, soft delete | Built and tested |
+| `MemoryManager` | Empty stub (**bug 4.1**) |
+| `TopicManager` -> `ProjectManager` handoff | Not wired — the two layers exist and do not talk |
 | Thinking layer and its wiring | Not started — `ProjectManager.route()` stops at a `pass` |
 
 The layers are being built bottom-up, so the storage is finished before the
