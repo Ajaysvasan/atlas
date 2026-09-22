@@ -73,6 +73,10 @@ class VectorRepository:
         # numpy array on its own, and reads come back as text without this.
         # register_vector looks up the type, so the extension must exist first.
         register_vector_types(self.conn)
+        # A cursor binds the connection's adapter map when it is created, so the
+        # one opened above for __create_extension() cannot see the vector types
+        # registered after it. Reopen, or every insert fails to adapt ndarray.
+        self.curr = self.conn.cursor()
         self.__create_table()
         # Host and database only — never the password, never the whole DSN.
         logger.info(
@@ -165,7 +169,12 @@ class VectorRepository:
         result = self.curr.fetchone()
         if result is None:
             raise VectorNotFoundEror(vector_id)
-        return np.asarray(result[0], dtype=float32)
+        embedding = result[0]
+        # pgvector >= 0.4 hands back its own Vector, which numpy cannot coerce;
+        # older versions already return an array. Accept either.
+        if hasattr(embedding, "to_numpy"):
+            embedding = embedding.to_numpy()
+        return np.asarray(embedding, dtype=float32)
 
     def __get_vectors(self, vector_ids: List[uint32]) -> NDArray[float32]:
         vectors = []

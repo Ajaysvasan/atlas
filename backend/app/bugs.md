@@ -177,57 +177,65 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Priority:** P3
 - **Explanation:** `__del__` wraps `close()` in `except Exception: pass`, so a connection that fails to close reports nothing. `ConversationVectorMetaDataRepository` handles the same problem differently — it uses `getattr(self, "conn", None)` so a half-constructed object has nothing to close, and lets real failures surface. The silent swallow is the pattern this project removed from `SnapShot`'s compensating delete.
 
-### Bug 4.52: Two Threads Can Create the Same Topic Twice (`topic_manager.py`)
+### Bug 4.52: Two Threads Can Create the Same Topic Twice (`topic_manager.py`) — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
+- **Status:** Fixed at the database rather than in the caller: `create unique index idx_active_topic_name on topics_mapping_table(topic_name) where is_active = 't'`. The index is **partial**, which is what lets it coexist with soft delete — only active rows are constrained, so a name can cycle through create and delete any number of times while never having two live rows. `create_new_topic()` now inserts and converts `IntegrityError` into `TopicAlreadyExists`, so there is no check to race. Verified with a forced interleave: one thread wins, the other raises, one active row.
 - **Explanation:** `create_new_topic()` checks `__is_topic_exists()` and then inserts, with nothing holding the two together. `topic_name` carries no UNIQUE constraint — it cannot, because soft delete deliberately leaves old rows with the same name — so nothing at the database level catches the second write. Verified by widening the window between the check and the insert: two threads both created `'same'`, leaving **two active rows with the same topic name and different ids**. `get_topic_id()` then returns whichever `LIMIT 1` happens to pick, and every project filed under the other id becomes unreachable. The same check-then-write shape is in `soft_delete()` and, in the project layer, in `ProjectManager.create_project()`.
 
-### Bug 4.53: `TopicManager` Raises Bare `Exception` (`topic_manager.py`)
+### Bug 4.53: `TopicManager` Raises Bare `Exception` (`topic_manager.py`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
+- **Status:** Fixed. `TopicNotFound` and `TopicAlreadyExists` added to `memory/memory_pool_exceptions.py`, both carrying the topic name and a message that says which case it is.
 - **Explanation:** All three failure paths raise `Exception("The topic doesn't exists")`, `Exception("topic already exists")` and `Exception("the topic doesn't exists")`. A caller cannot distinguish "no such topic" from "already exists" without matching on message text, and `except Exception` around a call swallows programming errors alongside them. `memory/memory_pool_exceptions.py` already holds eight domain exceptions built for exactly this. The messages are also inconsistently capitalised and read "doesn't exists".
 
-### Bug 4.54: Every Topic Operation Runs Its Query Twice (`topic_manager.py`)
+### Bug 4.54: Every Topic Operation Runs Its Query Twice (`topic_manager.py`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
+- **Status:** Fixed. `get_topic_id()` is one SELECT, `create_new_topic()` one INSERT, and `soft_delete()` one UPDATE ... RETURNING — down from two, two and three. Asserted with a SQLite trace callback rather than by reading the code.
 - **Explanation:** Measured with a SQLite trace callback: `get_topic_id()` issues **two** SELECTs — one to check existence, one to fetch the id that the first query already had in reach — and `soft_delete()` issues two SELECTs plus the UPDATE. Beyond the wasted round trips, the gap between the check and the act is the window Bug 4.52 exploits. One query returning the id or `None` answers both questions atomically.
 
-### Bug 4.55: `TopicManager.query` Is Stored and Never Read (`topic_manager.py`)
+### Bug 4.55: `TopicManager.query` Is Stored and Never Read (`topic_manager.py`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
+- **Status:** Partly fixed. `query` is now optional, so callers are no longer forced to supply something nothing reads; it is still held for the topic -> project handoff, which does not exist yet. The entry closes properly when that wiring lands.
 - **Explanation:** The constructor validates `query`, rejects it when empty, assigns `self.query` — and nothing ever reads it. It is presumably there for the handoff to `ProjectManager`, which takes `(topic_id, query)`, but that wiring does not exist yet. Same defect as Bug 4.19 (`project_name` on `ConversationVectorManager`): a required constructor argument that forces callers to supply something the class does not use.
 
-### Bug 4.56: Nothing Can List the Topics (`topic_pool_meta_handler.py`)
+### Bug 4.56: Nothing Can List the Topics (`topic_pool_meta_handler.py`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
+- **Status:** Fixed. `get_all_topics()` on the handler and `list_topics()` on the manager return `Topic(topic_id, topic_name, created_at)` for every active topic, oldest first. Added for enumeration — `MemoryManager` and the CLI both need it — not to save database hits; see `todo.md` for the measurements that ruled that reasoning out.
 - **Explanation:** The handler can test one topic's existence and fetch its id, both by name. There is no way to ask what topics exist. `MemoryManager` — the layer above, still a stub — has to resolve a topic before it can name one, and the CLI will need to show the user what is there. The rows are present; only the reader is missing.
 
 ### Bug 4.57: `topic_id` on the Project Tables Has No Referent (`project_meta_data.py`, `topic_pool_meta_handler.py`)
 
 - **Criticality:** Low
 - **Priority:** P3
+- **Status:** Open, and not fixable in place. A foreign key cannot cross SQLite files, so closing this means deciding whether the topic and project registries share one — part of the on-disk scheme in `todo.md` section 2.
 - **Explanation:** `project_table`, `project_description_table` and `project_mapping_table` all carry `topic_id text not null`, and `topics_mapping_table` now exists with `topic_id` as its primary key — but they live in **different SQLite files** (`project_db/project.sql` and `topic_db/topic.sql`), so no foreign key can join them. A project can name a topic that was never created, or one that has been soft-deleted, and nothing notices. The only guard is the non-empty check in `ProjectMetaData.__validate_topic_id`. Whether the two registries should share one file is part of the on-disk scheme decision in `todo.md` section 2.
 
-### Bug 4.58: `utc_now` Is Defined Four Times (`memory/`)
+### Bug 4.58: `utc_now` Is Defined Four Times (`memory/`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
+- **Status:** Fixed. `memory/timestamps.py` holds `utc_now` and `as_timestamp`; the four modules import from it and re-export, so existing imports keep working. A test asserts none of them defines its own.
 - **Explanation:** Byte-identical copies live in `topic_manager.py`, `topic_pool_meta_handler.py`, `project_meta_data.py` and `fullconversation_repository.py`. The docstring on one of them calls it "canonical timestamp for every row this repository writes", which is exactly the thing four copies cannot guarantee — a change to the format in one leaves the other three writing the old one, into columns that are compared as text.
 
 ---
 
 ## Section 5: Data Layer — Ingestion, Chunking & Vector Stores (`data_layer/`)
 
-### Bug 5.1: The pgvector Write and Read Paths Cannot Work Against a Real PostgreSQL Server (`vectorRepository.py`) — FIXED IN CODE, BLOCKED ON THE SERVER
+### Bug 5.1: The pgvector Write and Read Paths Cannot Work Against a Real PostgreSQL Server (`vectorRepository.py`) — FIXED AND PROVEN END TO END
 
 - **Criticality:** Critical
 - **Priority:** P0
-- **Status:** The code side is fixed — `pgvector==0.5.0` is pinned in `requirements.txt` and `register_vector_types(self.conn)` runs in `VectorRepository.__init__`, after `CREATE EXTENSION` and before any vector statement. `batch_insert` now passes numpy arrays rather than `.tolist()`, which was being sent as a PostgreSQL array. **Not yet proven end to end:** the pgvector extension is not installed on the development PostgreSQL server (`pg_available_extensions` has no `vector` row) and the `Vectors` database does not exist, so no code has yet written a vector to a real server. `scripts/smoke.py` reports both preconditions.
+- **Status:** **Fixed and proven against a real server.** `pgvector==0.5.0` is pinned in `requirements.txt` and `register_vector_types(self.conn)` runs in `VectorRepository.__init__`, after `CREATE EXTENSION` and before any vector statement. `batch_insert` passes numpy arrays rather than `.tolist()`, which was being sent as a PostgreSQL array. The server side is now set up: Fedora's `pgvector-0.8.0-1.fc43`, database `Vectors`, `CREATE EXTENSION vector` applied. `scripts/smoke.py` completes a full round trip — ingest, embed, write, read back — and reports the returned array identical to the one written.
+- **What proving it cost:** the "fixed in code" claim above was wrong, and the smoke test found it in one run. Two further defects (Bugs 5.13 and 5.14) sat behind it, both invisible to every existing test because `conftest.py` replaces `psycopg` with a `MagicMock` — a mock cursor adapts anything handed to it and returns whatever you tell it to. No amount of mocked testing could have reached either. This is the argument for `scripts/smoke.py` existing at all.
 - **Explanation:** Nothing registers a pgvector adapter with psycopg — `pgvector` is not in `requirements.txt`, is not installed, and `register_vector()` appears nowhere in the tree. Three consequences, none of which any test can see because `conftest.py` replaces `psycopg` with a `MagicMock`:
   1. `__insert_vector` and `__update_vector` pass a `numpy.ndarray` straight to `cursor.execute`. Verified offline: `psycopg.adapters.get_dumper(numpy.ndarray, ...)` raises `ProgrammingError: cannot adapt type 'ndarray'`. Every single-vector insert and every update fails.
   2. `__insert_batch_vector` calls `.tolist()` first, so psycopg adapts it as a PostgreSQL array and sends `{0.0,1.0}`. pgvector's input syntax is `[0.0,1.0]`, so the server rejects it. (Reasoned from the dumper output, not confirmed against a live server.)
@@ -317,6 +325,21 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Criticality:** Low
 - **Priority:** P3
 - **Explanation:** `__init__` connects, then calls `__create_extension()`, `register_vector_types()` and `__create_table()`. If any of those raises — and `register_vector_types` will raise on a server without the pgvector extension, which is the current state of the development database — the exception propagates with `self.conn` still open and no `close()` anywhere. The object is never returned, so nothing can close it either.
+
+### Bug 5.13: The Cursor Was Opened Before the Vector Types Were Registered, So Every Write Failed (`vectorRepository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `__init__` did `self.curr = self.conn.cursor()`, then `__create_extension()`, then `register_vector_types(self.conn)`. A psycopg cursor binds the connection's adapter map **at creation**, so `self.curr` — opened before the registration — never saw the ndarray dumper, and every insert raised `ProgrammingError: cannot adapt type 'ndarray' using placeholder '%s' (format: AUTO)`. The registration itself was correct and `conn.adapters` did hold the dumper; only the cursor was stale. Confirmed by a direct A/B: identical code with the cursor opened *after* `register_vector` inserts fine, and with it opened *before* fails. **Fixed** by reopening `self.curr` after `register_vector_types`.
+- **Why no test caught it:** the mocked `psycopg` adapts anything, so ordering is unobservable. Only a real connection distinguishes the two.
+- **Regression test:** `test/live_testing/test_vector_repository_live.py::TestTheWritePath`. Mutation-checked — reverting the fix fails all 8 live tests, both alone and inside the full suite.
+
+### Bug 5.14: A Vector Read Back From pgvector Cannot Be Coerced by numpy (`vectorRepository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `__get_vector` ended in `np.asarray(result[0], dtype=float32)`. With the adapter correctly registered, pgvector 0.5.0 returns its own `pgvector.Vector` object rather than a list or array, and numpy cannot coerce it: `TypeError: float() argument must be a string or a real number, not 'Vector'`. Note this is the *opposite* failure from the one Bug 5.1 predicted — 5.1 reasoned the column would come back as **text** without an adapter; it comes back as a `Vector` **with** one. **Fixed** by calling `.to_numpy()` when the returned object offers it, which keeps older versions that already return an array working. `__get_vector` is the only read site, so `__get_vectors`, `search` and `batch_search` are all covered by the one change.
+- **Regression test:** `test/live_testing/test_vector_repository_live.py::TestTheReadPath`. Mutation-checked — reverting the fix fails 5 of the 8 live tests, leaving exactly the three that never read a vector back.
 
 ---
 

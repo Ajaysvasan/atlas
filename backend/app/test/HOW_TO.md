@@ -41,6 +41,41 @@ If you are iterating on a single file (for instance, the new snapshot bugs):
 PYTHONPATH=. pytest test/memory_layer_testing/test_snapshot_bugs.py -v
 ```
 
+### 5. Run the Live Tests (real PostgreSQL)
+```bash
+PYTHONPATH=. pytest test/live_testing/ -v
+```
+These skip themselves unless a real server is reachable, so they are safe to
+run anywhere. To see why they skipped, add `-rs`.
+
+---
+
+## Live Tests and Why They Exist
+
+Most of the suite replaces `psycopg` with a `MagicMock`, which is what lets it
+run without a database. A mock cursor adapts any object it is handed and returns
+whatever it is told to, so two whole classes of defect are invisible to it: which
+types the driver can actually adapt, and which types come back from a read. Bugs
+5.13 and 5.14 were both of that kind — both passed the mocked suite and both
+failed on the first contact with a real server.
+
+`test/live_testing/` runs the same code against a real PostgreSQL. It needs:
+
+| Requirement | Command |
+| :--- | :--- |
+| an interpreter with `psycopg` | the `fyp2` conda env, not `/usr/bin/python3` |
+| the pgvector extension | `sudo dnf install pgvector` (Fedora's package, not PGDG's `pgvector_18`) |
+| the database | `createdb Vectors`, then `CREATE EXTENSION vector;` |
+
+`scripts/smoke.py` checks all of these at once and names whatever is missing.
+
+The root `conftest.py` imports the real `psycopg` before any test module loads.
+Every mock in the suite is installed with `setdefault` or an equivalent guard, so
+importing the real module first makes those guards stand down and the suite runs
+against the real driver where one exists. Without it the live tests skip even on
+a machine that has a server, because a test module imported earlier in
+collection would have already installed the stub.
+
 ---
 
 ## Troubleshooting

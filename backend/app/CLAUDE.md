@@ -30,8 +30,23 @@ PYTHONPATH=. pytest test/data_layer_testing/ -v         # Data layer tests
 PYTHONPATH=. pytest test/memory_layer_testing/ -v       # Memory layer tests
 PYTHONPATH=. pytest test/stress_testing/ -v             # Stress tests
 PYTHONPATH=. pytest test/logging_testing/ -v            # Logging tests
+PYTHONPATH=. pytest test/live_testing/ -v               # Real PostgreSQL; self-skipping
 PYTHONPATH=. pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v  # Single test
 ```
+
+Counts differ by interpreter, and that is expected: **916 passed, 8 skipped**
+under `/usr/bin/python3`, **924 passed** under the `fyp2` conda env, which has
+`psycopg` and a reachable server. `-rs` prints why anything skipped.
+
+Most of the suite swaps `psycopg` for a `MagicMock`, which is what lets it run
+with no database — but a mock adapts anything and returns anything, so it cannot
+see which types the driver accepts or returns (Bugs 5.13 and 5.14 were both of
+that kind, and both passed the mocked suite). `test/live_testing/` runs the same
+code against a real server and skips itself when there is none. The root
+`conftest.py` imports the real `psycopg` first so the `setdefault` guards on
+every mock stand down where the real driver exists; without it the live tests
+skip even on a machine that has a server. `scripts/smoke.py` checks the whole
+setup and names what is missing.
 
 ## Architecture
 
