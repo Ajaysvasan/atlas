@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Tuple
 
 from config import get_logger
+from memory.timestamps import utc_now
 from memory.sqlite_setup import (
     connect,
     enable_wal,
@@ -31,9 +32,6 @@ class Turn(NamedTuple):
     chunk_id: str
 
 
-def utc_now() -> str:
-    """Canonical timestamp for every row this repository writes."""
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 class FullConversationRepository:
@@ -69,6 +67,14 @@ class FullConversationRepository:
                 foreign key (chunk_id) references summary_chunks (chunk_id)
             )
             """)
+            # Read by ConversationVectorMetaDataRepository, not from here:
+            # get_highest_summarised_sequence() joins this table on chunk_id on
+            # every snapshot decision, and without the index SQLite builds a
+            # transient one per call.
+            cursor.execute(
+                "create index if not exists idx_full_conversation_chunk "
+                "on full_conversation(chunk_id);"
+            )
             conn.commit()
 
     def __add_chunks(

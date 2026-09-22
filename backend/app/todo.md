@@ -153,6 +153,29 @@ Mostly path and identity resolution now that the layer below is settled.
 - [ ] **Pending: topic -> project handoff.** `TopicManager` holds `query` and
       never reads it; `ProjectManager` takes `(topic_id, query)`. Nothing passes
       one to the other yet (bug 4.55).
+- [x] `get_all_topics()` on `TopicManager` / `TopicPoolMetaHandler` (bug 4.56).
+      The reason is **enumeration, not caching**: `MemoryManager` has to resolve
+      a topic before it can name one, and the CLI has to show the user what
+      exists. Neither is answerable today — the handler can only test one name
+      at a time.
+
+      It is *not* worth adding to save database hits, which was the original
+      motivation. Measured on a 10,000-topic table: loading every topic costs
+      16x a single existence check as the code stands, and 1,492x once
+      `topic_name` is indexed, while a `TopicManager` performs two or three
+      lookups in its entire life. A cached list would also go stale, and since
+      `topic_name` cannot carry a UNIQUE constraint (soft delete keeps old rows
+      with the same name), a stale "does not exist" leads straight to the
+      duplicate insert in bug 4.52. The crossover where loading once wins is
+      around 1,500 lookups against an unchanging set — a bulk import, not this.
+- [x] Index `topic_name` — done as a **partial unique** index, which also made
+      the create race (bug 4.52) impossible rather than merely unlikely.
+      This *is* the fix for lookup cost: the column has no
+      index, so every existence check is a `SCAN` of the whole table, growing
+      linearly with the topic count. Measured at 10,000 topics: 211 us per check
+      as a scan, 2.3 us with `create index idx_topic_name on
+      topics_mapping_table(topic_name)` — 93x, for one statement in `__db_init`
+      and nothing to keep in step.
 - [ ] `Config.TOPIC` was added for the on-disk scheme and is read by nothing —
       `TopicPoolMetaHandler` builds `data/topic_db/topic.sql` itself.
 - [ ] `MemoryManager`: top-level entry point returning a
@@ -263,3 +286,10 @@ tens of snapshots; linear in round trips once memory is a retrieval source.
 - Snapshot writes go vectors-first, metadata-second, with a compensating delete:
   a failure then leaves unreachable vectors rather than metadata pointing at
   missing ones.
+- Indexes are added on measurement, not on shape. Two plausible ones were
+  measured and rejected: `summary_vector_meta_data(project_id, chunk_id)` — the
+  watermark join is already served by `idx_full_conversation_chunk`, so it won
+  ~2% (inside noise) while costing +93% on every insert — and
+  `cumulative_vector_meta_data(datetime(created_at))`, which saved 4.7us at
+  fifty snapshots and has to be maintained on every write. Do not re-add either
+  without a benchmark that contradicts this.

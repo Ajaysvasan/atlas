@@ -71,3 +71,21 @@ class EmptyQueryException(Exception):
     def __str__(self) -> str:
         return( "The entered query is empty. Enter a valid query")
 
+
+
+class TopicNotFound(Exception):
+    def __init__(self, topic) -> None:
+        self.topic = topic
+        super().__init__(self.topic)
+
+    def __str__(self) -> str:
+        return f"No active topic {self.topic!r}. It was never created, or it was soft deleted."
+
+
+class TopicAlreadyExists(Exception):
+    def __init__(self, topic) -> None:
+        self.topic = topic
+        super().__init__(self.topic)
+
+    def __str__(self) -> str:
+        return f"An active topic named {self.topic!r} already exists."

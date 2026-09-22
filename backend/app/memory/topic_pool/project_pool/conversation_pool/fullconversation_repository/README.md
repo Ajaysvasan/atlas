@@ -22,6 +22,23 @@ enforced, and an orphan meta row is accepted only when `foreign_keys` is off,
 after which every reader's JOIN silently drops it while it keeps its
 `sequence_number` forever.
 
+## Why `full_conversation` is indexed on `chunk_id`
+
+`idx_full_conversation_chunk` is created here but read from elsewhere. Its
+beneficiary is `ConversationVectorMetaDataRepository.get_highest_summarised_sequence()`,
+which joins `summary_vector_meta_data` to this table on `chunk_id` to find the
+watermark — and which runs on every snapshot decision, via
+`turns_since_last_snapshot()` and `__window_start()`. Without it SQLite builds an
+AUTOMATIC PARTIAL COVERING INDEX per call: 11.0 ms against 3.1 ms at 40 000
+turns.
+
+The mirror index on the other side of that join,
+`summary_vector_meta_data(project_id, chunk_id)`, was measured and **rejected**.
+Once this index exists the planner drives from the meta table and searches here,
+so the second one moved the join by ~2% — inside noise — while costing +93% on
+every insert into a table that is written once per summarised turn. `todo.md`
+records it so it is not re-added on shape.
+
 ## Why sequence numbers are allocated under `BEGIN IMMEDIATE`
 
 `append_turns` reads `MAX(sequence_number)` and then inserts. Without the write

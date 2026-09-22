@@ -16,6 +16,7 @@ from numpy import float32, ndarray, uint32
 from numpy.typing import NDArray
 
 from config import Config, get_logger
+from memory.timestamps import utc_now, as_timestamp
 from memory.sqlite_setup import connect, enable_wal
 from data_layer.vector_db_manager.repository.vectorRepository import VectorRepository
 from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
@@ -109,18 +110,8 @@ class ProjectRow(NamedTuple):
     user_id: str | None
 
 
-def utc_now() -> str:
-    """Canonical timestamp for every row this repository writes."""
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def as_timestamp(value: str | date | datetime | None) -> str:
-    """Normalise a caller-supplied stamp to the stored TEXT form."""
-    if value is None:
-        return utc_now()
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    return str(value)
 
 
 class ProjectMetaData:
@@ -207,6 +198,16 @@ class ProjectMetaData:
                     primary key (project_id, project_summary_vector_id),
                     foreign key (project_id) references project_table(project_id)
                     );""")
+            # Both topic-wide reads filter on topic_id, which no primary key
+            # covers; the router runs them on every query.
+            curr.execute(
+                "create index if not exists idx_project_topic "
+                "on project_table(topic_id);"
+            )
+            curr.execute(
+                "create index if not exists idx_project_mapping_topic "
+                "on project_mapping_table(topic_id);"
+            )
 
     @staticmethod
     def __validate_vector_id(vector_id) -> int:

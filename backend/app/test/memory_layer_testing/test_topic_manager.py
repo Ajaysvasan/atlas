@@ -12,6 +12,7 @@ import threading
 
 import pytest
 
+from memory.memory_pool_exceptions import TopicAlreadyExists, TopicNotFound
 from memory.topic_pool.topic_manager import TopicManager
 from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
     TopicPoolMetaHandler,
@@ -36,10 +37,16 @@ class TestConstruction:
         with pytest.raises(ValueError):
             TopicManager(bad, "a query", db_path)
 
-    @pytest.mark.parametrize("bad", ["", None])
-    def test_an_empty_query_is_refused(self, db_path, bad):
+    def test_an_empty_query_is_refused(self, db_path):
         with pytest.raises(ValueError):
-            TopicManager("retrieval", bad, db_path)
+            TopicManager("retrieval", "", db_path)
+
+    def test_a_query_is_optional(self, db_path):
+        """It is held for the topic -> project handoff, which does not exist
+        yet, so requiring it made callers supply something nothing reads."""
+        with TopicManager("retrieval", topic_pool_path=db_path) as m:
+            assert m.query is None
+            m.create_new_topic()
 
     def test_the_supplied_database_is_the_one_used(self, db_path):
         """The path used to be accepted and then dropped on the floor, so every
@@ -79,7 +86,7 @@ class TestCreate:
 
     def test_creating_twice_is_refused(self, manager):
         manager.create_new_topic()
-        with pytest.raises(Exception, match="already exists"):
+        with pytest.raises(TopicAlreadyExists):
             manager.create_new_topic()
 
     def test_two_topics_get_different_ids(self, db_path):
@@ -99,7 +106,7 @@ class TestCreate:
 
 class TestGetTopicId:
     def test_an_absent_topic_raises(self, manager):
-        with pytest.raises(Exception, match="doesn't exists"):
+        with pytest.raises(TopicNotFound):
             manager.get_topic_id()
 
     def test_the_id_is_stable_across_reads(self, manager):
@@ -120,7 +127,7 @@ class TestSoftDelete:
         exist, so every delete died with 'no such column'."""
         manager.create_new_topic()
         manager.soft_delete()
-        with pytest.raises(Exception, match="doesn't exists"):
+        with pytest.raises(TopicNotFound):
             manager.get_topic_id()
 
     def test_the_row_is_kept(self, manager, db_path):
@@ -134,7 +141,7 @@ class TestSoftDelete:
         assert rows == [("retrieval", "f")]
 
     def test_deleting_an_absent_topic_raises(self, manager):
-        with pytest.raises(Exception, match="doesn't exists"):
+        with pytest.raises(TopicNotFound):
             manager.soft_delete()
 
     def test_the_name_can_be_used_again_afterwards(self, manager):
@@ -252,3 +259,168 @@ class TestLifecycle:
             if isinstance(node, ast.ImportFrom) and node.module
         }
         assert "psycopg" not in imported
+
+
+class TestTheRaceIsClosed:
+    """Bug 4.52: create_new_topic checked then wrote, so two threads could both
+    pass the check and leave two active rows with the same name."""
+
+    def test_a_forced_interleave_cannot_create_two(self, db_path):
+        import time
+        from unittest.mock import patch
+
+        managers = [TopicManager("same", None, db_path) for _ in range(2)]
+        winners, losers = [], []
+
+        real = TopicManager._TopicManager__is_topic_exists
+
+        def slow(self):
+            result = real(self)
+            time.sleep(0.05)
+            return result
+
+        def go(m):
+            try:
+                winners.append(m.create_new_topic())
+            except TopicAlreadyExists:
+                losers.append(True)
+
+        with patch.object(TopicManager, "_TopicManager__is_topic_exists", slow):
+            threads = [threading.Thread(target=go, args=(m,)) for m in managers]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        assert len(winners) == 1 and len(losers) == 1
+        with sqlite3.connect(db_path) as conn:
+            active = conn.execute(
+                "select count(*) from topics_mapping_table where is_active = 't'"
+            ).fetchone()[0]
+        assert active == 1
+        for m in managers:
+            m.close()
+
+    def test_the_constraint_only_binds_active_rows(self, manager):
+        """Soft delete keeps the old row, so the name has to be reusable."""
+        first = manager.create_new_topic()
+        manager.soft_delete()
+        second = manager.create_new_topic()
+        assert first != second
+
+    def test_deleting_an_already_deleted_topic_raises(self, manager):
+        """The UPDATE has to filter on is_active, or the second delete finds the
+        row it already deactivated and reports success."""
+        manager.create_new_topic()
+        manager.soft_delete()
+        with pytest.raises(TopicNotFound):
+            manager.soft_delete()
+
+    def test_a_name_can_cycle_through_create_and_delete_repeatedly(self, manager, db_path):
+        """The constraint must be partial. A plain unique on (topic_name,
+        is_active) passes the first cycle and then refuses the second delete,
+        because a soft-deleted row with that name already exists."""
+        ids = []
+        for _ in range(3):
+            ids.append(manager.create_new_topic())
+            manager.soft_delete()
+        assert len(set(ids)) == 3
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "select count(*) from topics_mapping_table where topic_name = 'retrieval'"
+            ).fetchone()[0]
+        assert rows == 3, "every cycle keeps its own row"
+
+    def test_the_name_lookup_uses_the_index(self, manager, db_path):
+        """Without it every check is a full table scan (211us at 10k topics)."""
+        manager.create_new_topic()
+        with sqlite3.connect(db_path) as conn:
+            plan = conn.execute(
+                "explain query plan select topic_id from topics_mapping_table "
+                "where topic_name = ? and is_active = 't' limit 1",
+                ("retrieval",),
+            ).fetchone()[-1]
+        assert "SEARCH" in plan and "INDEX" in plan, plan
+
+
+class TestQueryCounts:
+    """Bug 4.54: each operation used to run its query twice, and the gap between
+    the check and the act was the window bug 4.52 exploited."""
+
+    def statements(self, manager):
+        seen = []
+        conn = manager._TopicManager__repo._TopicPoolMetaHandler__connection
+        conn.set_trace_callback(lambda sql: seen.append(sql.strip().split()[0].lower()))
+        return seen
+
+    def test_get_topic_id_runs_one_select(self, manager):
+        manager.create_new_topic()
+        seen = self.statements(manager)
+        manager.get_topic_id()
+        assert seen.count("select") == 1
+
+    def test_soft_delete_runs_one_statement(self, manager):
+        manager.create_new_topic()
+        seen = self.statements(manager)
+        manager.soft_delete()
+        assert seen.count("select") == 0
+        assert seen.count("update") == 1
+
+    def test_create_runs_one_statement(self, manager):
+        seen = self.statements(manager)
+        manager.create_new_topic()
+        assert seen.count("select") == 0
+        assert seen.count("insert") == 1
+
+
+class TestListing:
+    """Bug 4.56: nothing could ask what topics exist."""
+
+    def test_lists_active_topics_oldest_first(self, db_path):
+        for name in ("alpha", "beta", "gamma"):
+            with TopicManager(name, None, db_path) as m:
+                m.create_new_topic()
+        with TopicManager("alpha", None, db_path) as m:
+            assert [t.topic_name for t in m.list_topics()] == ["alpha", "beta", "gamma"]
+
+    def test_a_soft_deleted_topic_is_not_listed(self, db_path):
+        with TopicManager("alpha", None, db_path) as m:
+            m.create_new_topic()
+        with TopicManager("beta", None, db_path) as m:
+            m.create_new_topic()
+            m.soft_delete()
+            assert [t.topic_name for t in m.list_topics()] == ["alpha"]
+
+    def test_each_row_carries_its_id_and_stamp(self, manager):
+        topic_id = manager.create_new_topic()
+        topic = manager.list_topics()[0]
+        assert topic.topic_id == topic_id
+        assert topic.topic_name == "retrieval"
+        assert topic.created_at.endswith("+00:00")
+
+    def test_an_empty_registry_lists_nothing(self, manager):
+        assert manager.list_topics() == []
+
+
+class TestOneTimestampSource:
+    """Bug 4.58: utc_now was defined four times over."""
+
+    def test_every_module_uses_the_shared_one(self):
+        import ast
+        import pathlib
+
+        modules = [
+            "memory/topic_pool/topic_manager.py",
+            "memory/topic_pool/topic_pool_repo/topic_pool_meta_handler.py",
+            "memory/topic_pool/project_pool/project_data_repo/project_meta_data.py",
+            "memory/topic_pool/project_pool/conversation_pool/"
+            "fullconversation_repository/fullconversation_repository.py",
+        ]
+        for path in modules:
+            tree = ast.parse(pathlib.Path(path).read_text())
+            defined = [
+                node.name
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "utc_now"
+            ]
+            assert defined == [], f"{path} defines its own utc_now"

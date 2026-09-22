@@ -16,8 +16,10 @@ comparison meaningful.
 
 ## State
 
-`TopicManager` is built: it creates a topic, reads its id back, and soft-deletes
-it. `topic_pool_repo/` holds the storage behind it — see its README.
+`TopicManager` is built: it creates a topic, reads its id back, lists the active
+ones, and soft-deletes it. Each of those is a single SQL statement, and
+uniqueness is enforced by a partial index rather than by a check before the
+write. `topic_pool_repo/` holds the storage behind it — see its README.
 
 What is still missing:
 

@@ -3,26 +3,26 @@ import threading
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, List, NamedTuple
 
 from config import Config, get_logger
+from memory.memory_pool_exceptions import TopicAlreadyExists, TopicNotFound
+from memory.timestamps import utc_now, as_timestamp
 from memory.sqlite_setup import connect, enable_wal
 
 logger = get_logger(__name__)
 
 
-def utc_now() -> str:
-    """Canonical timestamp for every row this repository writes."""
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def as_timestamp(value: str | date | datetime | None) -> str:
-    """Normalise a caller-supplied stamp to the stored TEXT form."""
-    if value is None:
-        return utc_now()
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    return str(value)
+
+
+class Topic(NamedTuple):
+    """One row of topics_mapping_table, as the listing returns it."""
+
+    topic_id: str
+    topic_name: str
+    created_at: str
 
 
 class TopicPoolMetaHandler:
@@ -68,6 +68,12 @@ class TopicPoolMetaHandler:
                     is_active CHAR(2)
                     );
                     """)
+            curr.execute(
+                """
+                create unique index if not exists idx_active_topic_name
+                on topics_mapping_table(topic_name) where is_active = 't';
+                """
+            )
         logger.debug(
             "Topic registry ready at %s (journal=%s)",
             self.topic_db_path,
@@ -78,9 +84,10 @@ class TopicPoolMetaHandler:
         with self.__reading() as curr:
             curr.execute(
                 """
-                select 1 from topics_mapping_table where topic_name = ? and is_active = ? limit 1;
+                select 1 from topics_mapping_table
+                where topic_name = ? and is_active = 't' limit 1;
             """,
-                (topic_name, 't' ,),
+                (topic_name,),
             )
             row = curr.fetchone()
             return row[0] if row is not None else None
@@ -89,9 +96,10 @@ class TopicPoolMetaHandler:
         with self.__reading() as curr:
             curr.execute(
                 """
-                select topic_id from topics_mapping_table where topic_name = ? and is_active = ? limit 1;
+                select topic_id from topics_mapping_table
+                where topic_name = ? and is_active = 't' limit 1;
             """,
-                (topic_name, 't',),
+                (topic_name,),
             )
             row = curr.fetchone()
             return row[0] if row is not None else None
@@ -99,15 +107,46 @@ class TopicPoolMetaHandler:
     def __create_new_topic(
         self, topic_name: str, topic_id: str, created_at: str
     ) -> None:
+        try:
+            with self.__writing() as curr:
+                curr.execute(
+                    """
+                insert into topics_mapping_table(topic_id , topic_name , created_at , is_active)
+                values (? , ? , ? , ?);
+                """,
+                    (topic_id, topic_name, created_at, 't'),
+                )
+        except sqlite3.IntegrityError as error:
+            # The partial unique index decides this, not a prior read, so two
+            # writers racing the same name cannot both win.
+            raise TopicAlreadyExists(topic_name) from error
+        logger.debug("Stored topic %s as %s", topic_name, topic_id)
+
+    def __soft_delete_by_name(self, topic_name: str) -> str:
         with self.__writing() as curr:
+            row = curr.execute(
+                """
+                update topics_mapping_table set is_active = 'f'
+                where topic_name = ? and is_active = 't'
+                returning topic_id;
+                """,
+                (topic_name,),
+            ).fetchone()
+            if row is None:
+                raise TopicNotFound(topic_name)
+        logger.debug("Marked topic %r inactive (%s)", topic_name, row[0])
+        return row[0]
+
+    def __get_all_topics(self) -> List[Topic]:
+        with self.__reading() as curr:
             curr.execute(
                 """
-            insert into topics_mapping_table(topic_id , topic_name , created_at , is_active)
-            values (? , ? , ? , ?);
-            """,
-                (topic_id, topic_name, created_at , 't'),
+                select topic_id, topic_name, created_at from topics_mapping_table
+                where is_active = 't'
+                order by datetime(created_at), created_at, rowid;
+                """
             )
-        logger.debug("Stored topic %s as %s", topic_name, topic_id)
+            return [Topic(*row) for row in curr.fetchall()]
 
     def __soft_delete(self , topic_id):
         with self.__writing() as curr:
@@ -135,6 +174,14 @@ class TopicPoolMetaHandler:
         self.__create_new_topic(topic_name, topic_id, created)
     def soft_delete(self , topic_id):
         self.__soft_delete(topic_id)
+
+    def soft_delete_by_name(self, topic_name: str) -> str:
+        """Deactivate the active topic with this name; returns its id."""
+        return self.__soft_delete_by_name(topic_name)
+
+    def get_all_topics(self) -> List[Topic]:
+        """Every active topic, oldest first."""
+        return self.__get_all_topics()
 
     def close(self):
         with self._lock:
