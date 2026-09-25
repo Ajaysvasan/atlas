@@ -272,6 +272,48 @@ tens of snapshots; linear in round trips once memory is a retrieval source.
 - [ ] The second option moves similarity below the store interface — decide it
       with the vector-store protocol from the retrieval design, not on its own
 
+### 4.3 Move the environment from conda to uv
+
+The project currently runs on two interpreters that disagree. `/usr/bin/python3`
+(3.14.7) has no `psycopg` or `diskannpy`; the conda env `fyp2` (3.11.15) has
+both. The suite reports 916 passed / 8 skipped on the first and 924 passed on
+the second, and `scripts/smoke.py` only runs on the second. Which interpreter a
+command needs is currently knowledge in `CLAUDE.md` rather than something the
+project enforces.
+
+Nothing reproduces the conda env: there is no `environment.yml`, so it was built
+by hand, and `requirements.txt` declares 17 packages against the 115 actually
+installed. A fresh clone cannot recreate the environment the tests pass in.
+
+`uv` fixes the reproducibility half — a real lockfile, a pinned interpreter, and
+`uv run` so the right Python is chosen by the project rather than remembered by
+the developer.
+
+The blocking question — whether `diskannpy` survives the move — is **answered,
+and the answer is yes, with one permanent constraint.** It is already a plain
+PyPI wheel installed by pip, not a conda package: `pip show` puts it in the
+env's `site-packages` with `INSTALLER: pip`, built from
+`cp311-cp311-manylinux_2_28_x86_64`. So conda was never required for DiskANN;
+conda was only how Python 3.11 got provisioned, and `uv python pin 3.11` does
+that directly.
+
+The constraint is the Python version. Across its **entire release history** —
+0.4.0 through 0.7.0 — `diskannpy` has published wheels for `cp37` through
+`cp311` and nothing newer. That is why `/usr/bin/python3` (3.14.7) has no
+`diskannpy` and never will without a source build. The project is pinned at
+Python 3.11 until upstream ships newer wheels, and 0.7.0 is the latest release.
+
+- [x] `diskannpy` checked — a pip wheel, cp311 is the ceiling, uv can pin 3.11
+- [ ] Pin one interpreter and generate a real lock from the installed set, not
+      from the 17-line `requirements.txt`
+- [ ] Split the dependencies: the mocked suite needs neither `psycopg` nor
+      `diskannpy`, which is the only reason it runs on the system Python at all
+- [ ] Update `CLAUDE.md` and `test/HOW_TO.md` — both currently document the
+      two-interpreter split as a fact about the project
+- [ ] Not urgent: `uv` is already installed, and the current split works as long
+      as it stays written down. Do it when the environment next breaks, or
+      before anyone else clones this
+
 ---
 
 ## Decisions on record
