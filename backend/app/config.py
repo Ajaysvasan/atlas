@@ -16,7 +16,7 @@ class Config:
     """Configuration class for the backend application."""
 
     APP_NAME = "Final Year Project Backend"
-    DATASET_PATH = Path("dataset").resolve().parent / "dataset"
+    DATASET_PATH = Path(__file__).resolve().parent / "dataset"
     DEBUG = False
     LOG_FILE = "log/app.log"
     ABS_PATH = Path(__file__).resolve().parent
