@@ -13,7 +13,7 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Status:** Fixed. Logging moved to `logging_setup.py`, which resolves a relative `LOG_FILE` against the package directory once, in `configure()`. Verified by running `configure()` from `app/` and from `/tmp`: both resolve to `app/log/app.log`.
 - **Explanation:** `Config.LOG_FILE` defaults to `"log/app.log"`. In `get_logger()`, non-absolute paths are joined against `os.path.dirname(os.path.abspath(__file__))` (`app/log/app.log`). However, execution invocations from different working directories cause log handlers to create disconnected log files across both `app/log/app.log` and `./log/app.log`.
 
-### Bug 1.2: `Config.DATASET_PATH` Is Resolved Against the Working Directory (`config.py`)
+### Bug 1.2: `Config.DATASET_PATH` Is Resolved Against the Working Directory (`config.py`) - FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
