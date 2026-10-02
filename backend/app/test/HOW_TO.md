@@ -3,8 +3,11 @@
 This document outlines how to execute the comprehensive test suites for this backend service. The testing architecture is organized by modules and requires specific execution paths to avoid dependency lookup failures.
 
 ## Prerequisites
-- You must have `pytest` installed (`pip install pytest`).
+- `uv` installed, and `uv sync --all-extras` run once in `app/`. That builds
+  `.venv` from `pyproject.toml` + `uv.lock`, fetching CPython 3.11 if needed.
 - Tests must be executed from the root `app/` directory (where this project is situated).
+- Nothing to activate and no `PYTHONPATH` to set: `uv run` picks the interpreter,
+  and the root `conftest.py` puts the project directory on `sys.path`.
 
 ## Directory Structure
 The `test/` directory is logically separated:
@@ -15,35 +18,37 @@ The `test/` directory is logically separated:
 
 ## How to Run the Tests
 
-To ensure that Python correctly resolves module imports (`data_layer`, `memory`, etc.), **you must prefix your commands with `PYTHONPATH=.`** when running tests from the root `/app` folder.
+Prefix every command with **`uv run`**. It resolves the pinned interpreter and
+the locked dependencies, so the tests cannot silently run against whatever Python
+happens to be on `PATH`.
 
 ### 1. Run the Entire Test Suite
 To execute all test files across all layers simultaneously:
 ```bash
-PYTHONPATH=. pytest test/ -v
+uv run pytest test/ -v
 ```
 
 ### 2. Run Only Data Layer Tests
 If you only want to validate changes made to the `data_layer`:
 ```bash
-PYTHONPATH=. pytest test/data_layer_testing/ -v
+uv run pytest test/data_layer_testing/ -v
 ```
 
 ### 3. Run Only Memory Layer Tests
 If you only want to validate changes made to the `memory` layer:
 ```bash
-PYTHONPATH=. pytest test/memory_layer_testing/ -v
+uv run pytest test/memory_layer_testing/ -v
 ```
 
 ### 4. Run a Specific Test File
 If you are iterating on a single file (for instance, the new snapshot bugs):
 ```bash
-PYTHONPATH=. pytest test/memory_layer_testing/test_snapshot_bugs.py -v
+uv run pytest test/memory_layer_testing/test_snapshot_bugs.py -v
 ```
 
 ### 5. Run the Live Tests (real PostgreSQL)
 ```bash
-PYTHONPATH=. pytest test/live_testing/ -v
+uv run pytest test/live_testing/ -v
 ```
 These skip themselves unless a real server is reachable, so they are safe to
 run anywhere. To see why they skipped, add `-rs`.
@@ -63,7 +68,7 @@ failed on the first contact with a real server.
 
 | Requirement | Command |
 | :--- | :--- |
-| an interpreter with `psycopg` | the `fyp2` conda env, not `/usr/bin/python3` |
+| `psycopg` on the interpreter | `uv sync --all-extras` (it is a locked dependency) |
 | the pgvector extension | `sudo dnf install pgvector` (Fedora's package, not PGDG's `pgvector_18`) |
 | the database | `createdb Vectors`, then `CREATE EXTENSION vector;` |
 
@@ -80,6 +85,7 @@ collection would have already installed the stub.
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError` (e.g., `No module named 'memory'`)**: This happens when Python's import paths aren't correctly resolving the root folder. Make sure you are in the `app/` directory and are prepending `PYTHONPATH=.` before calling `pytest`.
+- **`ModuleNotFoundError` (e.g., `No module named 'memory'`)**: The project directory is not on `sys.path`. Run from `app/` and go through `uv run pytest`, which finds the root `conftest.py` that inserts it. Invoking a bare `pytest` from elsewhere will not.
 - **`sqlite3.OperationalError: unable to open database file`**: Ensure that the `data/` directory (or wherever local DBs are initialized) exists on your filesystem.
-- **`ModuleNotFoundError: No module named 'psycopg'`**: Tests may try to connect to the external PostgreSQL database. The memory tests mock this internally, but if it fails, ensure dependencies in `requirements.txt` are installed and `.env` is populated.
+- **`ModuleNotFoundError: No module named 'psycopg'`**: You are not on the project environment. `psycopg` is a locked dependency, so `uv run` always has it; a bare `python`/`pytest` may not. The mocked suite tolerates its absence by design, which is why this surfaces as skipped live tests rather than an error.
+- **8 tests skipped**: the live tests could not reach PostgreSQL. `uv run pytest test/live_testing/ -rs` prints the precondition that failed, and `uv run python scripts/smoke.py` checks the whole setup at once.

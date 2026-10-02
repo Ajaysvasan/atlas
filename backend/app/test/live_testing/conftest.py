@@ -22,7 +22,7 @@ def _unavailable() -> str | None:
     try:
         metadata.version("psycopg")
     except metadata.PackageNotFoundError:
-        return "psycopg is not installed in this interpreter (try the conda env)"
+        return "psycopg is not installed in this interpreter (use `uv run pytest`)"
 
     import psycopg
 

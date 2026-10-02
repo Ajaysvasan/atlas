@@ -14,3 +14,5 @@ dataset
 *.db-shm
 disk_ann_index
 models/
+.venv/
+.pytest_cache/

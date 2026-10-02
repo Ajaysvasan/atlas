@@ -1,0 +1,72 @@
+[project]
+name = "atlas"
+version = "0.1.0"
+description = "RAG backend: multi-format ingestion, a DiskANN index, and a Topic -> Project -> Conversation -> Snapshot memory layer"
+readme = "README.md"
+
+# Pinned to 3.11 by diskannpy, not by preference. Across its entire release
+# history (0.4.0 - 0.7.0) it has published wheels for cp37 to cp311 and nothing
+# newer, so 3.12+ has no on-disk ANN index without a source build. This is the
+# reason the project cannot simply run on the system Python. See todo.md 4.3.
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    # --- Numerical / ML -------------------------------------------------------
+    "numpy==1.25.0",
+    "sentence-transformers==5.6.0", # all-MiniLM-L6-v2, truncated to 128 dims
+    "huggingface-hub==1.21.0",      # download_models/download_draft_model.py
+    # Left unpinned on purpose: the wheel that suits your driver varies. The
+    # lock pins whatever resolved (2.12.1, a cu130 build straight from PyPI).
+    # For a specific CUDA version see https://pytorch.org/get-started/locally/
+    "torch>=2.6",
+
+    # --- Vector stores --------------------------------------------------------
+    "diskannpy==0.7.0",             # data layer: on-disk ANN index
+    "pgvector==0.5.0",              # adapts numpy arrays to the `vector` column
+    "psycopg[binary]==3.3.4",       # memory layer: pgvector store; needs a
+                                    # PostgreSQL with the `vector` extension
+
+    # --- Document ingestion ---------------------------------------------------
+    # The extractor falls back to decoding any other file as text, so a missing
+    # entry here costs fidelity on that format, never the whole run.
+    "python-docx==1.2.0",           # .docx, including tables and heading styles
+    "PyPDF2==3.0.1",                # .pdf
+    "python-pptx==1.0.2",           # .pptx
+    "beautifulsoup4==4.13.5",       # .html / .xml tag stripping
+    "chardet==7.4.3",               # encoding detection for the text fallback
+    "textract==2.0.0",              # .doc, .odt, .rtf, .epub and other binaries
+
+    # --- Configuration --------------------------------------------------------
+    "python-dotenv==1.2.2",         # the five DB_* settings; see .env.example
+
+    # --- HTTP surface ---------------------------------------------------------
+    # Declared ahead of use: no routes exist yet (see todo.md section 3).
+    "fastapi==0.136.3",
+    "uvicorn==0.48.0",
+]
+
+[project.optional-dependencies]
+# Reads .xlsx / .xlsm natively instead of going through textract.
+xlsx = ["openpyxl==3.1.5"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+# llama-cpp-python is deliberately absent from every group above. It must be
+# compiled with backend-specific CMAKE_ARGS (CUDA, ROCm, Metal or CPU), and
+# installing it as a plain dependency silently produces a CPU-only build even on
+# a GPU machine. Install it separately, after `uv sync`:
+#
+#     uv run python download_models/install_llama_cpp.py
+#
+# That script detects the GPU and sets the flags. Verified with 0.3.35.
+
+[tool.uv]
+# Bare modules at the project root (config.py, main.py, memory/, data_layer/),
+# not a src-layout package, so there is nothing to build or install.
+package = false
+
+# Use only a uv-managed interpreter, never one found on PATH. Without this uv
+# picks up the old conda env's 3.11 because it satisfies the constraint, and the
+# environment this migration exists to replace quietly stays in the loop.
+python-preference = "only-managed"

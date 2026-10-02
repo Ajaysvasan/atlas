@@ -9,12 +9,21 @@ A Python RAG (Retrieval-Augmented Generation) backend system that ingests multi-
 ## Running the Application
 
 ```bash
-# From the app/ directory
-python main.py                    # Interactive CLI mode
-python main.py --verbose          # Debug logging, on the console as well as the file
-python main.py --log-json         # One JSON object per line instead of text
-python main.py --log-file PATH    # Write somewhere other than log/app.log
+# From the app/ directory. uv resolves the interpreter and deps from
+# pyproject.toml + uv.lock, so there is nothing to activate.
+uv run python main.py                    # Interactive CLI mode
+uv run python main.py --verbose          # Debug logging, console as well as file
+uv run python main.py --log-json         # One JSON object per line instead of text
+uv run python main.py --log-file PATH    # Write somewhere other than log/app.log
 ```
+
+First checkout: `uv sync --all-extras` builds `.venv` from the lock, downloading
+CPython 3.11 if needed. **3.11 is a hard ceiling, not a preference** —
+`diskannpy` has never published a wheel past `cp311` in its entire release
+history, so a newer Python has no on-disk ANN index without a source build.
+`llama-cpp-python` is deliberately not a dependency and is installed separately
+by `uv run python download_models/install_llama_cpp.py`, which detects the GPU
+and sets the `CMAKE_ARGS` a plain install would get wrong.
 
 `LOG_LEVEL`, `LOG_FILE`, `LOG_CONSOLE_LEVEL`, `LOG_FORMAT=json`, `LOG_MAX_BYTES`
 and `LOG_BACKUP_COUNT` override the flags, so logging can be retuned without a
@@ -22,21 +31,23 @@ code change.
 
 ## Running Tests
 
-Tests must be run from the `app/` directory with `PYTHONPATH` set:
+Tests run from the `app/` directory. No `PYTHONPATH` and no activation — the
+root `conftest.py` puts the project directory on `sys.path`, and `uv run`
+supplies the interpreter:
 
 ```bash
-PYTHONPATH=. pytest test/ -v                            # All tests
-PYTHONPATH=. pytest test/data_layer_testing/ -v         # Data layer tests
-PYTHONPATH=. pytest test/memory_layer_testing/ -v       # Memory layer tests
-PYTHONPATH=. pytest test/stress_testing/ -v             # Stress tests
-PYTHONPATH=. pytest test/logging_testing/ -v            # Logging tests
-PYTHONPATH=. pytest test/live_testing/ -v               # Real PostgreSQL; self-skipping
-PYTHONPATH=. pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v  # Single test
+uv run pytest test/ -v                            # All tests
+uv run pytest test/data_layer_testing/ -v         # Data layer tests
+uv run pytest test/memory_layer_testing/ -v       # Memory layer tests
+uv run pytest test/stress_testing/ -v             # Stress tests
+uv run pytest test/logging_testing/ -v            # Logging tests
+uv run pytest test/live_testing/ -v               # Real PostgreSQL; self-skipping
+uv run pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v
 ```
 
-Counts differ by interpreter, and that is expected: **916 passed, 8 skipped**
-under `/usr/bin/python3`, **924 passed** under the `fyp2` conda env, which has
-`psycopg` and a reachable server. `-rs` prints why anything skipped.
+**924 passed** is the expected result. If 8 of them skip, the live tests could
+not reach a server; `-rs` prints which precondition failed, and
+`scripts/smoke.py` checks the whole setup and names what is missing.
 
 Most of the suite swaps `psycopg` for a `MagicMock`, which is what lets it run
 with no database — but a mock adapts anything and returns anything, so it cannot
@@ -45,8 +56,7 @@ that kind, and both passed the mocked suite). `test/live_testing/` runs the same
 code against a real server and skips itself when there is none. The root
 `conftest.py` imports the real `psycopg` first so the `setdefault` guards on
 every mock stand down where the real driver exists; without it the live tests
-skip even on a machine that has a server. `scripts/smoke.py` checks the whole
-setup and names what is missing.
+skip even on a machine that has a server.
 
 ## Architecture
 
