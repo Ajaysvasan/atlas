@@ -87,3 +87,26 @@ empty range (**bug 4.3**).
 - The pgvector connection `SnapShot` opens is never closed (**bug 4.44**).
 - The chunk-level drill-down is written on every snapshot and read by nothing
   (`todo.md` 1.2).
+
+
+## Schema migrations (`schema_migrations.py`)
+
+One conversation database is shared by `FullConversationRepository` and
+`ConversationVectorMetaDataRepository`, and either may open it first, so both
+call `migrate()` before any statement. It is keyed on `PRAGMA user_version`,
+which is what distinguishes one schema generation from the next — the
+"does this table already have the column" check cannot, and that matters as soon
+as there is more than one version.
+
+Version 1 introduced `conversation_id` on the turn tables; version 2 introduced
+it plus the monotonic `seq` on `cumulative_vector_meta_data`.
+`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, and
+`full_conversation` needed a new primary key, which SQLite cannot alter in
+place. Tables are therefore rebuilt — create, copy, drop, rename, with foreign
+keys off for the duration, since a pragma is ignored inside a transaction.
+
+Existing rows are assigned `conversation_id = 'legacy'`. That is not a
+placeholder: before the column existed, a project database held exactly one
+conversation. The value is pinned by a test against its literal, because it is
+written into real databases — changing it would orphan every row a previous
+migration assigned rather than migrating anything.

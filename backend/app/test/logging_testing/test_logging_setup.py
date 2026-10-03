@@ -207,7 +207,7 @@ class TestOneLevelReachesEveryModule:
         [
             "data_layer.ingestion.Chunker.chunker",
             "data_layer.ingestion.embedding.EmbeddingManager",
-            "memory.topic_pool.project_pool.conversation_pool.snapshot",
+            "memory.snapshot",
             "cli.cli_interface",
         ],
     )

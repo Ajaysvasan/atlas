@@ -21,6 +21,7 @@ from memory.sqlite_setup import (
 )
 
 PROJECT_ID = "unit_test_project"
+CONVERSATION_ID = "conv_abc"
 
 _MOCK_VECTOR_REPO = (
     "memory.topic_pool.project_pool.conversation_pool"
@@ -30,8 +31,7 @@ _MOCK_VECTOR_REPO = (
 
 @pytest.fixture
 def repo(tmp_path):
-    r = ConversationVectorMetaDataRepository(
-        conversation_path=tmp_path, project_id=PROJECT_ID
+    r = ConversationVectorMetaDataRepository(        conversation_path=tmp_path, project_id=PROJECT_ID, conversation_id="conv_abc"
     )
     yield r
     r.close()
@@ -97,7 +97,7 @@ class TestSchema:
             repo.insert_map_table(300, 1)
 
     def test_db_file_created_at_expected_path(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, "proj_schema")
+        repo = ConversationVectorMetaDataRepository(tmp_path, "proj_schema", "conv_abc")
         expected = tmp_path / "proj_schema_conversation.db"
         assert expected.exists()
         repo.close()
@@ -116,9 +116,9 @@ class TestSchema:
 
     def test_repeated_init_is_idempotent(self, tmp_path):
         """Creating two repos on the same path must not raise or duplicate tables."""
-        r1 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        r1 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         r1.close()
-        r2 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        r2 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         with sqlite3.connect(r2.db_path) as conn:
             tables = [r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -245,13 +245,28 @@ class TestCumulativeVectorMetaData:
         assert row is not None
         assert row[0] == 501
 
-    def test_chronological_order_bug_4_17(self, repo):
-        """Regression: IDs must come back sorted by datetime(created_at), not TEXT sort."""
+    def test_order_follows_write_order_not_created_at(self, repo):
+        """Supersedes the Bug 4.17 guard, which sorted on datetime(created_at).
+
+        Ordering now follows `seq`, allocated monotonically on write, because
+        `created_at` is caller-supplied TEXT with no format enforcement — the
+        reason Bug 4.31 was possible. The assertion is deliberately the inverse
+        of the old one: timestamps that disagree with write order must not
+        reorder anything, so a caller cannot perturb the order SnapShot's
+        cursors index into by passing an odd timestamp.
+        """
         repo.insert_cumulative_vector_meta_data(3, "s3", "2026-08-03", PROJECT_ID, 3)
         repo.insert_cumulative_vector_meta_data(1, "s1", "2026-08-01", PROJECT_ID, 1)
         repo.insert_cumulative_vector_meta_data(2, "s2", "2026-08-02", PROJECT_ID, 2)
         ids = [row[0] for row in repo.get_cumulative_vector_meta_data_ids()]
-        assert ids == [1, 2, 3]
+        assert ids == [3, 1, 2]
+
+    def test_seq_is_monotonic_and_gapless(self, repo):
+        for i in (5, 3, 9):
+            repo.insert_cumulative_vector_meta_data(
+                i, f"s{i}", "2026-08-01", PROJECT_ID, i
+            )
+        assert repo.get_highest_snapshot_seq() == 3
 
     def test_empty_batch_get_returns_empty(self, repo):
         assert repo.batch_get_cumulative_vector_meta_data([]) == []
@@ -303,17 +318,23 @@ class TestGetLatestSummary:
         )
         assert repo.get_latest_summary() == "second"
 
-    def test_sub_second_ordering_independent_of_insert_order(self, repo):
-        """The later timestamp wins even when it is inserted first."""
-        repo.insert_cumulative_vector_meta_data(
-            1, "second", "2026-08-23T05:51:05.940217+00:00", "p", 6
-        )
-        repo.insert_cumulative_vector_meta_data(
-            2, "first", "2026-08-23T05:51:05.280183+00:00", "p", 5
-        )
-        assert repo.get_latest_summary() == "second"
+    def test_the_last_written_wins_whatever_its_timestamp_says(self, repo):
+        """`latest` means last written, not largest timestamp.
 
-    def test_snapshot_ids_ordered_by_sub_second_timestamp(self, repo):
+        Two snapshots in the same second used to tie under datetime() and the
+        rolling summary could feed the wrong predecessor into the next prompt.
+        `seq` removes the tie entirely, so the timestamps here are deliberately
+        in the opposite order to the writes.
+        """
+        repo.insert_cumulative_vector_meta_data(
+            1, "written first", "2026-08-23T05:51:05.940217+00:00", "p", 6
+        )
+        repo.insert_cumulative_vector_meta_data(
+            2, "written second", "2026-08-23T05:51:05.280183+00:00", "p", 5
+        )
+        assert repo.get_latest_summary() == "written second"
+
+    def test_snapshot_ids_come_back_in_write_order(self, repo):
         """
         SnapShot's cursors index into this list, so an unstable order silently
         points them at the wrong snapshots.
@@ -327,18 +348,18 @@ class TestGetLatestSummary:
         repo.insert_cumulative_vector_meta_data(
             20, "b", "2026-08-23T05:51:05.500000+00:00", "p", 1
         )
-        assert repo.get_cumulative_vector_meta_data_ids() == [(10,), (20,), (30,)]
+        assert repo.get_cumulative_vector_meta_data_ids() == [(30,), (10,), (20,)]
 
     def test_returns_summary_text_after_single_insert(self, repo):
         repo.insert_cumulative_vector_meta_data(1, "first summary", "2026-08-01", PROJECT_ID, 10)
         assert repo.get_latest_summary() == "first summary"
 
-    def test_returns_most_recent_by_datetime_not_insertion_order(self, repo):
-        """Inserts in reverse chronological order; must still return the latest."""
-        repo.insert_cumulative_vector_meta_data(3, "oldest", "2026-08-01", PROJECT_ID, 5)
-        repo.insert_cumulative_vector_meta_data(1, "newest", "2026-08-10", PROJECT_ID, 5)
-        repo.insert_cumulative_vector_meta_data(2, "middle", "2026-08-05", PROJECT_ID, 5)
-        assert repo.get_latest_summary() == "newest"
+    def test_a_disordered_timestamp_does_not_change_which_is_latest(self, repo):
+        """The one written last is the latest, even with the oldest timestamp."""
+        repo.insert_cumulative_vector_meta_data(3, "first", "2026-08-01", PROJECT_ID, 5)
+        repo.insert_cumulative_vector_meta_data(1, "second", "2026-08-10", PROJECT_ID, 5)
+        repo.insert_cumulative_vector_meta_data(2, "third", "2026-08-05", PROJECT_ID, 5)
+        assert repo.get_latest_summary() == "third"
 
     def test_sequential_inserts_always_return_last(self, repo):
         for i in range(1, 6):
@@ -499,7 +520,7 @@ class TestMapTable:
 
 class TestStress:
     def test_five_hundred_snapshot_pipeline(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         chunk_recs = [(f"c{i}", f"text {i}", "2026-08-01", "typeA") for i in range(500)]
         repo.batch_insert_summary_chunks(chunk_recs)
         sv_recs = [(i, f"c{i}", PROJECT_ID) for i in range(500)]
@@ -510,7 +531,7 @@ class TestStress:
         repo.close()
 
     def test_two_hundred_map_records_exact_count(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         repo.batch_insert_summary_chunks(
             [(f"c{i}", "t", "2026-08-01", "t") for i in range(100)]
         )
@@ -530,7 +551,7 @@ class TestStress:
         This used to close the repository and open its own sqlite3 connections,
         which tested SQLite rather than anything in this module.
         """
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         repo.batch_insert_cumulative_vector_meta_data(
             [(i, f"s{i}", "2026-08-01", PROJECT_ID, i) for i in range(100)]
         )
@@ -553,7 +574,7 @@ class TestStress:
         repo.close()
 
     def test_full_pipeline_one_hundred_snapshots(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         for i in range(100):
             cid = f"c{i}"
             repo.batch_insert_summary_chunks([(cid, f"text {i}", "2026-08-01", "t")])
@@ -577,7 +598,7 @@ class TestStress:
 
     def test_get_latest_summary_after_five_hundred_inserts(self, tmp_path):
         """get_latest_summary must return the entry with the latest date even at scale."""
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         for i in range(1, 501):
             year = 2025 + (i // 366)
             day = (i % 365) or 1
@@ -614,12 +635,12 @@ class TestJournalMode:
         assert self._mode(repo.db_path) == "wal"
 
     def test_full_conversation_repository_opens_in_wal(self, tmp_path):
-        full = FullConversationRepository(tmp_path, PROJECT_ID, "project")
+        full = FullConversationRepository(tmp_path, PROJECT_ID, "project", CONVERSATION_ID)
         assert full.journal_mode == "wal"
 
     def test_both_repositories_share_the_one_file_and_its_mode(self, tmp_path):
-        full = FullConversationRepository(tmp_path, PROJECT_ID, "project")
-        meta = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        full = FullConversationRepository(tmp_path, PROJECT_ID, "project", CONVERSATION_ID)
+        meta = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         assert Path(full.db_path) == Path(meta.db_path)
         assert meta.journal_mode == "wal"
         meta.close()
@@ -656,7 +677,7 @@ class TestJournalMode:
         legacy.close()
         assert self._mode(db_path) == "delete"
 
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         assert repo.journal_mode == "wal"
         assert _row_count(db_path, "summary_chunks") == 1
         repo.close()
@@ -798,7 +819,7 @@ class TestThreadSafety:
     def test_close_waits_for_a_write_in_flight(self, tmp_path):
         """close() takes the same lock, so it cannot pull the connection out
         from under a writer that is mid-transaction on another thread."""
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         inside = threading.Event()
         release = threading.Event()
         error: list = []
@@ -829,7 +850,7 @@ class TestThreadSafety:
         assert _row_count(repo.db_path, "summary_chunks") == 2
 
     def test_close_is_idempotent(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID)
+        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
         repo.close()
         repo.close()
 

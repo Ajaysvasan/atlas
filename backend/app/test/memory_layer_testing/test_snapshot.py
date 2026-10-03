@@ -16,15 +16,15 @@ from unittest.mock import MagicMock, call, patch
 import numpy as np
 import pytest
 
-from memory.topic_pool.project_pool.conversation_pool.snapshot import SnapShot
+from memory.snapshot import SnapShot
 from memory.memory_pool_exceptions import (
     InvalidCursorException,
     MisMatchCount,
     NullPointerException,
 )
 
-_META_REPO = "memory.topic_pool.project_pool.conversation_pool.snapshot.ConversationVectorMetaDataRepository"
-_VEC_MGR   = "memory.topic_pool.project_pool.conversation_pool.snapshot.ConversationVectorManager"
+_META_REPO = "memory.snapshot.ConversationVectorMetaDataRepository"
+_VEC_MGR   = "memory.snapshot.ConversationVectorManager"
 
 _DIM   = 3
 _QUERY = np.array([0.1, 0.2, 0.3], dtype=np.float32)
@@ -61,7 +61,7 @@ def patched():
         mock_vec  = MockVec.return_value
         mock_meta.get_cumulative_vector_meta_data_ids.return_value = _SNAP_LIST
         mock_vec.get_vector.return_value = _VEC.copy()
-        snap = SnapShot(conversation_dir="/tmp/snap_test", project_id="test_proj", project_name="TestProject")
+        snap = SnapShot(conversation_dir="/tmp/snap_test", project_id="test_proj", project_name="TestProject", conversation_id="conv_abc")
         yield snap, mock_meta, mock_vec
 
 
@@ -71,7 +71,7 @@ def patched():
 
 class TestCursorInit:
     def test_cursors_start_at_minus_one_before_any_add(self):
-        snap = SnapShot(conversation_dir="/tmp/snap_test", project_id="test_proj", project_name="TestProject")
+        snap = SnapShot(conversation_dir="/tmp/snap_test", project_id="test_proj", project_name="TestProject", conversation_id="conv_abc")
         assert snap._SnapShot__left_cursor == -1
         assert snap._SnapShot__right_cursor == -1
 
@@ -492,27 +492,107 @@ class TestUnsyncedCursors:
 class TestRepositoryOwnership:
     def test_builds_its_own_repository_when_none_is_given(self, tmp_path):
         with patch(_META_REPO) as MockMeta, patch(_VEC_MGR):
-            snap = SnapShot(tmp_path, "p", "P")
+            snap = SnapShot(tmp_path, "p", "P", conversation_id="conv_abc")
         assert snap._owns_meta_repo is True
         MockMeta.assert_called_once()
 
     def test_reuses_an_injected_repository(self, tmp_path):
         with patch(_META_REPO) as MockMeta, patch(_VEC_MGR):
             borrowed = MagicMock()
-            snap = SnapShot(tmp_path, "p", "P", meta_repo=borrowed)
+            snap = SnapShot(tmp_path, "p", "P", conversation_id="conv_abc", meta_repo=borrowed)
         assert snap.meta_repo is borrowed
         assert snap._owns_meta_repo is False
         MockMeta.assert_not_called()
 
     def test_close_releases_only_an_owned_repository(self, tmp_path):
         with patch(_META_REPO) as MockMeta, patch(_VEC_MGR):
-            snap = SnapShot(tmp_path, "p", "P")
+            snap = SnapShot(tmp_path, "p", "P", conversation_id="conv_abc")
             snap.close()
         MockMeta.return_value.close.assert_called_once()
 
     def test_close_leaves_a_borrowed_repository_open(self, tmp_path):
         with patch(_META_REPO), patch(_VEC_MGR):
             borrowed = MagicMock()
-            snap = SnapShot(tmp_path, "p", "P", meta_repo=borrowed)
+            snap = SnapShot(tmp_path, "p", "P", conversation_id="conv_abc", meta_repo=borrowed)
             snap.close()
         borrowed.close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# scope: one class, two histories
+# ---------------------------------------------------------------------------
+
+class TestTheScope:
+    """A conversation snapshot and a project snapshot keep their history in
+    different stores, so the scope decides which one this object walks.
+    """
+
+    def test_an_unknown_scope_is_refused(self, tmp_path):
+        from memory.memory_pool_exceptions import InvalidSnapshotScope
+        with pytest.raises(InvalidSnapshotScope):
+            SnapShot(tmp_path, "p", "P", conversation_id="c1", scope="topic")
+
+    def test_conversation_is_the_default(self, tmp_path):
+        snap = SnapShot(tmp_path, "p", "P", conversation_id="c1")
+        assert snap.scope == "conversation"
+        snap.close()
+
+    def test_a_conversation_scope_needs_a_conversation_id(self, tmp_path):
+        from memory.memory_pool_exceptions import InvalidIdentifier
+        with pytest.raises(InvalidIdentifier):
+            SnapShot(tmp_path, "p", "P", conversation_id="")
+
+    def test_a_project_scope_does_not(self, tmp_path):
+        """conversation_id means nothing to a snapshot about the whole project."""
+        snap = SnapShot(tmp_path, "p", "P", scope="project",
+                        project_db_path=tmp_path / "project.sql")
+        assert snap.scope == "project"
+        snap.close()
+
+    def test_a_project_scope_opens_no_conversation_metadata(self, tmp_path):
+        snap = SnapShot(tmp_path, "p", "P", scope="project",
+                        project_db_path=tmp_path / "project.sql")
+        assert snap.meta_repo is None
+        assert snap.snapshot_repo is not None
+        snap.close()
+
+    def test_a_conversation_scope_opens_no_project_registry(self, tmp_path):
+        snap = SnapShot(tmp_path, "p", "P", conversation_id="c1")
+        assert snap.snapshot_repo is None
+        assert snap.meta_repo is not None
+        snap.close()
+
+    def test_add_is_refused_on_a_project_scope(self, tmp_path):
+        from memory.memory_pool_exceptions import WrongSnapshotScope
+        snap = SnapShot(tmp_path, "p", "P", scope="project",
+                        project_db_path=tmp_path / "project.sql")
+        with pytest.raises(WrongSnapshotScope):
+            snap.add(
+                time_of_snapshot="2026-10-01", len_of_the_summary=1,
+                summary_vector_ids=[], summary_vectors=np.zeros((0, 128)),
+                chunk_ids=[], chunks=[], summary="s",
+                cumulative_summary_vector_id=1,
+                cumulative_summary_vector=np.zeros(128),
+            )
+        snap.close()
+
+    def test_add_project_snapshot_is_refused_on_a_conversation_scope(self, tmp_path):
+        from memory.memory_pool_exceptions import WrongSnapshotScope
+        snap = SnapShot(tmp_path, "p", "P", conversation_id="c1")
+        with pytest.raises(WrongSnapshotScope):
+            snap.add_project_snapshot("s", 1, np.zeros(128, dtype=np.float32))
+        snap.close()
+
+    def test_a_project_scope_walks_the_project_history(self, tmp_path):
+        """The ids the cursors index into come from the project registry."""
+        snap = SnapShot(tmp_path, "p", "P", scope="project",
+                        project_db_path=tmp_path / "project.sql")
+        snap._vector_manager = MagicMock()
+        first = snap.add_project_snapshot("one", 1, np.ones(128, dtype=np.float32))
+        second = snap.add_project_snapshot("two", 2, np.ones(128, dtype=np.float32))
+
+        snap.sync_cursors()
+        assert [row.project_snapshot_id for row in snap.snapshot_repo.history()] == [
+            first, second,
+        ]
+        snap.close()

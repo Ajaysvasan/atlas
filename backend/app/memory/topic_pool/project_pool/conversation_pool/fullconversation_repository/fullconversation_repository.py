@@ -11,6 +11,12 @@ from memory.sqlite_setup import (
     enable_wal,
 )
 
+from memory.topic_pool.project_pool.conversation_pool.schema_migrations import (
+    migrate,
+)
+
+from memory.identifiers import require_identifier
+
 logger = get_logger(__name__)
 
 CHUNKER_TYPE_TURN = "turn"
@@ -18,7 +24,9 @@ CHUNKER_TYPE_TURN = "turn"
 _TURN_QUERY = """
     SELECT f.sequence_number, f.role, s.chunk, f.created_at, f.chunk_id
     FROM full_conversation AS f
-    JOIN summary_chunks AS s ON s.chunk_id = f.chunk_id
+    JOIN summary_chunks AS s
+      ON s.chunk_id = f.chunk_id AND s.conversation_id = f.conversation_id
+    WHERE f.conversation_id = ?
 """
 
 
@@ -31,27 +39,30 @@ class Turn(NamedTuple):
     created_at: str
     chunk_id: str
 
-
-
-
 class FullConversationRepository:
     def __init__(
-        self, conversation_path: str | Path, project_id: str, project_name: str
+            self, conversation_path: str | Path, project_id: str, project_name: str , conversation_id : str
     ):
         self.project_id = project_id
         self.project_name = project_name
         self.conversation_dir = Path(conversation_path)
         self.conversation_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.conversation_dir / f"{project_id}_conversation.db"
+        self.conversation_id = require_identifier(conversation_id, "conversation_id")
         self.__init_db()
 
     def __init_db(self):
+        # Before any statement: a database written before `conversation_id`
+        # existed needs its tables rebuilt, and CREATE TABLE IF NOT EXISTS
+        # would leave it untouched.
+        migrate(self.db_path)
         with connect(self.db_path) as conn:
             self.journal_mode = enable_wal(conn, self.db_path)
             cursor = conn.cursor()
             cursor.execute("""
             create table if not exists summary_chunks (
                 chunk_id text primary key,
+                conversation_id text not null, 
                 chunk text not null,
                 created_at date not null,
                 chunker_type text not null
@@ -60,10 +71,12 @@ class FullConversationRepository:
             cursor.execute("""
             create table if not exists full_conversation(
                 project_id text not null,
-                sequence_number int primary key,
+                conversation_id text not null,
+                sequence_number int not null,
                 chunk_id text not null,
-                role text not null ,
-                created_at date not null ,
+                role text not null,
+                created_at date not null,
+                primary key (conversation_id, sequence_number),
                 foreign key (chunk_id) references summary_chunks (chunk_id)
             )
             """)
@@ -79,8 +92,8 @@ class FullConversationRepository:
 
     def __add_chunks(
         self,
-        full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
-        chunks: List[Tuple[str, str, str, str]],
+        full_conversaton_meta_datas: List[Tuple[str, str, int, str, str]],
+        chunks: List[Tuple[str, str , str, str, str]],
     ) -> None:
         with connect(self.db_path) as conn:
             # summary_chunks is the FK parent, so its rows must land first.
@@ -88,13 +101,13 @@ class FullConversationRepository:
                 cursor = conn.cursor()
                 cursor.executemany(
                     """
-                INSERT INTO summary_chunks(chunk_id , chunk , created_at , chunker_type) VALUES (? , ? , ? , ?);
+                INSERT INTO summary_chunks(chunk_id , conversation_id ,  chunk , created_at , chunker_type) VALUES (? , ? ,? , ? , ?);
                 """,
                     chunks,
                 )
                 cursor.executemany(
                     """
-        INSERT INTO full_conversation(project_id , sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ?  , ?);
+        INSERT INTO full_conversation(project_id , conversation_id, sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ? , ?  , ?);
         """,
                     full_conversaton_meta_datas,
                 )
@@ -111,7 +124,9 @@ class FullConversationRepository:
 
     def __next_sequence_number(self, cursor) -> int:
         cursor.execute(
-            "SELECT COALESCE(MAX(sequence_number), 0) FROM full_conversation;"
+            "SELECT COALESCE(MAX(sequence_number), 0) FROM full_conversation "
+            "WHERE conversation_id = ?;",
+            (self.conversation_id,),
         )
         return cursor.fetchone()[0] + 1
 
@@ -137,19 +152,21 @@ class FullConversationRepository:
                     sequence = first_sequence + offset
                     chunk_id = self.__make_chunk_id(sequence, text)
                     chunk_rows.append(
-                        (chunk_id, text, created_at, CHUNKER_TYPE_TURN)
+                        (chunk_id, self.conversation_id, text, created_at,
+                         CHUNKER_TYPE_TURN)
                     )
                     meta_rows.append(
-                        (self.project_id, sequence, chunk_id, role, created_at)
+                        (self.project_id, self.conversation_id, sequence,
+                         chunk_id, role, created_at)
                     )
                     sequences.append(sequence)
 
                 cursor.executemany(
-                    "INSERT INTO summary_chunks(chunk_id , chunk , created_at , chunker_type) VALUES (? , ? , ? , ?);",
+                    "INSERT INTO summary_chunks(chunk_id , conversation_id, chunk , created_at , chunker_type) VALUES (? , ? , ?, ? , ?);",
                     chunk_rows,
                 )
                 cursor.executemany(
-                    "INSERT INTO full_conversation(project_id , sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ? , ?);",
+                    "INSERT INTO full_conversation(project_id , conversation_id,  sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ? , ? , ?);",
                     meta_rows,
                 )
                 conn.execute("COMMIT;")
@@ -164,8 +181,8 @@ class FullConversationRepository:
         with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"""SELECT sequence_number from full_conversation where chunk_id = ?;""",
-                (chunk_id,),
+                f"""SELECT sequence_number from full_conversation where chunk_id = ? and conversation_id = ?;""",
+                (chunk_id,self.conversation_id),
             )
             row = cursor.fetchone()
             return row[0] if row is not None else None
@@ -184,12 +201,14 @@ class FullConversationRepository:
                     FROM summary_chunks AS s
                     JOIN full_conversation AS f
                     ON f.chunk_id = s.chunk_id
+                    AND f.conversation_id = s.conversation_id
+                    WHERE f.conversation_id = ?
                     ORDER BY f.sequence_number DESC
                     LIMIT ?
                 )
                 ORDER BY sequence_number
             """,
-                (n,),
+                (self.conversation_id , n),
             )
             return cursor.fetchall()
 
@@ -202,10 +221,12 @@ class FullConversationRepository:
                 from summary_chunks as s
                 join full_conversation as f
                 on s.chunk_id = f.chunk_id
-                where f.sequence_number >= ? and f.sequence_number <= ?
+                and s.conversation_id = f.conversation_id
+                where f.conversation_id = ?
+                and f.sequence_number >= ? and f.sequence_number <= ?
                 order by f.sequence_number
             """,
-                (start, end),
+                (self.conversation_id, start, end),
             )
 
             return cursor.fetchall()
@@ -220,10 +241,12 @@ class FullConversationRepository:
                 from summary_chunks as s
                 join full_conversation as f
                 on s.chunk_id = f.chunk_id
-                where f.sequence_number >= ? and f.sequence_number <= ?
+                and s.conversation_id = f.conversation_id
+                where f.conversation_id = ?
+                and f.sequence_number >= ? and f.sequence_number <= ?
                 order by f.sequence_number
             """,
-                (start, end),
+                (self.conversation_id, start, end),
             )
             return cursor.fetchall()
 
@@ -236,14 +259,16 @@ class FullConversationRepository:
             from summary_chunks as s
             join full_conversation as f
             on f.chunk_id = s.chunk_id
-            where f.sequence_number > ?
+            and f.conversation_id = s.conversation_id
+            where f.conversation_id = ?
+            and f.sequence_number > ?
             order by f.sequence_number;
             """,
-                (sequence_number,),
+                (self.conversation_id, sequence_number),
             )
             return cursor.fetchall()
 
-    def __get_all(self):
+    def __get_all_from_conversation(self):
 
         with connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -252,16 +277,22 @@ class FullConversationRepository:
             from summary_chunks as s
             join full_conversation as f
             on f.chunk_id = s.chunk_id
+            and f.conversation_id = s.conversation_id
+            where f.conversation_id = ?
             order by f.sequence_number
-            """)
+            """, (self.conversation_id,))
             return cursor.fetchall()
 
     def __select_turns(self, clause: str, params: tuple = ()) -> List[Turn]:
+        # _TURN_QUERY already carries `WHERE f.conversation_id = ?`, so its
+        # parameter leads and every clause here continues with AND.
         with connect(self.db_path) as conn:
-            rows = conn.execute(_TURN_QUERY + clause, params).fetchall()
+            rows = conn.execute(
+                _TURN_QUERY + clause, (self.conversation_id, *params)
+            ).fetchall()
         return [Turn(*row) for row in rows]
 
-    def __get_size(self):
+    def __get_conversation_size(self):
         with connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -269,15 +300,17 @@ class FullConversationRepository:
             from summary_chunks as s
             join full_conversation as f
             on f.chunk_id = s.chunk_id
-            """)
+            and f.conversation_id = s.conversation_id
+            where f.conversation_id = ?
+            """, (self.conversation_id,))
             return cursor.fetchone()[0]
 
     # Public APIs
 
     def add(
         self,
-        full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
-        chunks: List[Tuple[str, str, str, str]],
+        full_conversaton_meta_datas: List[Tuple[str , str, int, str, str]],
+        chunks: List[Tuple[str, str ,str, str, str]],
     ) -> None:
         """it supports only batch insertion , since we add the chunks only after a conversation , so no individual insertion is needed rather batch insertion is enough"""
         self.__add_chunks(full_conversaton_meta_datas, chunks)
@@ -308,12 +341,12 @@ class FullConversationRepository:
         return self.__get_messages_after(sequence_number)
 
     def fetch_all(self):
-        return self.__get_all()
+        return self.__get_all_from_conversation()
 
     def get_turns(self, start: int, end: int) -> List[Turn]:
         """Turns with start <= sequence_number <= end, in conversation order."""
         return self.__select_turns(
-            "WHERE f.sequence_number >= ? AND f.sequence_number <= ? "
+            "AND f.sequence_number >= ? AND f.sequence_number <= ? "
             "ORDER BY f.sequence_number",
             (start, end),
         )
@@ -333,12 +366,12 @@ class FullConversationRepository:
     def get_turns_after(self, sequence_number: int) -> List[Turn]:
         """Turns with sequence_number strictly greater than the one given."""
         return self.__select_turns(
-            "WHERE f.sequence_number > ? ORDER BY f.sequence_number",
+            "AND f.sequence_number > ? ORDER BY f.sequence_number",
             (sequence_number,),
         )
 
     def get_all_turns(self) -> List[Turn]:
         return self.__select_turns("ORDER BY f.sequence_number")
 
-    def get_size(self):
-        return self.__get_size()
+    def get_conversation_size(self):
+        return self.__get_conversation_size()

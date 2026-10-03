@@ -45,6 +45,7 @@ _LLAMA    = "llama_cpp.Llama"
 
 _PROJ_ID   = "proj_test"
 _PROJ_NAME = "TestProject"
+_CONV_ID = "conv_abc"
 _WINDOW    = 100   # main_model_context_window_length used by fixtures
 _DRAFT_CTX = 131072
 
@@ -65,6 +66,7 @@ def _make_cs(tmp_path, mock_fc, mock_mr, window=_WINDOW):
         project_name=_PROJ_NAME,
         main_model_context_window_length=window,
         draft_model_context_window_length=_DRAFT_CTX,
+        conversation_id=_CONV_ID,
     )
 
 
@@ -544,6 +546,7 @@ class TestMultiBatchRollingSummary:
                 # Tiny draft context → only ~200 chars of conversation per pass
                 # (131072 - 200 - 512) * 4 ≈ huge, so we force it via __batch_turns)
                 draft_model_context_window_length=131072,
+                conversation_id=_CONV_ID,
             )
 
             # Patch __batch_turns to return exactly 3 batches
@@ -802,9 +805,12 @@ def snapshotting(tmp_path):
         instance._embedder = _fake_embedder()
         instance.generated_from = []
 
-        def generate(self, prev, turns):
+        def generate(self, prev, turns, while_model_loaded=None):
             self.generated_from.append(turns)
-            return "A generated summary."
+            summary = "A generated summary."
+            if while_model_loaded is not None:
+                while_model_loaded(object(), summary)
+            return summary
 
         with patch.object(
             ConversationSummary, "_ConversationSummary__generate_summary", generate
@@ -927,7 +933,7 @@ class TestTakeSnapshot:
         with patch.object(
             ConversationSummary,
             "_ConversationSummary__generate_summary",
-            lambda self, prev, turns: "",
+            lambda self, prev, turns, while_model_loaded=None: "",
         ):
             assert instance.take_snapshot(10) is None
         mock_snap.add.assert_not_called()
@@ -1095,6 +1101,7 @@ class TestDraftWindowIsHonoured:
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=_WINDOW,
                 draft_model_context_window_length=4096,
+                conversation_id=_CONV_ID,
             )
 
         captured = {}
@@ -1130,6 +1137,7 @@ class TestDraftWindowIsHonoured:
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=_WINDOW,
                 draft_model_context_window_length=8192,
+                conversation_id=_CONV_ID,
             )
 
         import llama_cpp
@@ -1387,6 +1395,7 @@ class TestRealBatchingReachesTheModel:
                 main_model_context_window_length=_WINDOW,
                 # (800 - 200 - 512) * 4 = 352 characters of conversation per pass
                 draft_model_context_window_length=800,
+                conversation_id=_CONV_ID,
             )
 
         prompts = []
@@ -1413,3 +1422,111 @@ class TestRealBatchingReachesTheModel:
                     seen.append(line)
         assert seen == expected
 
+
+
+# ---------------------------------------------------------------------------
+# The project snapshot trigger: every conversation snapshot rolls it forward
+# ---------------------------------------------------------------------------
+
+class TestTheProjectSnapshotTrigger:
+    """Rolling the project description forward runs inside the window where the
+    draft model is already resident, because loading it is the expensive part of
+    a snapshot and loading a second copy would double that cost.
+    """
+
+    def _with_fake_project_snapshot(self, instance):
+        fake = MagicMock()
+        fake.take.return_value = 4242
+        instance._project_snapshot = fake
+        return fake
+
+    def test_a_conversation_snapshot_rolls_the_project_forward(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        fake = self._with_fake_project_snapshot(instance)
+
+        instance.take_snapshot(10)
+
+        fake.take.assert_called_once()
+
+    def test_it_runs_after_the_conversation_snapshot_is_stored(self, snapshotting):
+        """It summarises the cumulative rows that persisting has just written."""
+        instance, _, _, mock_snap = snapshotting
+        order = []
+        mock_snap.add.side_effect = lambda *a, **k: order.append("persisted")
+        fake = self._with_fake_project_snapshot(instance)
+        fake.take.side_effect = lambda _summarise: order.append("rolled forward")
+
+        instance.take_snapshot(10)
+
+        assert order == ["persisted", "rolled forward"]
+
+    def test_it_is_handed_a_summariser_not_a_model(self, snapshotting):
+        """So the project snapshot never has to know about model lifecycles."""
+        instance, _, _, _ = snapshotting
+        fake = self._with_fake_project_snapshot(instance)
+
+        instance.take_snapshot(10)
+
+        assert callable(fake.take.call_args[0][0])
+
+    def test_the_summariser_runs_on_the_already_loaded_model(self, snapshotting):
+        """The whole point of the placement: one load, not two."""
+        instance, _, _, _ = snapshotting
+        fake = self._with_fake_project_snapshot(instance)
+        seen = []
+        with patch.object(
+            ConversationSummary,
+            "_ConversationSummary__run_inference",
+            lambda self, model, system, user: seen.append(model) or "described",
+        ):
+            instance.take_snapshot(10)
+            summarise = fake.take.call_args[0][0]
+            summarise("a system prompt", "a user prompt")
+
+        assert len(seen) == 1
+
+    def test_a_blank_summary_rolls_nothing_forward(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        fake = self._with_fake_project_snapshot(instance)
+        with patch.object(
+            ConversationSummary,
+            "_ConversationSummary__generate_summary",
+            lambda self, prev, turns, while_model_loaded=None: "",
+        ):
+            assert instance.take_snapshot(10) is None
+
+        fake.take.assert_not_called()
+
+    def test_nothing_to_summarise_rolls_nothing_forward(self, snapshotting):
+        instance, mock_fc, _, _ = snapshotting
+        mock_fc.get_context_rows.return_value = []
+        fake = self._with_fake_project_snapshot(instance)
+
+        assert instance.take_snapshot(10) is None
+        fake.take.assert_not_called()
+
+    def test_a_failure_there_does_not_lose_the_conversation_snapshot(
+        self, snapshotting
+    ):
+        """The conversation snapshot is stored and is what the caller asked for.
+
+        The project watermark is only advanced by a successful take(), so the
+        summaries this run produced are picked up again next time.
+        """
+        instance, _, _, mock_snap = snapshotting
+        fake = self._with_fake_project_snapshot(instance)
+        fake.take.side_effect = RuntimeError("the draft model fell over")
+
+        assert instance.take_snapshot(10) == "A generated summary."
+        mock_snap.add.assert_called_once()
+
+    def test_the_project_snapshot_is_built_once_and_reused(self, snapshotting):
+        instance, _, _, _ = snapshotting
+        with patch(
+            "memory.topic_pool.project_pool.project_snapshot.ProjectSnapshot"
+        ) as MockPS:
+            first = instance.project_snapshot
+            second = instance.project_snapshot
+
+        assert first is second
+        assert MockPS.call_count == 1

@@ -10,6 +10,12 @@ from memory.sqlite_setup import (
     enable_wal,
 )
 
+from memory.topic_pool.project_pool.conversation_pool.schema_migrations import (
+    migrate,
+)
+
+from memory.identifiers import require_identifier
+
 logger = get_logger(__name__)
 
 
@@ -20,9 +26,12 @@ class ConversationVectorMetaDataRepository:
         self,
         conversation_path: str | Path,
         project_id: str,
+        conversation_id: str,
     ) -> None:
         self._lock = threading.RLock()
+        self._write_depth = 0
         self.project_id = project_id
+        self.conversation_id = require_identifier(conversation_id, "conversation_id")
 
         self.conversation_dir = Path(conversation_path)
         self.conversation_dir.mkdir(parents=True, exist_ok=True)
@@ -38,26 +47,51 @@ class ConversationVectorMetaDataRepository:
 
     @contextmanager
     def _writing(self) -> Iterator[sqlite3.Cursor]:
-        """A cursor under the lock, committed on success, rolled back on failure."""
+        """A cursor in an immediate transaction, committed or rolled back."""
+        # BEGIN IMMEDIATE, not the implicit deferred transaction: _lock is this
+        # instance's, and two repositories on one database file have one lock
+        # each, so a read-then-write pair (seq allocation) could interleave
+        # across them and both claim the same seq. The database's own write lock
+        # is what serialises them. The depth counter keeps a nested _writing()
+        # inside the outer transaction rather than starting a second one, which
+        # SQLite refuses.
         with self._lock:
             cursor = self.conn.cursor()
+            outermost = self._write_depth == 0
+            if outermost:
+                cursor.execute("BEGIN IMMEDIATE;")
+            self._write_depth += 1
             try:
                 yield cursor
-                self.conn.commit()
             except BaseException:
-                self.conn.rollback()
-                logger.debug("Rolled back a write on %s", self.db_path)
+                if outermost:
+                    cursor.execute("ROLLBACK;")
+                    logger.debug("Rolled back a write on %s", self.db_path)
                 raise
+            else:
+                if outermost:
+                    cursor.execute("COMMIT;")
+            finally:
+                self._write_depth -= 1
 
     def _init_db(self):
+        # Before the connection is opened: this database is shared with
+        # FullConversationRepository and either class may reach it first, so
+        # both run the migration.
+        migrate(self.db_path)
         # check_same_thread=False allows the shared instance; _lock makes it correct.
-        self.conn = connect(self.db_path, check_same_thread=False)
+        # isolation_level=None: transactions are issued explicitly by _writing
+        # so that BEGIN IMMEDIATE is what opens them.
+        self.conn = connect(
+            self.db_path, check_same_thread=False, isolation_level=None
+        )
         self.journal_mode = enable_wal(self.conn, self.db_path)
         cursor = self.conn.cursor()
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS summary_chunks (
                 chunk_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
                 chunk TEXT NOT NULL,
                 created_at DATE NOT NULL,
                 chunker_type TEXT NOT NULL
@@ -76,6 +110,8 @@ class ConversationVectorMetaDataRepository:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cumulative_vector_meta_data (
                 cumulative_vector_id INTEGER PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                seq INTEGER NOT NULL UNIQUE,
                 cumulative_summary TEXT NOT NULL,
                 created_at DATE NOT NULL,
                 project_id TEXT NOT NULL,
@@ -104,8 +140,8 @@ class ConversationVectorMetaDataRepository:
         """records: [(chunk_id, chunk, created_at, chunker_type), ...]"""
         with self._writing() as cursor:
             cursor.executemany(
-                "INSERT OR IGNORE INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
-                records,
+                "INSERT OR IGNORE INTO summary_chunks (chunk_id, conversation_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?, ?)",
+                [(r[0], self.conversation_id, r[1], r[2], r[3]) for r in records],
             )
 
     def batch_insert_summary_vector_meta_data(
@@ -140,6 +176,19 @@ class ConversationVectorMetaDataRepository:
             )
             return cursor.fetchall()
 
+    def __next_seq(self, cursor) -> int:
+        """The next snapshot sequence for this database.
+
+        Not AUTOINCREMENT: that is only available on an INTEGER PRIMARY KEY, and
+        `cumulative_vector_id` already holds that position with a derived hash,
+        which is not monotonic. Allocated inside the caller's write transaction,
+        under the same lock, so the read and the insert cannot interleave.
+        """
+        cursor.execute(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM cumulative_vector_meta_data"
+        )
+        return cursor.fetchone()[0]
+
     def insert_cumulative_vector_meta_data(
         self,
         cumulative_vector_id: int,
@@ -150,9 +199,11 @@ class ConversationVectorMetaDataRepository:
     ):
         with self._writing() as cursor:
             cursor.execute(
-                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, conversation_id, seq, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(cumulative_vector_id),
+                    self.conversation_id,
+                    self.__next_seq(cursor),
                     cumulative_summary,
                     created_at,
                     project_id,
@@ -164,23 +215,27 @@ class ConversationVectorMetaDataRepository:
         self, records: List[Tuple[int, str, str, str, str]]
     ):
         """records: [(cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary), ...]"""
-        new_records = [(int(r[0]), r[1], r[2], r[3], str(r[4])) for r in records]
         with self._writing() as cursor:
+            first = self.__next_seq(cursor)
             cursor.executemany(
-                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?)",
-                new_records,
+                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, conversation_id, seq, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (int(r[0]), self.conversation_id, first + offset,
+                     r[1], r[2], r[3], str(r[4]))
+                    for offset, r in enumerate(records)
+                ],
             )
 
     def get_cumulative_vector_meta_data_ids(self):
-        # datetime() truncates to whole seconds, so snapshots taken in the same
-        # second tie and their order becomes arbitrary — which matters because
-        # SnapShot's cursors index into this list. The raw TEXT tiebreaker
-        # recovers sub-second precision from the ISO-8601 timestamps we write,
-        # while datetime() stays the primary key for robustness to older rows
-        # stored in looser formats.
+        # Ordered by seq, which is allocated monotonically on write. It replaced
+        # `datetime(created_at), created_at`: datetime() truncates to whole
+        # seconds, so two snapshots in the same second tied and their order went
+        # arbitrary — and SnapShot's cursors index into this list.
         with self._reading() as cursor:
             cursor.execute(
-                "SELECT cumulative_vector_id FROM cumulative_vector_meta_data ORDER BY datetime(created_at), created_at;",
+                "SELECT cumulative_vector_id FROM cumulative_vector_meta_data "
+                "WHERE conversation_id = ? ORDER BY seq;",
+                (self.conversation_id,),
             )
             return cursor.fetchall()
 
@@ -193,16 +248,17 @@ class ConversationVectorMetaDataRepository:
             return cursor.fetchone()
 
     def get_latest_summary(self) -> str | None:
-        # See get_cumulative_vector_meta_data_ids: datetime() alone truncates to
-        # seconds, so two snapshots in the same second would make "latest"
-        # arbitrary and the rolling summary could pick up the wrong predecessor.
         with self._reading() as cursor:
-            cursor.execute("""
-            SELECT cumulative_summary
-            FROM cumulative_vector_meta_data
-            ORDER BY datetime(created_at) DESC, created_at DESC
-            LIMIT 1
-            """)
+            cursor.execute(
+                """
+                SELECT cumulative_summary
+                FROM cumulative_vector_meta_data
+                WHERE conversation_id = ?
+                ORDER BY seq DESC
+                LIMIT 1
+                """,
+                (self.conversation_id,),
+            )
             row = cursor.fetchone()
             return row[0] if row is not None else None
 
@@ -245,13 +301,15 @@ class ConversationVectorMetaDataRepository:
         """Write one complete snapshot in a single transaction."""
         with self._writing() as cursor:
             cursor.executemany(
-                "INSERT OR IGNORE INTO summary_chunks (chunk_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?)",
-                chunks,
+                "INSERT OR IGNORE INTO summary_chunks (chunk_id, conversation_id, chunk, created_at, chunker_type) VALUES (?, ?, ?, ?, ?)",
+                [(c[0], self.conversation_id, c[1], c[2], c[3]) for c in chunks],
             )
             cursor.execute(
-                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO cumulative_vector_meta_data (cumulative_vector_id, conversation_id, seq, cumulative_summary, created_at, project_id, len_of_the_summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(cumulative_row[0]),
+                    self.conversation_id,
+                    self.__next_seq(cursor),
                     cumulative_row[1],
                     cumulative_row[2],
                     cumulative_row[3],
@@ -293,6 +351,34 @@ class ConversationVectorMetaDataRepository:
             )
             row = cursor.fetchone()
             return row[0] if row is not None and row[0] is not None else None
+
+    def get_project_snapshots_since(self, seq: int) -> List[Tuple[int, int, str]]:
+        """This project's snapshot summaries after `seq`, across every conversation.
+
+        The project snapshot deliberately ignores conversation_id: it is about
+        the project, not about any one conversation.
+        """
+        with self._reading() as cursor:
+            cursor.execute(
+                """
+                SELECT seq, cumulative_vector_id, cumulative_summary
+                FROM cumulative_vector_meta_data
+                WHERE project_id = ? AND seq > ?
+                ORDER BY seq
+                """,
+                (self.project_id, int(seq)),
+            )
+            return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+
+    def get_highest_snapshot_seq(self) -> int:
+        """The latest snapshot sequence in this project, or 0 if there are none."""
+        with self._reading() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM cumulative_vector_meta_data "
+                "WHERE project_id = ?",
+                (self.project_id,),
+            )
+            return cursor.fetchone()[0]
 
     def get_summary_vector_ids_from_map(self, cumulative_vector_id: int) -> List[int]:
         with self._reading() as cursor:

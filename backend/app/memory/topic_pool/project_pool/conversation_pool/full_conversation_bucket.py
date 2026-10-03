@@ -24,12 +24,17 @@ VALID_ROLES = frozenset({ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM})
 class FullConversation:
 
     def __init__(
-        self, full_conversation_dir: str | Path, project_id: str, project_name: str
+        self,
+        full_conversation_dir: str | Path,
+        project_id: str,
+        project_name: str,
+        conversation_id: str,
     ) -> None:
         self.fullConversationoRep = FullConversationRepository(
             project_id=project_id,
             conversation_path=full_conversation_dir,
             project_name=project_name,
+            conversation_id=conversation_id,
         )
 
     @staticmethod
@@ -59,8 +64,8 @@ class FullConversation:
 
     def append_chunks(
         self,
-        full_conversaton_meta_datas: List[Tuple[str, int, str, str]],
-        chunks: List[Tuple[str, str, str, str]],
+        full_conversaton_meta_datas: List[Tuple[str, str, int, str, str]],
+        chunks: List[Tuple[str, str, str, str, str]],
     ) -> None:
         """Low-level insert with caller-supplied ids, sequences and timestamps."""
         self.fullConversationoRep.add(full_conversaton_meta_datas, chunks)
@@ -97,4 +102,4 @@ class FullConversation:
         return self.fullConversationoRep.get_all_turns()
 
     def size(self):
-        return self.fullConversationoRep.get_size()
+        return self.fullConversationoRep.get_conversation_size()

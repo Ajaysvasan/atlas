@@ -89,3 +89,43 @@ class TopicAlreadyExists(Exception):
 
     def __str__(self) -> str:
         return f"An active topic named {self.topic!r} already exists."
+
+
+class InvalidIdentifier(Exception):
+    def __init__(self, name, value) -> None:
+        self.name = name
+        self.value = value
+        super().__init__(self.name, self.value)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.name} must be a non-empty string, got {self.value!r}. "
+            f"It scopes rows in the database, so an empty or missing value "
+            f"would silently partition nothing."
+        )
+
+
+class InvalidSnapshotScope(Exception):
+    def __init__(self, scope, allowed) -> None:
+        self.scope = scope
+        self.allowed = allowed
+        super().__init__(self.scope, self.allowed)
+
+    def __str__(self) -> str:
+        allowed = ", ".join(sorted(self.allowed))
+        return f"Got the scope {self.scope!r}. Expected one of: {allowed}"
+
+
+class WrongSnapshotScope(Exception):
+    def __init__(self, operation, required, actual) -> None:
+        self.operation = operation
+        self.required = required
+        self.actual = actual
+        super().__init__(self.operation, self.required, self.actual)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.operation} belongs to a {self.required!r} snapshot, but this "
+            f"one is scoped to {self.actual!r}. The two keep their history in "
+            f"different stores, so the call cannot be served."
+        )

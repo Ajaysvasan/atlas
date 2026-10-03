@@ -64,7 +64,7 @@ from memory.topic_pool.project_pool.conversation_pool.conversation_data_manageme
 from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
     FullConversationRepository,
 )
-from memory.topic_pool.project_pool.conversation_pool.snapshot import SnapShot
+from memory.snapshot import SnapShot
 
 CHUNK_SIZE = 256
 CHUNK_OVERLAP = 20
@@ -399,7 +399,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         the conversation silently develops a hole.
         """
         repository = FullConversationRepository(
-            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME
+            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME, "conv_abc"
         )
 
         def worker(worker_id):
@@ -424,7 +424,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         )
         self.assertEqual(len(sequences), expected)
         self.assertEqual(sorted(sequences), list(range(1, expected + 1)))
-        self.assertEqual(repository.get_size(), expected)
+        self.assertEqual(repository.get_conversation_size(), expected)
         self.assertEqual(len(repository.fetch_all()), expected)
 
     def test_separate_repositories_on_one_database_file(self):
@@ -436,8 +436,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         errors = []
 
         def worker(worker_id):
-            repository = ConversationVectorMetaDataRepository(
-                self.tmp_dir, self.PROJECT_ID
+            repository = ConversationVectorMetaDataRepository(                self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
             )
             try:
                 for row in range(self.ROWS_PER_WORKER):
@@ -464,7 +463,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         elapsed = time.time() - started
 
         expected = self.META_WORKERS * self.ROWS_PER_WORKER
-        reader = ConversationVectorMetaDataRepository(self.tmp_dir, self.PROJECT_ID)
+        reader = ConversationVectorMetaDataRepository(self.tmp_dir, self.PROJECT_ID, "conv_abc")
         try:
             stored = reader.get_cumulative_vector_meta_data_ids()
         finally:
@@ -484,8 +483,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         lifetime and hands the same instance to ConversationSummary — so it has
         to survive being driven from more than one thread at a time.
         """
-        repository = ConversationVectorMetaDataRepository(
-            self.tmp_dir, self.PROJECT_ID
+        repository = ConversationVectorMetaDataRepository(            self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
         )
         self.addCleanup(repository.close)
         errors = []
@@ -534,8 +532,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         check_same_thread off on its own would be worse than the ProgrammingError
         it silences.
         """
-        repository = ConversationVectorMetaDataRepository(
-            self.tmp_dir, self.PROJECT_ID
+        repository = ConversationVectorMetaDataRepository(            self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
         )
         self.addCleanup(repository.close)
         taken_id = 999999
@@ -631,9 +628,9 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         this asserts the whole workload runs clean.
         """
         conversation = FullConversationRepository(
-            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME
+            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME, "conv_abc"
         )
-        metadata = ConversationVectorMetaDataRepository(self.tmp_dir, self.PROJECT_ID)
+        metadata = ConversationVectorMetaDataRepository(self.tmp_dir, self.PROJECT_ID, "conv_abc")
         self.addCleanup(metadata.close)
         self.assertEqual(metadata.journal_mode, "wal")
 
@@ -681,7 +678,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
             f"across {self.READERS + 1} threads in {elapsed:.3f}s"
         )
         self.assertEqual(errors, [])
-        self.assertEqual(conversation.get_size(), self.TURNS_WHILE_READING)
+        self.assertEqual(conversation.get_conversation_size(), self.TURNS_WHILE_READING)
 
 
 class TestSnapshotNavigationUnderLoad(StressTestCase):
@@ -692,8 +689,7 @@ class TestSnapshotNavigationUnderLoad(StressTestCase):
     SEARCHES = 100
 
     def build_history(self):
-        repository = ConversationVectorMetaDataRepository(
-            self.tmp_dir, self.PROJECT_ID
+        repository = ConversationVectorMetaDataRepository(            self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
         )
         self.addCleanup(repository.close)
         repository.batch_insert_cumulative_vector_meta_data(
@@ -712,7 +708,8 @@ class TestSnapshotNavigationUnderLoad(StressTestCase):
 
     def make_snapshot(self, repository, vectors):
         snapshot = SnapShot(
-            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME, meta_repo=repository
+            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME,
+            conversation_id="conv_abc", meta_repo=repository
         )
         vector_manager = mock.MagicMock()
         vector_manager.get_vector.side_effect = lambda vector_id: vectors[

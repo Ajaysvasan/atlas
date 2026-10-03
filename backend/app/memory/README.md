@@ -72,3 +72,16 @@ pointing at a missing embedding is not.
 
 - PostgreSQL connections opened by `SnapShot` are never closed (**bug 4.44**).
 - Nothing in this layer can delete anything — no retention policy exists yet.
+
+
+## Identifier validation (`identifiers.py`)
+
+`require_identifier(value, name)` rejects anything that cannot scope a row — a
+non-string, or a string that is blank once stripped — and returns the value
+stripped so that `' c1'` and `'c1'` cannot become two conversations. It raises
+`InvalidIdentifier`, which names the field and shows the value it got.
+
+It lives here rather than in the conversation pool because `memory/snapshot.py`
+needs it as well, and the project layer does. Validation is applied where an id
+is stored or written, not at every hop: the repositories, `SnapShot` and
+`ConversationSummary` check, and the pass-through layers above them inherit it.

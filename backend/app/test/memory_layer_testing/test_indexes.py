@@ -47,8 +47,8 @@ def stores(tmp_path):
     project = ProjectMetaData(
         "p", "t", db_path=tmp_path / "project.sql", vector_repository=MagicMock()
     )
-    FullConversationRepository(tmp_path / "conv", "p", "n")
-    meta = ConversationVectorMetaDataRepository(tmp_path / "conv", "p")
+    FullConversationRepository(tmp_path / "conv", "p", "n", "c1")
+    meta = ConversationVectorMetaDataRepository(tmp_path / "conv", "p", "conv_abc")
 
     paths = {
         "topic": tmp_path / "topic.sql",
@@ -71,11 +71,11 @@ def stores(tmp_path):
         )
     with sqlite3.connect(paths["conversation"]) as conn:
         conn.executemany(
-            "insert into summary_chunks values (?,?,'2026','turn')",
+            "insert into summary_chunks values (?,'c1',?,'2026','turn')",
             [(f"chunk{i}", f"text {i}") for i in range(ROWS)],
         )
         conn.executemany(
-            "insert into full_conversation values ('p',?,?,'user','2026')",
+            "insert into full_conversation values ('p','c1',?,?,'user','2026')",
             [(i, f"chunk{i}") for i in range(ROWS)],
         )
         conn.executemany(
@@ -135,7 +135,11 @@ def test_primary_key_lookups_need_no_extra_index(stores):
         ("project", "select project_name from project_table where project_id = ?", ("p",)),
         ("project", "select project_description from project_description_table"
                     " where project_id = ? and project_description_id = ?", ("p", "d")),
-        ("conversation", "select chunk_id from full_conversation where sequence_number = ?", (1,)),
+        # The primary key is (conversation_id, sequence_number) since the
+        # conversation_id change, so a scoped lookup is the one it serves --
+        # and the only shape the repository now issues.
+        ("conversation", "select chunk_id from full_conversation"
+                         " where conversation_id = ? and sequence_number = ?", ("c1", 1)),
         ("conversation", "select chunk from summary_chunks where chunk_id = ?", ("c",)),
     ]:
         assert "SEARCH" in plan(stores[store], sql, params)

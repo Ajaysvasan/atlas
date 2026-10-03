@@ -100,3 +100,29 @@ connection to the same store for the same project in the same call.
 `test/memory_layer_testing/test_project_manager.py`. The embedder is a fake that
 maps text to a chosen axis, so "this query is about project A" is something the
 test states rather than something a model decides; SQLite is real.
+
+
+## The project snapshot (`project_snapshot.py`)
+
+A project's rolling description: what it is about and what has been done so far.
+Distinct from a conversation summary in both input and voice — it reads every
+conversation in the project (`project_id`, ignoring `conversation_id`) and its
+prompt asks for the project rather than the chat, with no speaker labels.
+
+Incremental by construction. Each snapshot summarises the **previous project
+snapshot** together with the conversation summaries written since it, so the
+cost of a snapshot tracks what is new rather than the size of the project. A
+project with fifty conversations does not put fifty conversations in one prompt.
+
+The watermark is `seq` on `cumulative_vector_meta_data`, not a timestamp:
+`created_at` is caller-supplied TEXT with no format enforcement, which is what
+made Bug 4.31 possible.
+
+`take()` is handed its summariser per call rather than holding one, because the
+draft model is expensive to load and its lifetime belongs to the caller. That is
+what lets `ConversationSummary` roll this forward from inside the window where a
+model is already resident instead of loading a second copy.
+
+One guard worth knowing: a draft model that returns an empty summary does not
+advance the watermark. Advancing it would step "new since" past those
+conversation summaries, dropping them from every future snapshot.

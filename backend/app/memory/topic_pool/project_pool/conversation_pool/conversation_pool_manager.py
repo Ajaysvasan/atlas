@@ -21,6 +21,7 @@ class ConversationPoolManager:
         conversation_dir: str | Path,
         project_id: str,
         project_name: str,
+        conversation_id: str,
         main_model_context_window_length: int = Config.MAIN_MODEL_CONTEXT_WINDOW_TURNS,
         draft_model_context_window_length: int = Config.DRAFT_MODEL_CONTEXT_WINDOW,
         snapshot_every_n_turns: int = Config.SNAPSHOT_EVERY_N_TURNS,
@@ -37,6 +38,7 @@ class ConversationPoolManager:
             full_conversation_dir=self.conversation_dir,
             project_id=project_id,
             project_name=project_name,
+            conversation_id=conversation_id,
         )
         self.summariser = ConversationSummary(
             full_conversation_dir=self.conversation_dir,
@@ -44,6 +46,7 @@ class ConversationPoolManager:
             project_name=project_name,
             main_model_context_window_length=main_model_context_window_length,
             draft_model_context_window_length=draft_model_context_window_length,
+            conversation_id=conversation_id,
         )
         # Deliberately the summariser's own instances, not new ones. A second
         # SnapShot would carry its own cursors and the two would drift apart.

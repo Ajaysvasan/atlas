@@ -5,11 +5,12 @@ import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List
+from typing import Callable, List
 
 import numpy as np
 
 from config import Config, get_logger, log_timing
+from memory.identifiers import require_identifier
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
     ConversationVectorMetaDataRepository,
 )
@@ -20,7 +21,7 @@ from memory.topic_pool.project_pool.conversation_pool.fullconversation_repositor
     Turn,
     utc_now,
 )
-from memory.topic_pool.project_pool.conversation_pool.snapshot import SnapShot
+from memory.snapshot import SnapShot
 
 logger = get_logger(__name__)
 
@@ -47,18 +48,21 @@ class ConversationSummary:
         project_name: str,
         main_model_context_window_length: int,
         draft_model_context_window_length: int,
+        conversation_id: str,
     ) -> None:
+        self.conversation_id = require_identifier(conversation_id, "conversation_id")
         self.full_conversation = FullConversation(
             full_conversation_dir=full_conversation_dir,
             project_id=project_id,
             project_name=project_name,
+            conversation_id=conversation_id,
         )
         self.conversation_dir = full_conversation_dir
         self.project_id = project_id
         self.project_name = project_name
         self.main_model_context_window_length = main_model_context_window_length
         self.summary_repo = ConversationVectorMetaDataRepository(
-            full_conversation_dir, project_id
+            full_conversation_dir, project_id, conversation_id
         )
         self.draft_model_context_window_length = draft_model_context_window_length
 
@@ -67,8 +71,10 @@ class ConversationSummary:
             project_id=project_id,
             project_name=project_name,
             meta_repo=self.summary_repo,
+            conversation_id=conversation_id,
         )
         self._embedder = None
+        self._project_snapshot = None
 
     @property
     def embedder(self):
@@ -134,6 +140,40 @@ class ConversationSummary:
             ),
             cumulative_summary_vector=cumulative.vector,
         )
+
+    @property
+    def project_snapshot(self):
+        """This project's rolling description, built on first use."""
+        if self._project_snapshot is None:
+            from memory.topic_pool.project_pool.project_snapshot import (
+                ProjectSnapshot,
+            )
+
+            self._project_snapshot = ProjectSnapshot(
+                project_id=self.project_id,
+                project_name=self.project_name,
+                meta_repo=self.summary_repo,
+                embed=lambda text: self.embedder.embed_text(text).vector,
+                conversation_dir=self.conversation_dir,
+            )
+        return self._project_snapshot
+
+    def __roll_project_snapshot_forward(self, model) -> None:
+        """Fold this conversation's new snapshot into the project's description."""
+        try:
+            self.project_snapshot.take(
+                lambda system, user: self.__run_inference(model, system, user)
+            )
+        except Exception:
+            # The conversation snapshot is already stored and is the thing the
+            # caller asked for. A failure to roll the project description
+            # forward leaves the watermark where it was, so the next snapshot
+            # picks these summaries up again.
+            logger.exception(
+                "Could not roll the project snapshot forward for %s; "
+                "its watermark is unchanged",
+                self.project_id,
+            )
 
     def __get_latest_summary(self) -> str | None:
         return self.summary_repo.get_latest_summary()
@@ -286,7 +326,10 @@ class ConversationSummary:
         return output["choices"][0]["message"]["content"].strip()
 
     def __generate_summary(
-        self, latest_summary: str | None, turns: List[Turn]
+        self,
+        latest_summary: str | None,
+        turns: List[Turn],
+        while_model_loaded: Callable[[object, str], None] | None = None,
     ) -> str:
         """Full LLM pipeline:"""
         available_tokens = (
@@ -322,6 +365,12 @@ class ConversationSummary:
                     chars=len(batch),
                 ):
                     running_summary = self.__run_inference(model, system, user_content)
+            # Loading the draft model is the expensive part of a snapshot, so
+            # anything else that needs it runs here rather than loading a second
+            # copy — see take_snapshot, which persists and then rolls the
+            # project snapshot forward from inside this window.
+            if while_model_loaded is not None and running_summary:
+                while_model_loaded(model, running_summary)
         finally:
             self.__unload_model(model)
 
@@ -355,7 +404,15 @@ class ConversationSummary:
 
         latest_summary = self.get_current_summary()
         turns = self.full_conversation.get_turns(start, chunk_sequence_number)
-        summary = self.__generate_summary(latest_summary, turns)
+        def persist_then_roll_forward(model, summary: str) -> None:
+            # Order matters: the project snapshot reads the cumulative summaries
+            # this write adds, so it has to see them.
+            self.__persist_snapshot(summary, covered_rows)
+            self.__roll_project_snapshot_forward(model)
+
+        summary = self.__generate_summary(
+            latest_summary, turns, while_model_loaded=persist_then_roll_forward
+        )
         if not summary:
             logger.warning(
                 "Draft model returned an empty summary for project %s; "
@@ -363,8 +420,6 @@ class ConversationSummary:
                 self.project_id,
             )
             return None
-
-        self.__persist_snapshot(summary, covered_rows)
         logger.info(
             "Snapshot taken for project %s: %d chunk(s), %d-character summary",
             self.project_id,

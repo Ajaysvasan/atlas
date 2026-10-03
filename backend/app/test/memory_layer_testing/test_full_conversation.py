@@ -30,18 +30,21 @@ from memory.topic_pool.project_pool.conversation_pool.full_conversation_bucket i
 
 PROJECT_ID = "proj_123"
 PROJECT_NAME = "test_project"
+CONVERSATION_ID = "conv_abc"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_meta(project_id, seq, chunk_id, role="user", created_at="2026-08-10"):
-    return (project_id, seq, chunk_id, role, created_at)
+def _make_meta(project_id, seq, chunk_id, role="user", created_at="2026-08-10",
+               conversation_id=CONVERSATION_ID):
+    return (project_id, conversation_id, seq, chunk_id, role, created_at)
 
 
-def _make_chunk(chunk_id, text, created_at="2026-08-10", chunker_type="text"):
-    return (chunk_id, text, created_at, chunker_type)
+def _make_chunk(chunk_id, text, created_at="2026-08-10", chunker_type="text",
+                conversation_id=CONVERSATION_ID):
+    return (chunk_id, conversation_id, text, created_at, chunker_type)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,7 @@ def repo(tmp_path):
         conversation_path=tmp_path,
         project_id=PROJECT_ID,
         project_name=PROJECT_NAME,
+        conversation_id=CONVERSATION_ID,
     )
 
 
@@ -91,15 +95,15 @@ class TestSchema:
             conn.execute("PRAGMA foreign_keys = ON")
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
-                    "INSERT INTO full_conversation(project_id, sequence_number, chunk_id, role, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    ("p", 1, "nonexistent_chunk", "user", "2026-01-01"),
+                    "INSERT INTO full_conversation(project_id, conversation_id, sequence_number, chunk_id, role, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("p", CONVERSATION_ID, 1, "nonexistent_chunk", "user", "2026-01-01"),
                 )
 
     def test_repeated_construction_same_path_is_idempotent(self, tmp_path):
         """Two repos on the same path must not duplicate tables."""
-        r1 = FullConversationRepository(tmp_path, PROJECT_ID, PROJECT_NAME)
-        r2 = FullConversationRepository(tmp_path, PROJECT_ID, PROJECT_NAME)
+        r1 = FullConversationRepository(tmp_path, PROJECT_ID, PROJECT_NAME, CONVERSATION_ID)
+        r2 = FullConversationRepository(tmp_path, PROJECT_ID, PROJECT_NAME, CONVERSATION_ID)
         db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
         with sqlite3.connect(db_path) as conn:
             tables = [r[0] for r in conn.execute(
@@ -176,7 +180,7 @@ class TestAppendTurns:
 
     def test_empty_list_is_a_noop(self, repo):
         assert repo.append_turns([]) == []
-        assert repo.get_size() == 0
+        assert repo.get_conversation_size() == 0
 
     def test_rows_are_readable_in_order(self, repo):
         repo.append_turns([("user", "one"), ("assistant", "two"), ("user", "three")])
@@ -193,7 +197,7 @@ class TestAppendTurns:
     def test_repeated_text_across_separate_calls(self, repo):
         repo.append_turns([("user", "ok")])
         repo.append_turns([("user", "ok")])
-        assert repo.get_size() == 2
+        assert repo.get_conversation_size() == 2
 
     def test_role_is_persisted(self, repo, tmp_path):
         repo.append_turns([("user", "a"), ("assistant", "b")])
@@ -244,6 +248,7 @@ class TestAppendTurns:
             conversation_path=tmp_path,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
+            conversation_id=CONVERSATION_ID,
         )
         errors = []
 
@@ -351,7 +356,7 @@ class TestAddAndFetch:
     def test_multiple_separate_add_calls_accumulate(self, repo):
         repo.add([_make_meta(PROJECT_ID, 1, "c1")], [_make_chunk("c1", "A")])
         repo.add([_make_meta(PROJECT_ID, 2, "c2")], [_make_chunk("c2", "B")])
-        assert repo.get_size() == 2
+        assert repo.get_conversation_size() == 2
 
 
 # ---------------------------------------------------------------------------
@@ -723,29 +728,29 @@ class TestTurns:
 
 
 # ---------------------------------------------------------------------------
-# get_size
+# get_conversation_size
 # ---------------------------------------------------------------------------
 
 class TestGetSize:
-    def test_get_size_returns_int(self, repo):
-        """Regression guard: get_size() must return int, not a tuple."""
+    def test_get_conversation_size_returns_int(self, repo):
+        """Regression guard: get_conversation_size() must return int, not a tuple."""
         repo.add(
             [_make_meta(PROJECT_ID, 1, "c1")],
             [_make_chunk("c1", "Hello")],
         )
-        size = repo.get_size()
+        size = repo.get_conversation_size()
         assert size == 1
         assert isinstance(size, int)
 
     def test_empty_db_size_is_zero(self, repo):
-        assert repo.get_size() == 0
+        assert repo.get_conversation_size() == 0
 
     def test_size_matches_inserted_count(self, repo):
         n = 10
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, n + 1)]
         chunks = [_make_chunk(f"c{i}", f"t{i}") for i in range(1, n + 1)]
         repo.add(meta, chunks)
-        assert repo.get_size() == n
+        assert repo.get_conversation_size() == n
 
     def test_size_after_multiple_separate_adds(self, repo):
         for i in range(1, 6):
@@ -753,7 +758,7 @@ class TestGetSize:
                 [_make_meta(PROJECT_ID, i, f"c{i}")],
                 [_make_chunk(f"c{i}", f"msg {i}")],
             )
-        assert repo.get_size() == 5
+        assert repo.get_conversation_size() == 5
 
 
 # ---------------------------------------------------------------------------
@@ -766,11 +771,12 @@ class TestRepositoryStress:
             conversation_path=tmp_path,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
+            conversation_id=CONVERSATION_ID,
         )
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 501)]
         chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 501)]
         repo.add(meta, chunks)
-        assert repo.get_size() == 500
+        assert repo.get_conversation_size() == 500
 
     def test_fetch_all_preserves_order_at_scale(self, tmp_path):
         """Regression guard Bug 4.15: ORDER BY sequence_number must hold at scale."""
@@ -778,6 +784,7 @@ class TestRepositoryStress:
             conversation_path=tmp_path,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
+            conversation_id=CONVERSATION_ID,
         )
         n = 200
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, n + 1)]
@@ -792,6 +799,7 @@ class TestRepositoryStress:
             conversation_path=tmp_path,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
+            conversation_id=CONVERSATION_ID,
         )
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 101)]
         chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 101)]
@@ -804,6 +812,7 @@ class TestRepositoryStress:
             conversation_path=tmp_path,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
+            conversation_id=CONVERSATION_ID,
         )
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(1, 201)]
         chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 201)]
@@ -817,6 +826,7 @@ class TestRepositoryStress:
             conversation_path=tmp_path,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
+            conversation_id=CONVERSATION_ID,
         )
         meta = [_make_meta(PROJECT_ID, i, f"c{i}") for i in range(50, 0, -1)]
         chunks = [_make_chunk(f"c{i}", str(i)) for i in range(50, 0, -1)]
@@ -836,6 +846,7 @@ def bucket(tmp_path):
         full_conversation_dir=tmp_path,
         project_id="proj_bucket",
         project_name="test_bucket",
+        conversation_id=CONVERSATION_ID,
     )
 
 
@@ -994,6 +1005,7 @@ class TestFullConversationBucket:
             full_conversation_dir=tmp_path,
             project_id="stress",
             project_name="stress_proj",
+            conversation_id=CONVERSATION_ID,
         )
         meta = [_make_meta("stress", i, f"c{i}") for i in range(1, 501)]
         chunks = [_make_chunk(f"c{i}", f"text {i}") for i in range(1, 501)]
@@ -1006,6 +1018,7 @@ class TestFullConversationBucket:
             full_conversation_dir=tmp_path,
             project_id="scale",
             project_name="scale_proj",
+            conversation_id=CONVERSATION_ID,
         )
         n = 300
         meta = [_make_meta("scale", i, f"c{i}") for i in range(1, n + 1)]
@@ -1040,3 +1053,54 @@ class TestBucketTurns:
             bucket.append_turns([("user", "fine"), ("assistent", "typo")])
         assert bucket.get_all_turns() == []
 
+
+
+# ---------------------------------------------------------------------------
+# The primary key is (conversation_id, sequence_number), on a fresh database
+# ---------------------------------------------------------------------------
+
+class TestSequenceNumbersArePerConversation:
+    """Bug 4.62 in a database the repository created itself.
+
+    test_schema_migrations covers this for a *migrated* database, where the
+    table comes from schema_migrations' own DDL — so it says nothing about the
+    DDL in this module. A mutation reverting the key here passed the whole
+    suite until these tests existed.
+    """
+
+    def _repo(self, tmp_path, conversation_id):
+        return FullConversationRepository(
+            conversation_path=tmp_path, project_id=PROJECT_ID,
+            project_name=PROJECT_NAME, conversation_id=conversation_id,
+        )
+
+    def test_two_conversations_both_start_at_one(self, tmp_path):
+        first = self._repo(tmp_path, "conv_A")
+        second = self._repo(tmp_path, "conv_B")
+
+        assert first.append_turns([("user", "A one")]) == [1]
+        assert second.append_turns([("user", "B one")]) == [1]
+
+    def test_their_sequences_advance_independently(self, tmp_path):
+        first = self._repo(tmp_path, "conv_A")
+        second = self._repo(tmp_path, "conv_B")
+        first.append_turns([("user", "A one"), ("assistant", "A two")])
+
+        assert second.append_turns([("user", "B one")]) == [1]
+        assert first.append_turns([("user", "A three")]) == [3]
+
+    def test_the_declared_key_is_the_composite_one(self, tmp_path):
+        self._repo(tmp_path, "conv_A")
+        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        with sqlite3.connect(db_path) as conn:
+            key = [row[1] for row in
+                   conn.execute("pragma table_info(full_conversation)") if row[5]]
+        assert key == ["conversation_id", "sequence_number"]
+
+    def test_one_conversation_cannot_reuse_its_own_sequence(self, tmp_path):
+        """The key still has to stop a duplicate within a conversation."""
+        repo = self._repo(tmp_path, "conv_A")
+        repo.add([_make_meta(PROJECT_ID, 1, "c1")], [_make_chunk("c1", "one")])
+
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add([_make_meta(PROJECT_ID, 1, "c2")], [_make_chunk("c2", "two")])

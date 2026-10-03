@@ -228,6 +228,117 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 ---
 
+## Section 4b: The `conversation_id` Change (`conversation_pool/`)
+
+A `conversation_id` dimension was added so one project's database can hold more
+than one conversation. The column reached the schema and most of the SQL; it did
+not reach the row builders, three query bodies, the primary key, the sequence
+allocator, the `Turn` readers, or the second module that owns the same table.
+Every entry was **reproduced, not inferred**, and every fix verified the same way.
+
+**All thirteen are fixed.** Three further pieces were then built on top: the
+monotonic `seq` watermark, the project snapshot tables, and `scope=` on
+`SnapShot`.
+
+### Bug 4.59: `append_turns` Built Rows With the Old Arity, So Every Turn Write Failed (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `__append_turns` inserted six columns into `full_conversation` and five into `summary_chunks`, but the row builders above it were not updated: `chunk_rows.append((chunk_id, text, created_at, CHUNKER_TYPE_TURN))` was four values and `meta_rows.append((self.project_id, sequence, chunk_id, role, created_at))` was five. `append_turns([("user", "hello")])` raised `sqlite3.ProgrammingError: Incorrect number of bindings supplied. The current statement uses 5, and there are 4 supplied.` This is the primary write path, so nothing could be written at all. Same class as the topic-layer arity bug (4.46).
+- **Status:** Fixed — both builders supply `self.conversation_id`. Verified: `append_turns` returns `[1, 2]`.
+
+### Bug 4.60: Three Queries Had `ORDER BY` Before `WHERE`, or Two `WHERE` Clauses (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** The `conversation_id` filter was appended after the `ORDER BY` in three bodies. `__get_last_n_chunks` also had a stray comma terminating its `ON` clause (`OperationalError: near "ORDER": syntax error`); `__get_ranged_chunks` had two `where` clauses, the second after the `order by` (`near "where": syntax error`); `__get_all_from_conversation` had `order by` before `where` (same). Unconditional — the statements could not be prepared, so the methods failed on every call regardless of data.
+- **Status:** Fixed — all three read `WHERE ... ORDER BY ...`, comma removed, duplicate `where` gone. Verified: `get_n_chunks`, `get_ranged_chunks` and `fetch_all` all return rows.
+
+### Bug 4.61: The `Turn` Readers Were Not Conversation-Scoped and Leaked Across Conversations (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `_TURN_QUERY` was not touched, so `get_turns`, `get_last_n_turns`, `get_turns_after` and `get_all_turns` selected every row in the file. Verified with two repositories on one database, one turn each: `conv_A.get_all_turns()` returned `['A-one', 'B-one']`, and so did `conv_B`'s. These are the readers `CLAUDE.md` tells callers to prefer for prompt assembly, so the failure mode was one conversation's history silently appearing in another's prompt. **It did not raise**, which made it the most dangerous entry here — and `get_conversation_size()` *was* scoped, so size and contents contradicted each other.
+- **Status:** Fixed — the filter moved into `_TURN_QUERY` itself (`WHERE f.conversation_id = ?`), its parameter bound by `__select_turns`, and every caller's clause continues with `AND`, so no future reader can forget it. Verified: each conversation sees only its own turns and sizes agree with contents.
+
+### Bug 4.62: `sequence_number` Was Still a Global Primary Key, So a Second Conversation Could Not Start (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `full_conversation` declared `sequence_number int primary key`. Sequence numbers are per-conversation, so two conversations in one database both wanted to start at 1. Verified: seeding `conv_B` at sequence 1 raised `IntegrityError: UNIQUE constraint failed: full_conversation.sequence_number`. This defeated the purpose of the change — the column was added so one database could hold several conversations, and the key still forbade it.
+- **Status:** Fixed — `primary key (conversation_id, sequence_number)`. Verified: both conversations start at 1. One consequence, caught by `test_indexes.py`: a lookup by `sequence_number` alone no longer hits the key and scans. Every query the repository issues now pairs it with `conversation_id`, so the test was updated to the shape the code actually uses.
+
+### Bug 4.63: The Sequence Allocator Ignored `conversation_id` (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `__next_sequence_number` ran `SELECT COALESCE(MAX(sequence_number), 0) FROM full_conversation;` with no `WHERE`, so a new conversation's first turn was numbered after the last turn of every other conversation in the file.
+- **Status:** Fixed — filters `WHERE conversation_id = ?`. The `BEGIN IMMEDIATE` around it was already correct and is still needed. Verified: `conv_B`'s second turn is sequence 2, not 3.
+
+### Bug 4.64: `summary_chunks` Was Created by Two Modules With Different Schemas (`fullconversation_repository.py`, `conversationVectorMetaManager.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** Both classes share one database file and both ran `CREATE TABLE IF NOT EXISTS summary_chunks`. The conversation repository's definition had `conversation_id`; `ConversationVectorMetaDataRepository`'s did not. `IF NOT EXISTS` meant the second to run accepted whatever the first created. Verified by constructing the metadata repository first: `summary_chunks` came out as `['chunk_id', 'chunk', 'created_at', 'chunker_type']` and the next insert raised `OperationalError: table summary_chunks has no column named conversation_id`. Which class initialised first was not controlled anywhere, so this was order-dependent.
+- **Status:** Fixed — both definitions agree column-for-column, verified in both initialisation orders. That made the metadata repository's own two 4-column inserts fail, so it now takes a `conversation_id` and supplies it itself rather than widening every caller's tuple; `SnapShot` and `ConversationSummary` forward it.
+
+### Bug 4.65: No Migration, So Every Existing Database Broke (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** The schema change was expressed only as `CREATE TABLE IF NOT EXISTS`, which does nothing to a table that already exists. Any database written before the change kept the old columns and its first insert failed as in 4.64. There was no `ALTER TABLE`, no schema version and no detection; deleting `data/memory/` was the only recovery.
+- **Status:** Fixed — `conversation_pool/schema_migrations.py`, run from both modules that share the database, keyed on `PRAGMA user_version`. `full_conversation` needs a new primary key and SQLite cannot alter one, so both tables are rebuilt rather than ALTERed, with existing rows assigned `conversation_id = 'legacy'` — not a placeholder, since a project database held exactly one conversation before the column existed. Version 2 then added `conversation_id` and `seq` to `cumulative_vector_meta_data`, backfilling `seq` in the rows' existing chronological order. Verified end to end from both a v0 and a v1 database: rows preserved and readable, schema identical to a fresh one, no dangling foreign keys, and a new conversation starting at sequence 1 beside legacy's 1-3.
+
+### Bug 4.66: `ConversationSummary` Was Passed a `conversation_id` It Did Not Accept (`conversation_pool_manager.py`, `conversation_summary.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `ConversationPoolManager.__init__` called `ConversationSummary(..., conversation_id=conversation_id)`, but `ConversationSummary.__init__` took no such parameter, so constructing a `ConversationPoolManager` raised `TypeError`. Its own `FullConversation(...)` call omitted it too. The manager is the public entry point to the conversation layer and could not be constructed at all.
+- **Status:** Fixed — `conversation_id` is a required parameter, forwarded to `FullConversation`, the summary repository and the `SnapShot`.
+
+### Bug 4.67: The Join Condition Was Inconsistent Between Readers (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `__get_ranged_chunks` joined on `chunk_id` and `conversation_id`, while four other readers joined on `chunk_id` alone and filtered `conversation_id` in the `WHERE`. Both gave the same answer only while `chunk_id` stayed globally unique, and nothing enforced that the two denormalised copies agreed.
+- **Status:** Fixed — every reader joins on both columns and filters `f.conversation_id`.
+
+### Bug 4.68: `idx_full_conversation_chunk` May No Longer Serve the Queries It Was Measured Against (`fullconversation_repository.py`)
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** The index on `full_conversation(chunk_id)` was added on measurement (11.0 ms -> 3.1 ms at 40k turns) for the watermark join in `get_highest_summarised_sequence()`. That join is still on `chunk_id` alone, so the index still applies there — but the conversation-scoped readers now filter `conversation_id` too, and `__get_ranged_chunks` joins on both columns, which this index does not cover. Worth re-measuring now that the layer runs again; `(conversation_id, chunk_id)` may be the better shape. **Must not be changed on shape alone** — see `todo.md` on the two indexes already rejected on measurement.
+
+### Bug 4.69: `conversation_id` Was Accepted but Never Validated — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `conversation_id` was stored as given and written into `not null` columns with no check. `None` reached SQLite and failed with a constraint error naming the column rather than the caller; `""` was accepted silently and partitioned nothing. `project_meta_data.py` validates its ids; this did not.
+- **Status:** Fixed — `memory/identifiers.py::require_identifier` rejects non-strings and blanks and returns the value stripped, raising `InvalidIdentifier`, which names the field and shows the value. It sits beside `memory_manager.py` because `memory/snapshot.py` needs it as well as the conversation pool. Applied where the id is stored or written; the pass-through layers inherit it, so construction still fails immediately. `conversation_id` is now required on the metadata repository and `SnapShot` rather than defaulting to `""`.
+
+### Bug 4.70: Stray Trailing Commas in Two Signatures (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** `def __get_all_from_conversation(self , ):` and `def __get_conversation_size(self , ):` carried a trailing comma and spacing that suggested a parameter was removed mid-edit. Valid Python, but both read as unfinished.
+- **Status:** Fixed — signatures normalised.
+
+### Bug 4.71: `snapshot.py` Was Moved and Four Importers Still Named the Old Path (`memory/snapshot.py`, `conversation_summary.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `snapshot.py` moved from `conversation_pool/` to `memory/`. Verified a pure move — the old and new files differed in nothing — so the only damage was stale imports. Four places still named the old path, and **one was production code**: `conversation_summary.py` raised `ModuleNotFoundError`. Because `conversation_pool_manager.py` imports `ConversationSummary`, the entire conversation layer failed at import and pytest aborted with `Interrupted: 4 errors during collection` — **the suite could not even be collected**, so no test anywhere ran.
+- **Status:** Fixed — the import is `from memory.snapshot import SnapShot`, and the three test-side references were repointed. The move is recorded as a git rename.
+
+### Bug 4.72: `cumulative_vector_meta_data` Had No Monotonic Ordering Column — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** Snapshot order came from `ORDER BY datetime(created_at), created_at`. `datetime()` truncates to whole seconds, so two snapshots in the same second tied and their order went arbitrary — and `SnapShot`'s cursors index into that list. `created_at` is also caller-supplied TEXT with no format enforcement, the reason Bug 4.31 was possible, so a caller could perturb the order with an odd timestamp.
+- **Status:** Fixed — a `seq` column, allocated monotonically on write. Not `AUTOINCREMENT`: that is only available on an `INTEGER PRIMARY KEY`, and `cumulative_vector_id` already holds that position with a derived hash. **Allocating it exposed a second bug:** `_writing()` took only the instance's `RLock`, and two repositories on one database file have one lock each, so the `MAX(seq)+1` read and the insert interleaved across them and both claimed the same `seq` — `UNIQUE constraint failed`, caught by an existing concurrency stress test. Resolved with `BEGIN IMMEDIATE`, so the database's own write lock serialises them, plus a depth counter so a nested `_writing()` stays in the outer transaction. Four ordering tests changed meaning as a result and were rewritten as the inverse guard: timestamps that disagree with write order must not reorder anything.
+
+---
+
 ## Section 5: Data Layer — Ingestion, Chunking & Vector Stores (`data_layer/`)
 
 ### Bug 5.1: The pgvector Write and Read Paths Cannot Work Against a Real PostgreSQL Server (`vectorRepository.py`) — FIXED AND PROVEN END TO END

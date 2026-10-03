@@ -123,3 +123,21 @@ the remaining step.
 `test_project_vector_handler.py`. The vector store is a stateful fake rather
 than a `MagicMock`: every bug that mattered here was the two stores disagreeing,
 and a mock records calls without holding state, so it cannot show a disagreement.
+
+
+## The project snapshot registry (`project_snapshot_repo.py`)
+
+| Table | Holds |
+| :--- | :--- |
+| `project_snapshot` | the summary, its length, the `last_seq_included` watermark, and when it was taken |
+| `project_snapshot_mapping` | the ordered chain of every snapshot a project has had |
+
+The mapping is **append-only**, keyed `(project_id, project_snapshot_id)`. It is
+not a pointer at the current snapshot: overwriting one row would leave the
+earlier snapshots in `project_snapshot` with nothing ordering them.
+
+`project_snapshot_id` is derived from `(project_id, created_at, summary)` and
+masked into the signed 64-bit range, because **it is also the pgvector
+`vector_id`**. One id for both stores means nothing has to be looked up to go
+from a row to its embedding. The timestamp is part of the derivation so that a
+project summarised twice to the same words is still two snapshots.

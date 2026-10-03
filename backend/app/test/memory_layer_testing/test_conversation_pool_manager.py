@@ -27,6 +27,7 @@ _VEC_REPO = (
 
 _PID = "proj_pool"
 _PNAME = "PoolProject"
+_CID = "conv_abc"
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,7 @@ def mgr(tmp_path):
             conversation_dir=tmp_path,
             project_id=_PID,
             project_name=_PNAME,
+            conversation_id=_CID,
             snapshot_every_n_turns=5,
         )
         yield manager, mock_fc, mock_cs
@@ -63,18 +65,18 @@ class TestWiring:
     def test_summariser_gets_the_same_directory(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER) as MockCS:
             MockCS.return_value.summary_repo.get_cumulative_vector_meta_data_ids.return_value = []
-            ConversationPoolManager(tmp_path, _PID, _PNAME)
+            ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
         assert MockCS.call_args.kwargs["full_conversation_dir"] == tmp_path
 
     def test_rejects_a_zero_threshold(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER):
             with pytest.raises(ValueError):
-                ConversationPoolManager(tmp_path, _PID, _PNAME, snapshot_every_n_turns=0)
+                ConversationPoolManager(tmp_path, _PID, _PNAME, _CID, snapshot_every_n_turns=0)
 
     def test_rejects_a_negative_threshold(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER):
             with pytest.raises(ValueError):
-                ConversationPoolManager(tmp_path, _PID, _PNAME, snapshot_every_n_turns=-3)
+                ConversationPoolManager(tmp_path, _PID, _PNAME, _CID, snapshot_every_n_turns=-3)
 
 
 class TestCursorRestoration:
@@ -89,14 +91,14 @@ class TestCursorRestoration:
                 (1,),
                 (2,),
             ]
-            manager = ConversationPoolManager(tmp_path, _PID, _PNAME)
+            manager = ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
         manager.snap_shot.sync_cursors.assert_called_once()
 
     def test_cursors_not_touched_when_no_snapshots(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER) as MockCS:
             mock_cs = MockCS.return_value
             mock_cs.summary_repo.get_cumulative_vector_meta_data_ids.return_value = []
-            manager = ConversationPoolManager(tmp_path, _PID, _PNAME)
+            manager = ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
         manager.snap_shot.sync_cursors.assert_not_called()
 
 
@@ -288,6 +290,7 @@ def live(tmp_path):
             conversation_dir=tmp_path,
             project_id=_PID,
             project_name=_PNAME,
+            conversation_id=_CID,
             main_model_context_window_length=50,
             snapshot_every_n_turns=5,
         )
@@ -424,6 +427,7 @@ class TestIntegration:
             conversation_dir=tmp_path,
             project_id=_PID,
             project_name=_PNAME,
+            conversation_id=_CID,
             main_model_context_window_length=50,
             snapshot_every_n_turns=5,
         )
@@ -451,18 +455,18 @@ class TestConnectionsAreReleased:
                 self.closed = True
 
         with patch(_VEC_REPO, TrackingRepo):
-            with ConversationPoolManager(tmp_path, _PID, _PNAME) as manager:
+            with ConversationPoolManager(tmp_path, _PID, _PNAME, _CID) as manager:
                 manager.snap_shot.vector_manager  # opens the connection
             assert opened and all(repo.closed for repo in opened)
 
     def test_a_manager_that_never_searched_closes_cleanly(self, tmp_path):
         with patch(_VEC_REPO, _FakeVectorRepository):
-            with ConversationPoolManager(tmp_path, _PID, _PNAME) as manager:
+            with ConversationPoolManager(tmp_path, _PID, _PNAME, _CID) as manager:
                 manager.add_turn("user", "no search happened")
 
     def test_closing_twice_is_safe(self, tmp_path):
         with patch(_VEC_REPO, _FakeVectorRepository):
-            manager = ConversationPoolManager(tmp_path, _PID, _PNAME)
+            manager = ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
             manager.snap_shot.vector_manager  # opens the connection
             manager.close()
             manager.close()
