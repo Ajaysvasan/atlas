@@ -303,11 +303,15 @@ monotonic `seq` watermark, the project snapshot tables, and `scope=` on
 - **Explanation:** `__get_ranged_chunks` joined on `chunk_id` and `conversation_id`, while four other readers joined on `chunk_id` alone and filtered `conversation_id` in the `WHERE`. Both gave the same answer only while `chunk_id` stayed globally unique, and nothing enforced that the two denormalised copies agreed.
 - **Status:** Fixed — every reader joins on both columns and filters `f.conversation_id`.
 
-### Bug 4.68: `idx_full_conversation_chunk` May No Longer Serve the Queries It Was Measured Against (`fullconversation_repository.py`)
+### Bug 4.68: `idx_full_conversation_chunk` May No Longer Serve the Queries It Was Measured Against (`fullconversation_repository.py`) — FIXED (no change needed)
 
 - **Criticality:** Low
 - **Priority:** P3
-- **Explanation:** The index on `full_conversation(chunk_id)` was added on measurement (11.0 ms -> 3.1 ms at 40k turns) for the watermark join in `get_highest_summarised_sequence()`. That join is still on `chunk_id` alone, so the index still applies there — but the conversation-scoped readers now filter `conversation_id` too, and `__get_ranged_chunks` joins on both columns, which this index does not cover. Worth re-measuring now that the layer runs again; `(conversation_id, chunk_id)` may be the better shape. **Must not be changed on shape alone** — see `todo.md` on the two indexes already rejected on measurement.
+- **Explanation:** The index on `full_conversation(chunk_id)` was added on measurement for the watermark join in `get_highest_summarised_sequence()`. Once rows carried a `conversation_id`, `(conversation_id, chunk_id)` looked like the natural shape, and the conversation-scoped readers filter `conversation_id` while `__get_ranged_chunks` joins on both columns — neither of which this index covers.
+- **Status:** **Re-measured, and the current index is correct. Do not change it.** At 5 conversations x 8000 turns, on the watermark join: `(chunk_id)` 3724us, `(conversation_id, chunk_id)` **25960us**, no index 15024us. The composite is 7x slower than the current index and worse than having none, because the join is project-wide and never constrains `conversation_id`, so a `conversation_id`-leading index cannot be seeked — SQLite skip-scans it, which the plan reports as `ANY(conversation_id) AND chunk_id=?`. `(chunk_id, conversation_id)` measured level with the current index (3786us) and is larger for no gain.
+  The conversation-scoped readers need nothing: the primary key became `(conversation_id, sequence_number)` in Bug 4.62, which already covers every reader that filters a conversation and walks its sequence numbers. No index variant moved `ranged chunks`, `all turns` or `conversation size` at all.
+  Two guards in `test_indexes.py` pin this: one asserts the watermark plan does not skip-scan, the other that the scoped readers are served by the primary key. Both fail if the index is changed to the composite — which is the mistake they exist to catch.
+- **Method note:** the first run of this benchmark was invalid and said all four variants were equal. The repository creates `idx_full_conversation_chunk` in `__init_db`, so every "variant" was really that index *plus* the variant, and the "no index" column was not one. Dropping it first is what produced the numbers above. Same class of error as the earlier benchmark that declared `chunk_id unique` and invented a conflict that did not exist.
 
 ### Bug 4.69: `conversation_id` Was Accepted but Never Validated — FIXED
 
@@ -336,6 +340,99 @@ monotonic `seq` watermark, the project snapshot tables, and `scope=` on
 - **Priority:** P1
 - **Explanation:** Snapshot order came from `ORDER BY datetime(created_at), created_at`. `datetime()` truncates to whole seconds, so two snapshots in the same second tied and their order went arbitrary — and `SnapShot`'s cursors index into that list. `created_at` is also caller-supplied TEXT with no format enforcement, the reason Bug 4.31 was possible, so a caller could perturb the order with an odd timestamp.
 - **Status:** Fixed — a `seq` column, allocated monotonically on write. Not `AUTOINCREMENT`: that is only available on an `INTEGER PRIMARY KEY`, and `cumulative_vector_id` already holds that position with a derived hash. **Allocating it exposed a second bug:** `_writing()` took only the instance's `RLock`, and two repositories on one database file have one lock each, so the `MAX(seq)+1` read and the insert interleaved across them and both claimed the same `seq` — `UNIQUE constraint failed`, caught by an existing concurrency stress test. Resolved with `BEGIN IMMEDIATE`, so the database's own write lock serialises them, plus a depth counter so a nested `_writing()` stays in the outer transaction. Four ordering tests changed meaning as a result and were rewritten as the inverse guard: timestamps that disagree with write order must not reorder anything.
+
+---
+
+## Section 4c: `memory_mapping_handler.py` (new, uncommitted)
+
+A mapping from `(conversation_id, user_id)` to the topic, project and latest
+project snapshot that conversation belongs to — the lookup `MemoryManager` needs
+to resume a conversation without re-routing it. When recorded, **the module did not import and no method worked**. Every entry
+below was reproduced before being fixed, and every fix verified the same way.
+**All eleven are now fixed**, with 16 regression tests in
+`test/memory_layer_testing/test_memory_mapping_handler.py`; reverting any one
+fix fails between 1 and 11 of them.
+
+Also note: this introduces `user_id`, a dimension no other table in the project
+has. Nothing else is user-scoped, so either this is the first step of a decision
+that has to reach the other tables, or it is scope that does not belong yet.
+
+### Bug 4.73: Production Code Imports the Test Suite (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Status:** **Fixed.** The import is gone. Verified by a production import: `'pytest' in sys.modules` is now `False` afterwards.
+- **Explanation:** Line 6 is `from test.memory_layer_testing.test_project_snapshot import project` — a pytest fixture, unused, almost certainly an editor auto-import. It is not a dead line that fails harmlessly: it **resolves**. Verified that importing the module pulls in the test module, and with it `pytest`, into the running process (`'pytest' in sys.modules` is `True` afterwards). So a production import drags the test suite, its mocks and its dependencies along, and would fail outright wherever tests are not shipped.
+
+### Bug 4.74: A Bare Import That Only Resolves Under pytest (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Status:** **Fixed.** `from memory.sqlite_setup import connect, enable_wal`. Verified outside pytest, with no conftest involved: the module imports and `memory/` is not on `sys.path`.
+- **Explanation:** Line 9 is `from sqlite_setup import connect, enable_wal`, not `from memory.sqlite_setup import ...` as every other module in the layer writes it. Under `python`/`main.py` this raises `ModuleNotFoundError: No module named 'sqlite_setup'` — verified. Under pytest it **works**, because `test/memory_layer_testing/conftest.py` puts `memory/` on `sys.path` as a workaround for Bug 4.23. So the module imports in the test environment and fails in production, which is the one combination a test suite cannot warn about. The conftest line was a workaround for one module's bare import; it now silently licenses new ones.
+
+### Bug 4.75: `__db_init` Is Never Called, So the Table Never Exists (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Status:** **Fixed.** `__init__` calls `__db_init()`. Verified: the table exists immediately after construction, and WAL reports `wal`.
+- **Explanation:** `__init__` connects, enables WAL and builds the lock, but never calls `__db_init()`. Verified: immediately after construction `sqlite_master` holds no tables, and every method raises `OperationalError: no such table: memory_mapping_table`. Every other repository in this layer calls its own initialiser from `__init__`.
+
+### Bug 4.76: The Column Is Declared `lastest_` and Updated as `latest_` (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Status:** **Fixed** by renaming the column to `latest_project_snapshot_id`, since five other spellings in the file already used `latest_`. Both write paths now work.
+- **Explanation:** The DDL declares `lastest_project_snapshot_id` (transposed letters). `__search` selects that spelling and works; both write paths — `__insert_into_mapping_table` and `__update_latest_project_snapshot_id` — name `latest_project_snapshot_id` and raise `OperationalError: no such column: latest_project_snapshot_id`. Verified. So the column can be read and never written. Worth fixing by renaming the **column**, since five other spellings in the file already use `latest_`.
+
+### Bug 4.77: No Key on the Lookup Columns, So a Conversation Can Appear Twice (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Status:** **Fixed.** `primary key (conversation_id, user_id)`, plus an index on `(project_id, user_id)` for the snapshot-pointer rewrite, which no part of the key covers. Verified: a duplicate `populate_conversation_id` raises `IntegrityError`.
+- **Explanation:** `memory_mapping_table` declares no primary key and no unique constraint — verified, `pragma table_info` reports no key column. `populate_conversation_id` is a plain INSERT, so calling it twice for one conversation leaves two rows (verified: count 2). The table exists to answer "which project is this conversation in", and two rows make that unanswerable; `search` then returns whichever row comes first. `(conversation_id, user_id)` is the natural key.
+
+### Bug 4.78: The Routing UPDATE Supplies Four Values for Six Placeholders (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Status:** **Fixed.** All six values are supplied in order. The private method now returns `cursor.rowcount` and the public one logs a warning when the UPDATE matched nothing — SQLite does not treat that as an error, so the caller would otherwise read it as success. Verified: routing one conversation leaves another's row untouched.
+- **Explanation:** `__insert_into_mapping_table`'s statement has six placeholders — four in the `SET`, two in the `WHERE conversation_id = ? and user_id = ?` — and the parameter tuple is `(topic_id, project_id, new_latest_project_snapshot_id, created_at)`, four values. Reproduced once Bug 4.76 is out of the way: `ProgrammingError: Incorrect number of bindings supplied. The current statement uses 6, and there are 4 supplied.` Had the arity matched by accident, the missing `WHERE` values would have made it update **every row in the table**. Same class as Bugs 4.59 and 4.46.
+
+### Bug 4.79: `if not None` Is Always True, So an Empty Search Raises (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Status:** **Fixed.** `fetchone()` with `return MemoryMapping(*row) if row is not None else None`, and the result is a `MemoryMapping` NamedTuple rather than a bare tuple, matching `Turn`, `ProjectRow` and `ProjectSnapshotRow`.
+- **Explanation:** `__search` ends `return row[0] if not None else None`. The condition tests the literal `None`, not `row`, and `not None` is `True` always, so the guard never fires and an empty result is indexed. Verified: `search()` on an empty table raises `IndexError: list index out of range` where the shape of the line says it should return `None`. It is also `fetchall()[0]` rather than `fetchone()`, so it reads every matching row to use one.
+
+### Bug 4.80: `db_path` Has No Default Although the Body Handles `None` (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Status:** **Fixed.** `db_path: str | Path | None = None`.
+- **Explanation:** The signature is `db_path: str | Path | None` with no `= None`, so callers must pass something, while the body carefully falls back to `Config.DATA_DIR / "memory_mapping/memory_mapping.sql"` for a `None` it can only receive if passed explicitly. `ProjectSnapshotRepository` and `ProjectMetaData` both default theirs.
+
+### Bug 4.81: `conversation_id` and `user_id` Are Not Validated (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Status:** **Fixed.** `require_identifier` on `conversation_id`, `user_id` and `project_id` at every public entry point.
+- **Explanation:** Both are written into the table and filtered on, and neither is checked. `""` would be accepted and scope nothing, exactly as in Bug 4.69 — for which `memory/identifiers.py::require_identifier` already exists and is used by four other classes.
+
+### Bug 4.82: No `close()`, and the Unused Constructor Parameter (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Status:** **Fixed.** `close()` takes `_lock` before closing, is safe to call twice, and is reached from `__del__` via `getattr` so a failed construction does not bury its own error. **Both** dead constructor parameters were dropped, not just `query`: `conversation_id` was never stored either, and every method names the conversation it acts on — so this is a handler for the whole table, which is what the class docstring now says. Unused imports removed.
+- **Explanation:** The class opens a connection with `check_same_thread=False` and offers no way to release it — verified, `hasattr(h, "close")` is `False`. Every other repository in this layer has one, and Bug 4.47 is the reminder that it must take `_lock` or closing under an in-flight write segfaults the interpreter rather than raising. Separately, `__init__` accepts `query: str` and never stores or reads it — the same dead parameter as Bug 4.55 in `TopicManager`. The unused imports (`date`, `datetime`, `timezone`, `List`, `NamedTuple`, `Sequence`, `Tuple`) are the same editor noise as Bug 4.73.
+
+### Bug 4.83: The Snapshot Pointer Is Duplicated Per Conversation (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Status:** **Resolved as a documented cache, not a second source of truth.** A comment in `__db_init` records that `latest_project_snapshot_id` is a cache of `ProjectSnapshotRepository.latest()`, which owns the ordered chain in `project_snapshot_mapping`; it exists so resuming a conversation does not have to open the project registry. This follows the precedent of denormalising `topic_id` onto the project tables for the read the router needs.
+- **Explanation:** `__update_latest_project_snapshot_id` keys on `(project_id, user_id)`, so it rewrites the pointer on every conversation row belonging to that project — the value is stored once per conversation rather than once per project. It is not wrong, and the comment in `__db_init` says the overwrite is intended, but `project_snapshot_mapping` in the project registry already holds the ordered chain of a project's snapshots, and `ProjectSnapshotRepository.latest()` already answers "the newest one". Worth deciding whether this column is a cache of that or a second source of truth.
 
 ---
 

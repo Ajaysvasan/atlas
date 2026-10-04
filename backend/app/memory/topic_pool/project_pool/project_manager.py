@@ -193,10 +193,8 @@ class ProjectManager:
         match = self.resolve()
         if match.exists:
             return match.project_id
-        # PENDING: the no branch hands off to the thinking layer, which names
-        # and summarises the new project before create_project() stores it.
-        # That layer does not exist yet.
-        pass
+        # If No matching project is found , just return None 
+        return None
 
     def create_project(
         self,

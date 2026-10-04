@@ -47,8 +47,6 @@ class Config:
     # takes a snapshot on its own.
     SNAPSHOT_EVERY_N_TURNS = 20
 
-    PROJECT = Path("")
-
     CONVERSATION = Path(
         os.path.join(
             DATA_DIR,

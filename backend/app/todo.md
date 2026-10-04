@@ -345,3 +345,10 @@ old conda env `fyp2` is untouched and can be deleted whenever you are satisfied
   `cumulative_vector_meta_data(datetime(created_at))`, which saved 4.7us at
   fifty snapshots and has to be maintained on every write. Do not re-add either
   without a benchmark that contradicts this.
+- A third was measured and rejected: `full_conversation(conversation_id, chunk_id)`,
+  the shape that looks natural once rows carry a conversation_id. It is 7x slower
+  than the existing `(chunk_id)` on the watermark join and slower than no index
+  at all, because that join never constrains `conversation_id` and SQLite can
+  only skip-scan a leading column it has no value for. Guarded by two tests in
+  `test_indexes.py`. See bugs.md 4.68, including why the first benchmark was
+  wrong.

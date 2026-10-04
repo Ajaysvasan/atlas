@@ -161,3 +161,47 @@ def test_indexes_are_created_on_an_existing_database(tmp_path):
             "select name from sqlite_master where type='index' and name not like 'sqlite_%'")}
     meta.close()
     assert "idx_project_topic" in names
+
+
+# ---------------------------------------------------------------------------
+# Bug 4.68: the shape of idx_full_conversation_chunk, re-measured
+# ---------------------------------------------------------------------------
+
+_WATERMARK = (
+    "select max(f.sequence_number) from summary_vector_meta_data m"
+    " join full_conversation f on f.chunk_id = m.chunk_id where m.project_id = ?"
+)
+
+
+def test_the_watermark_join_seeks_rather_than_skip_scans(stores):
+    """Guards the index against being "upgraded" to a composite on shape alone.
+
+    `(conversation_id, chunk_id)` looks like the natural shape once rows carry a
+    conversation_id, and it is 7x slower than the current index on this query --
+    worse than no index at all. The join is project-wide and never constrains
+    conversation_id, so a conversation_id-leading index cannot be seeked; SQLite
+    skip-scans it instead, which the plan reports as `ANY(conversation_id)`.
+    Measured at 40k rows: 3724us for (chunk_id), 25960us for the composite,
+    15024us for neither.
+    """
+    result = plan(stores["conversation"], _WATERMARK, ("p",))
+
+    assert "ANY(" not in result, f"the planner is skip-scanning: {result}"
+    assert "chunk_id=?" in result, result
+
+
+def test_the_conversation_scoped_readers_are_served_by_the_primary_key(stores):
+    """Why no second index was added for them.
+
+    The primary key is (conversation_id, sequence_number), so every reader that
+    filters a conversation and walks its sequence numbers is already covered.
+    Measured: no index variant on full_conversation moved any of them.
+    """
+    result = plan(
+        stores["conversation"],
+        "select f.sequence_number, f.role from full_conversation f"
+        " where f.conversation_id = ? order by f.sequence_number",
+        ("c1",),
+    )
+
+    assert "SCAN" not in result, result
