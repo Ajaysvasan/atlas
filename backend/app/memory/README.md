@@ -85,3 +85,35 @@ It lives here rather than in the conversation pool because `memory/snapshot.py`
 needs it as well, and the project layer does. Validation is applied where an id
 is stored or written, not at every hop: the repositories, `SnapShot` and
 `ConversationSummary` check, and the pass-through layers above them inherit it.
+
+
+## Conversation mapping (`memory_mapping_handler.py`)
+
+Answers "where does this conversation belong" — its topic, its project, and the
+project snapshot that was current when it was last touched. This is the lookup
+`MemoryManager` needs to resume a conversation without routing it again, which
+is why it sits here beside `memory_manager.py` rather than inside the
+conversation pool: the pool is entered *after* this table has said which project
+to open.
+
+It takes no `conversation_id`. Every method names the conversation it acts on,
+so one handler serves the whole table — the alternative, an instance per
+conversation, would open a connection per conversation to a table that has one
+row for each.
+
+The write is two steps because the information arrives in two steps. A row is
+opened when a conversation starts, with topic and project still unset; routing
+fills them in later. That makes "never seen" (`search` returns `None`) and
+"seen, not yet routed" (`MemoryMapping(None, None, None)`) different answers,
+which is deliberate — the caller needs to tell them apart.
+
+`latest_project_snapshot_id` is a **cache** of
+`ProjectSnapshotRepository.latest()`, not a second source of truth. The ordered
+chain of a project's snapshots lives in `project_snapshot_mapping`; this column
+exists so resuming a conversation does not have to open the project registry,
+the same trade as denormalising `topic_id` onto the project tables for the read
+the router needs.
+
+One open question: `user_id` is the only user-scoped column in the layer.
+Nothing else — topic, project, conversation — has a notion of a user. Either
+that reaches the other tables or this column is ahead of the decision.
