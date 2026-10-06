@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterator, List, Tuple
 
 from config import get_logger
-from memory.sqlite_setup import (
+from storage.sqlite_setup import (
     connect,
     enable_wal,
 )

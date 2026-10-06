@@ -9,8 +9,8 @@ from typing import Iterator, List, NamedTuple
 
 from config import Config, get_logger
 from memory.identifiers import require_identifier
-from memory.sqlite_setup import connect
-from memory.timestamps import utc_now
+from storage.sqlite_setup import connect
+from storage.timestamps import utc_now
 
 logger = get_logger(__name__)
 

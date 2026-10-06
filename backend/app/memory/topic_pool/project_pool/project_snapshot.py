@@ -7,7 +7,7 @@ from numpy import ndarray
 
 from config import get_logger
 from memory.snapshot import PROJECT, SnapShot
-from memory.timestamps import utc_now
+from storage.timestamps import utc_now
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
     ConversationVectorMetaDataRepository,
 )

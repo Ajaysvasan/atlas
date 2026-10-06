@@ -1,0 +1,75 @@
+# The sources knowledge may be acquired from. Anything not listed here is
+# refused, so adding an entry is a deliberate act and this file is the record of
+# it: every trust change is a reviewable commit.
+#
+#   name         short identifier, unique
+#   host         bare hostname. Matched exactly or as a parent of a subdomain
+#   kind         "docs" (prose to chunk) or "dataset" (handled separately)
+#   description  LOAD-BEARING. Sources are selected by scoring this against the
+#                topic, so it should say what the source covers in the words
+#                someone would use to ask about it, not just name the project
+#   search       the source's own search page. Omit it and the source is never
+#                searched: there is no way to ask what it holds, and guessing
+#                paths would be a crawl
+
+[[source]]
+name = "python"
+host = "docs.python.org"
+kind = "docs"
+description = "Python language reference and standard library: syntax, built-in types, modules, sqlite3, asyncio, typing, packaging"
+search = "https://docs.python.org/3/search.html?q={terms}"
+
+[[source]]
+name = "peps"
+host = "peps.python.org"
+kind = "docs"
+description = "Python Enhancement Proposals: language design decisions, rationale, deprecations and the reasoning behind syntax changes"
+search = "https://peps.python.org/search/?q={terms}"
+
+[[source]]
+name = "mdn"
+host = "developer.mozilla.org"
+kind = "docs"
+description = "Web platform reference for developers: CSS layout, flexbox and grid, HTML elements, JavaScript language and browser APIs, HTTP headers and caching, how to do things in a browser"
+search = "https://developer.mozilla.org/en-US/search?q={terms}"
+
+[[source]]
+name = "postgresql"
+host = "www.postgresql.org"
+kind = "docs"
+description = "PostgreSQL manual: SQL dialect, indexing, query planning, transactions, replication, extensions and pgvector"
+search = "https://www.postgresql.org/search/?q={terms}"
+
+[[source]]
+name = "sqlite"
+host = "sqlite.org"
+kind = "docs"
+description = "SQLite documentation: SQL syntax, file format, write-ahead logging, pragmas, locking, transactions and query planning"
+search = "https://sqlite.org/search?q={terms}"
+
+[[source]]
+name = "ietf"
+host = "datatracker.ietf.org"
+kind = "docs"
+description = "RFCs and internet standards: the HTTP protocol and its caching and header semantics, TLS, DNS, authentication, URIs and wire formats"
+search = "https://datatracker.ietf.org/doc/search/?name={terms}"
+
+[[source]]
+name = "arxiv"
+host = "arxiv.org"
+kind = "docs"
+description = "Research papers and preprints: neural networks, transformers and attention, language models, embeddings, retrieval augmented generation, training methods and algorithms"
+search = "https://arxiv.org/search/?query={terms}&searchtype=all"
+
+[[source]]
+name = "w3c"
+host = "www.w3.org"
+kind = "docs"
+description = "Formal web standards and specification text: the normative CSS, HTML and DOM specifications, accessibility guidelines and semantic web formats"
+
+[[source]]
+name = "huggingface"
+host = "huggingface.co"
+kind = "dataset"
+description = "Machine learning datasets and model cards: training corpora, benchmarks, evaluation sets with licence and size metadata"
+search = "https://huggingface.co/api/datasets?search={terms}"
