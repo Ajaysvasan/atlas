@@ -7,8 +7,8 @@ from typing import Iterator, List, NamedTuple
 
 from config import Config, get_logger
 from memory.memory_pool_exceptions import TopicAlreadyExists, TopicNotFound
-from memory.timestamps import utc_now, as_timestamp
-from memory.sqlite_setup import connect, enable_wal
+from storage.timestamps import utc_now, as_timestamp
+from storage.sqlite_setup import connect, enable_wal
 
 logger = get_logger(__name__)
 

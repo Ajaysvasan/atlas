@@ -21,7 +21,14 @@ DIMENSIONS = 128
 
 
 def unit(seed: int) -> np.ndarray:
-    v = np.random.default_rng(seed).random(DIMENSIONS).astype(np.float32)
+    """A random unit vector that is genuinely unrelated to the others.
+
+    standard_normal, not random(): uniform [0, 1) values put every vector in the
+    positive orthant, where two unrelated ones score about 0.75 against each
+    other — above the sufficiency floor. Tests built on those would show
+    knowledge arriving that never did.
+    """
+    v = np.random.default_rng(seed).standard_normal(DIMENSIONS).astype(np.float32)
     return v / np.linalg.norm(v)
 
 

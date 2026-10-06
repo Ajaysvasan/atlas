@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import List, NamedTuple, Tuple
 
 from config import get_logger
-from memory.timestamps import utc_now
-from memory.sqlite_setup import (
+from storage.timestamps import utc_now
+from storage.sqlite_setup import (
     connect,
     enable_wal,
 )

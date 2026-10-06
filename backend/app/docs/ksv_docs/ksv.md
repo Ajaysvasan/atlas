@@ -95,6 +95,113 @@ it.
 
 ---
 
+## `acquire`
+
+```python
+acquire(target, embed, urls=None, store=None, fetch=None,
+        sources=DEFAULT_SOURCES, max_rounds=3, store_on_partial=False,
+        topic_floor=0.45, max_kept=200) -> Acquisition
+```
+
+Fetch, chunk, embed, verify, repeat. Used by the global retrieval layer; the
+memory layer does not call it.
+
+| Parameter | Meaning |
+| :--- | :--- |
+| `target` | An `AcquisitionTarget`: topic, optional subtopics, query, and their vectors |
+| `urls` | Candidate documents. `None` searches the trusted sources instead |
+| `topic_floor` | A chunk below this against the topic is discarded, never stored |
+| `max_kept` | Most chunks one acquisition may retain. The closest to the query win |
+| `embed` | `Sequence[str] -> Sequence[(id, vector)]` |
+| `store` | Called with everything acquired, only if the query was answered |
+| `fetch` | Defaults to the guarded fetcher. Injectable, which is how tests run the loop without a network |
+| `max_rounds` | At most this many sources are tried. Must be >= 1 |
+| `store_on_partial` | Keep knowledge that only partly answered. Off by default |
+
+```python
+Acquisition(verdict, acquired, stored, rounds, failures)
+```
+
+| Field | Meaning |
+| :--- | :--- |
+| `verdict` | A `Verdict` over everything gathered |
+| `acquired` | `(id, vector)` pairs from every round |
+| `stored` | Whether `store` was called |
+| `rounds` | How many sources were tried |
+| `failures` | `(url, reason)` for each source skipped |
+| `discarded` | Chunks dropped as off-subject or over the cap |
+| `recorded` | Ids written to the acquisition store, empty if nothing was stored |
+
+---
+
+## `AcquisitionStore`
+
+```python
+AcquisitionStore(db_path=None)      # data/ksv/acquired_knowledge.sql
+```
+
+| Method | Returns |
+| :--- | :--- |
+| `record(topic, query, url)` | `int` — the new id |
+| `record_many(topic, query, urls)` | `List[int]`, one transaction |
+| `for_topic(topic)` | `List[AcquiredRecord]`, oldest first |
+| `seen(url)` | `bool` |
+| `all_records()` | `List[AcquiredRecord]` |
+| `close()` | `None` |
+
+```sql
+acquired_knowledge
+    id          integer primary key autoincrement
+    topic       text not null
+    query       text not null
+    url         text not null
+    created_at  text not null
+
+idx_acquired_topic on (topic)
+idx_acquired_url   on (url)
+```
+
+`AcquiredRecord(id, topic, query, url, created_at)`. The stamp comes from
+`storage.timestamps.utc_now` — ISO-8601 UTC with microseconds, sortable as text.
+One batch shares one stamp: those rows came from a single acquisition, and
+stamping them apart would imply an ordering the id already carries.
+
+Pass it to `acquire(..., acquisition_store=store)` and the loop records every
+document that contributed, once the knowledge has been stored.
+
+---
+
+## `AcquisitionTarget`
+
+```python
+build_target(topic, query, embed_one, subtopics=()) -> AcquisitionTarget
+```
+
+Raises `ValueError` without a topic — it is what bounds collection — or without
+a query. Blank subtopics are dropped. `target.terms` is what gets typed into a
+source's search box: topic, subtopics and query joined.
+
+A chunk is kept when `cos(chunk, topic) >= topic_floor`, **and**, if subtopics
+were given, `cos(chunk, subtopic) >= topic_floor` for at least one of them.
+Subtopics narrow rather than broaden.
+
+---
+
+## Trusted sources
+
+`check_trusted(url, sources, allow_private=False)` returns the host or raises
+`UntrustedSource`. `is_trusted(url, sources)` is the boolean form.
+
+Refused: anything not https, any host not on the allowlist or a subdomain of
+one, and any host resolving to a loopback, private, link-local, reserved or
+multicast address. Redirects are followed manually so every hop is re-checked.
+
+`FetchFailed` covers a reachable but unusable source: an error status, a
+non-text content type, too many redirects, or a transport failure.
+
+---
+
 ## Tests
 
-`test/ksv_testing/test_sufficiency.py` — 36, no mocks.
+`test/ksv_testing/` — 81 tests, no mocks and no network. `test_sufficiency.py`
+(36), `test_trusted_sources.py` (26), `test_acquisition.py` (19).

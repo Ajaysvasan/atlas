@@ -16,8 +16,8 @@ from numpy import float32, ndarray, uint32
 from numpy.typing import NDArray
 
 from config import Config, get_logger
-from memory.timestamps import utc_now, as_timestamp
-from memory.sqlite_setup import connect, enable_wal
+from storage.timestamps import utc_now, as_timestamp
+from storage.sqlite_setup import connect, enable_wal
 from data_layer.vector_db_manager.repository.vectorRepository import VectorRepository
 from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
 

@@ -223,7 +223,7 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 - **Criticality:** Low
 - **Priority:** P3
-- **Status:** Fixed. `memory/timestamps.py` holds `utc_now` and `as_timestamp`; the four modules import from it and re-export, so existing imports keep working. A test asserts none of them defines its own.
+- **Status:** Fixed. `storage/timestamps.py` (originally `memory/timestamps.py`, moved once `knowledge_sufficiency` needed it too) holds `utc_now` and `as_timestamp`; the four modules import from it and re-export, so existing imports keep working. A test asserts none of them defines its own.
 - **Explanation:** Byte-identical copies live in `topic_manager.py`, `topic_pool_meta_handler.py`, `project_meta_data.py` and `fullconversation_repository.py`. The docstring on one of them calls it "canonical timestamp for every row this repository writes", which is exactly the thing four copies cannot guarantee — a change to the format in one leaves the other three writing the old one, into columns that are compared as text.
 
 ---

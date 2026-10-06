@@ -1,7 +1,8 @@
-"""Connection setup for the conversation database.
+"""Connection setup for every SQLite store in the project.
 
-Shared by the conversation databases and the project registry; see
-memory/README.md.
+It lives outside `memory/` because `knowledge_sufficiency` needs it too, and
+memory already depends on that subsystem — importing the other way would make
+the two mutually dependent. See storage/README.md.
 """
 
 import sqlite3

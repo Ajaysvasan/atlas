@@ -25,7 +25,7 @@ from memory.topic_pool.project_pool.conversation_pool.conversation_data_manageme
 )
 
 from memory.identifiers import require_identifier
-from memory.timestamps import utc_now
+from storage.timestamps import utc_now
 from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo import (
     ProjectSnapshotRepository,
     project_snapshot_id,

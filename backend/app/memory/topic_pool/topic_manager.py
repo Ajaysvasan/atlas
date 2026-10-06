@@ -9,7 +9,7 @@ from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
     TopicPoolMetaHandler,
 )
 from config import get_logger
-from memory.timestamps import utc_now
+from storage.timestamps import utc_now
 
 logger = get_logger(__name__)
 

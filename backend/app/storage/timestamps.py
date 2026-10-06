@@ -1,6 +1,9 @@
-"""One timestamp format for every row the memory layer writes.
+"""One timestamp format for every row this project writes.
 
-See README.md in this directory.
+It sits beside sqlite_setup for the same reason: the memory layer and
+knowledge_sufficiency both stamp rows, and memory already imports that
+subsystem. It existed first to stop utc_now being defined four times over
+(bug 4.58), and a copy in another package would be the fifth.
 """
 
 from datetime import date, datetime, timezone
