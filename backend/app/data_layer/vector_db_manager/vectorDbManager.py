@@ -60,20 +60,25 @@ class VectorDbManager:
         with self.lock:
             self.vector_db.batch_insert(vectors, vector_ids)
 
-    def insert(self, embedded_chunk_obj: EmbeddedChunk) -> None:
+    def insert(self, embedded_chunk_obj: EmbeddedChunk, vector_id=None) -> None:
         vector = embedded_chunk_obj.vector
-        vector_id = embedded_chunk_obj.vector_id
+        vector_id = (
+            embedded_chunk_obj.vector_id if vector_id is None else vector_id
+        )
         logger.debug("Inserting vector with vector_id='%s'", vector_id)
-        self.__insert_vector(vector, vector_id)
+        self.__insert_vector(vector, numpy.uint32(vector_id))
 
-    def batch_insert(self, embedded_chunk_objs: List[EmbeddedChunk]):
-        vectors = []
-        vector_ids = []
-        for embedded_chunk_obj in embedded_chunk_objs:
-            vectors.append(embedded_chunk_obj.vector)
-            vector_ids.append(embedded_chunk_obj.vector_id)
+    def batch_insert(self, embedded_chunk_objs: List[EmbeddedChunk], vector_ids=None):
+        vectors = [obj.vector for obj in embedded_chunk_objs]
+        if vector_ids is None:
+            vector_ids = [obj.vector_id for obj in embedded_chunk_objs]
         logger.info("Batch inserting %s vectors into index...", len(vector_ids))
-        self.__insert_vectors_in_batch(numpy.array(vectors, dtype=numpy.float32), vector_ids)
+        # Both have to be arrays, and the labels have to be uint32: diskannpy
+        # indexes its own identifier space and refuses anything wider.
+        self.__insert_vectors_in_batch(
+            numpy.array(vectors, dtype=numpy.float32),
+            numpy.array(vector_ids, dtype=numpy.uint32),
+        )
 
     def search_vector(self, query):
         return self.vector_db.search_vector(query, self.k_neighbors, self.complexity)
