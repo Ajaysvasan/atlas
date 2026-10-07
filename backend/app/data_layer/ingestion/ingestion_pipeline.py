@@ -1,6 +1,9 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
+    VectorMetaDataRepository,
+)
 from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
 from config import Config, get_logger, log_timing
@@ -35,6 +38,11 @@ class IngestionPipeline:
             num_threads=Config.NUM_THREADS,
             k_neighbors=Config.K_NEIGHBORS,
         )
+        # Without this, a search result is a vector id and nothing else: the id
+        # is a one-way hash of the chunk id, so there is no way back to the text
+        # (bug 5.3). It shares the chunk store's database file so retrieval can
+        # reach the text in one join.
+        self.vector_meta = VectorMetaDataRepository(self.chunker.db_path)
         logger.debug("Ingestion pipeline ready")
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:
@@ -82,8 +90,34 @@ class IngestionPipeline:
             return self.embedder.embed(arg)
 
     def ingest_vector(self, embedded_value: EmbeddedChunk) -> None:
-        self.vector_db.insert(embedded_value)
+        label = self.vector_meta.allocate(embedded_value.meta_data.chunk_id)
+        self.vector_db.insert(embedded_value, vector_id=label)
 
-    def batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> None:
+    def batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> List[int]:
+        """Index the vectors under labels the mapping table hands out.
+
+        The label is allocated rather than taken from the EmbeddedChunk: that id
+        is masked into 63 bits for pgvector, and DiskANN indexes uint32 labels.
+        Allocating also means the mapping row exists before the vector does, so
+        a hit can never arrive for a chunk the table has not heard of.
+        """
+        if not embedded_objs:
+            return []
+        labels = self.vector_meta.allocate_many(
+            [e.meta_data.chunk_id for e in embedded_objs]
+        )
         with log_timing(logger, "vector insert", vectors=len(embedded_objs)):
-            self.vector_db.batch_insert(embedded_objs)
+            self.vector_db.batch_insert(embedded_objs, vector_ids=labels)
+        return labels
+
+    def persist_index(self, save_path: str = Config.INDEX_PATH) -> None:
+        """Write the DiskANN index to disk.
+
+        Nothing called this, so the index lived only as long as the process and
+        a later search started from an empty one (the open P3 entry).
+        """
+        with log_timing(logger, "index persist"):
+            self.vector_db.save(save_path)
+
+    def close(self) -> None:
+        self.vector_meta.close()

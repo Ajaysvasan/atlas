@@ -450,22 +450,25 @@ that has to reach the other tables, or it is scope that does not belong yet.
   3. `__get_vector` does `np.asarray(result[0], dtype=float32)` on what comes back. Without the adapter a `vector` column is returned as text; verified that `np.asarray("[0.1,0.2,0.3]", dtype=float32)` raises `ValueError: could not convert string to float`.
   The whole memory-layer vector store — snapshot vectors, cumulative vectors, project summary vectors — depends on this class.
 
-### Bug 5.2: `VectorMetaDataRepository.insert` Always Fails — Its Foreign Key Names a Table in Another Database File (`vectorMetaDataRepository.py`)
+### Bug 5.2: `VectorMetaDataRepository.insert` Always Fails — Its Foreign Key Names a Table in Another Database File (`vectorMetaDataRepository.py`) — FIXED
 
 - **Criticality:** High
 - **Priority:** P1
+- **Status:** **Fixed.** The table moved into the chunk store's own database file, so it sits beside `Chunks` and a search result becomes text through one join. The foreign key was **removed rather than repaired**: a `chunkId` lives in `Chunks` when the document had sections and in `RecursiveChunks` when it did not, and SQLite cannot reference whichever of two tables holds it. The repository now also goes through `storage.sqlite_setup.connect` (WAL, pragmas) and runs every statement under an `RLock`, like the rest of the project's stores.
 - **Explanation:** The constructor enables `PRAGMA foreign_keys = ON` and creates `vector_meta_data` with `foreign key (chunkId) references Chunks(chunkId)`. `Chunks` is created by the chunker's `Manager` in a *different* SQLite file (`data/hierarchical_db/`), so the referenced table does not exist in this one. SQLite accepts the `CREATE TABLE` and fails at write time. Verified: a fresh repository contains only `vector_meta_data`, and `insert(1, "chunk_a", "all-MiniLM-L6-v2", 128)` raises `OperationalError: no such table: main.Chunks`. The class has no callers outside a test that only checks it imports, which is why this has gone unnoticed — see Bug 5.3 for why it should have one.
 
-### Bug 5.3: A DiskANN Search Result Cannot Be Resolved Back to Its Chunk (`ingestion_pipeline.py`)
+### Bug 5.3: A DiskANN Search Result Cannot Be Resolved Back to Its Chunk (`ingestion_pipeline.py`) — FIXED
 
 - **Criticality:** High
 - **Priority:** P1
+- **Status:** **Fixed, and verified end to end.** `IngestionPipeline` now allocates a label from `vector_meta_data` for each chunk and indexes the vector under it, so the mapping row exists before the vector does and a hit can never arrive for a chunk the table has not heard of. Verified on a real ingest: a DiskANN search returns labels, `chunk_ids_for` resolves them, and one join returns the text. `persist_index()` was added and calls `VectorDbManager.save()`, which nothing did before (the open P3 entry).
 - **Explanation:** `EmbeddingManager` derives `vector_id = md5(chunk_id)`, a one-way hash, and `IngestionPipeline` inserts the vector into DiskANN and stops. It never writes a `vector_id -> chunk_id` row: `VectorMetaDataRepository` is never constructed by the pipeline (and is broken anyway, Bug 5.2), and the chunk store's `Chunks` table holds `chunkId, contextId, chunk, startoffset, endoffset` with no vector column. Verified by inspecting the pipeline source and the created schema — no table in the data layer stores a vector id. A search therefore returns ids that nothing can turn back into text, which is the one thing retrieval needs. The pipeline also never calls `VectorDbManager.save()`, so the index is not persisted either (the existing P3 entry).
 
 ### Bug 5.4: Section Headings Never Reach a Chunk (`normalizer.py`, `HierarchicalChunker.py`)
 
 - **Criticality:** Medium
 - **Priority:** P2
+- **Found again while building the retrieval layer, and it costs more than this entry suggests.** Keyword search indexes the chunk text, so the heading is absent from the lexical index as well as from the embeddings. Measured on a document headed `# Write-ahead logging`: the query `write ahead logging` returns **0 hits**, while `journal file` and `readers writers` — words from the body — each return 1. The heading is usually the most descriptive line and the one a query is most likely to echo, so this is not a fidelity loss at the margin; it removes the best lexical signal in the document. Worth re-rating above P2 before the retrieval layer is relied on.
 - **Explanation:** The normalizer emits `SectionSpan(name, heading_start, heading_end, content_start, content_end)`, and `HierarchicalChunker.__find_sections` builds each `Section` from `content_start..content_end` — the body only. The heading's own characters lie between `heading_start` and `heading_end` and fall in no section, so no chunk contains them. Verified on a two-heading document: the heading text is present in `NormalizedContent.content` but appears in none of the chunks. The heading is usually the most descriptive line in a section; it survives only as `ChunkMetaData.section_name`, which is never embedded. A query phrased like a heading has nothing to match.
 
 ### Bug 5.5: Re-ingesting an Edited Document Leaves the Previous Version Behind Forever (`normalizer.py`, `DB_Manager.py`)
@@ -509,6 +512,29 @@ that has to reach the other tables, or it is scope that does not belong yet.
 - **Criticality:** Low
 - **Priority:** P3
 - **Explanation:** Three long-standing ones, grouped: `VectorNotFoundEror` is misspelled and is part of the public surface (raised by `VectorRepository`, caught by name in `vectorDbManager` and the memory layer). `InsertionError.message` holds a *table name*, not a message, so `except InsertionError as e: log(e.message)` prints `"Chunks"`. `InvalidVectorDimension` is defined twice — once in `data_layer/datalayer_exceptions` and once in `memory/memory_pool_exceptions` — with the same name and signature but no relationship, so `except` on one silently misses the other (`ProjectVectorHandler` raises the memory one for the same condition `VectorRepository` reports with the data-layer one).
+
+---
+
+## Section 5b: The DiskANN Write Path (found while fixing 5.2 and 5.3)
+
+Neither of these could have been seen before now: nothing had ever run a vector
+through `VectorDbManager` into DiskANN, because 5.3 meant the result was
+unusable and so the path was never exercised.
+
+### Bug 5.15: `batch_insert` Passes a Python List Where diskannpy Requires an Array (`vectorDbManager.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `batch_insert` converted the vectors with `numpy.array(...)` but passed `vector_ids` through as a list. diskannpy reads `vector_ids.shape`, so every batch insert raised `AttributeError: 'list' object has no attribute 'shape'`. Reproduced on the first real ingest.
+- **Status:** **Fixed.** Both are arrays now, and the ids are `uint32` — see 5.16 for why that matters.
+
+### Bug 5.16: Vector Ids Are 63-Bit and DiskANN Indexes uint32 (`EmbeddingManager.py`, `vectorDbManager.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `EmbeddingManager` derives `vector_id` masked into the signed 64-bit range (`Config.VECTOR_ID_MASK`, max 9.2e18), which is right for pgvector's `bigint` and impossible for DiskANN: diskannpy labels are `uint32`, max 4.29e9. Verified — `uint32` labels are accepted and `uint64` raises `TypeError: Cannot cast array data from dtype('uint64') to dtype('uint32')`. So no vector could ever be indexed, whatever 5.15 did.
+  Masking to 32 bits instead would not work either. At `MAX_VECTORS = 1,000,000` the birthday bound puts expected collisions at **about 116**, and a collision means two chunks sharing a label — a hit resolving to the wrong text.
+- **Status:** **Fixed** by letting `vector_meta_data` allocate the label instead of deriving it. Sequential ids cannot collide and use 0.02% of the `uint32` space at `MAX_VECTORS`. This is what the table was for: the id DiskANN returns is a label, and the table is what translates it back. `EmbeddingManager.vector_id` is unchanged and still correct for pgvector, which is where the memory layer uses it.
 
 ---
 
