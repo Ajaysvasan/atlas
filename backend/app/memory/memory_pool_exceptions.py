@@ -129,3 +129,46 @@ class WrongSnapshotScope(Exception):
             f"one is scoped to {self.actual!r}. The two keep their history in "
             f"different stores, so the call cannot be served."
         )
+
+
+class NewerMemorySchema(Exception):
+    def __init__(self, path, found, supported) -> None:
+        self.path = path
+        self.found = found
+        self.supported = supported
+        super().__init__(self.path, self.found, self.supported)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.path} is at memory schema {self.found}, but this code only "
+            f"knows up to {self.supported}. It was written by a newer version; "
+            f"opening it here could corrupt it."
+        )
+
+
+class ProjectNotFound(Exception):
+    def __init__(self, project_id) -> None:
+        self.project_id = project_id
+        super().__init__(self.project_id)
+
+    def __str__(self) -> str:
+        return (
+            f"No project {self.project_id!r} is registered. Register it through "
+            f"ProjectMetaData.add_project_vector before writing anything that "
+            f"belongs to it."
+        )
+
+
+class ProjectInAnotherTopic(Exception):
+    def __init__(self, project_id, topic_id, actual_topic_id) -> None:
+        self.project_id = project_id
+        self.topic_id = topic_id
+        self.actual_topic_id = actual_topic_id
+        super().__init__(self.project_id, self.topic_id, self.actual_topic_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Project {self.project_id!r} is under topic {self.actual_topic_id!r}, "
+            f"not {self.topic_id!r}. Re-register it under {self.topic_id!r} to "
+            f"move it; its rows follow."
+        )

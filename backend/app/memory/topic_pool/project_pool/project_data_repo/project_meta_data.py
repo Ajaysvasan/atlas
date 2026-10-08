@@ -5,21 +5,29 @@ See README.md in this directory.
 
 import operator
 import sqlite3
-import threading
-from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
-from typing import Iterator, List, NamedTuple, Sequence, Tuple
+from typing import List, NamedTuple, Sequence, Tuple
 
 import numpy as np
 from numpy import float32, ndarray, uint32
 from numpy.typing import NDArray
 
 from config import Config, get_logger
-from storage.timestamps import utc_now, as_timestamp
-from storage.sqlite_setup import connect, enable_wal
+from storage.timestamps import as_timestamp
 from data_layer.vector_db_manager.repository.vectorRepository import VectorRepository
-from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
+from memory.memory_database import MemoryDatabase, Schema
+from memory.memory_pool_exceptions import (
+    InvalidVectorId,
+    MisMatchCount,
+    ProjectInAnotherTopic,
+    ProjectNotFound,
+    TopicNotFound,
+)
+from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
+    SCHEMA as TOPIC_SCHEMA,
+    TopicPoolMetaHandler,
+)
 
 logger = get_logger(__name__)
 
@@ -34,35 +42,86 @@ class TopicProject(NamedTuple):
     project_summary: str
 
 
-def _registry(db_path: str | Path | None) -> sqlite3.Connection | None:
-    """Open the shared registry for a topic-wide read, or None if it does not exist yet."""
-    path = Path(db_path) if db_path is not None else ProjectMetaData.default_db_path()
-    if not path.exists():
-        return None
-    return connect(path)
-
-
-def _registry_has(cursor: sqlite3.Cursor, table: str) -> bool:
-    """Whether the registry has been initialised yet."""
-    return (
-        cursor.execute(
-            "select name from sqlite_master where type='table' and name=?", (table,)
-        ).fetchone()
-        is not None
+def _create_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute("""
+        create table if not exists project_table(
+            project_id text primary key,
+            project_name text not null,
+            topic_id text not null references topics_mapping_table(topic_id),
+            created_at text not null,
+            updated_at text not null,
+            project_summary text not null,
+            user_id text,
+            unique (project_id, topic_id)
+        )
+    """)
+    # Both children carry topic_id so the router's topic-wide read needs no
+    # join. The pair is the foreign key, so a child cannot disagree with its
+    # project's topic, and moving a project cascades to them.
+    cursor.execute("""
+        create table if not exists project_description_table(
+            topic_id text not null,
+            project_id text not null,
+            project_description_id text not null,
+            project_description text not null,
+            created_at text not null,
+            primary key (project_id, project_description_id),
+            foreign key (project_id, topic_id)
+                references project_table(project_id, topic_id) on update cascade
+        )
+    """)
+    cursor.execute("""
+        create table if not exists project_mapping_table(
+            project_id text not null,
+            topic_id text not null,
+            project_summary_vector_id integer not null,
+            created_at text not null,
+            primary key (project_id, project_summary_vector_id),
+            foreign key (project_id, topic_id)
+                references project_table(project_id, topic_id) on update cascade
+        )
+    """)
+    cursor.execute(
+        "create index if not exists idx_project_topic on project_table(topic_id)"
+    )
+    cursor.execute(
+        "create index if not exists idx_project_mapping_topic "
+        "on project_mapping_table(topic_id)"
     )
 
 
+SCHEMA = Schema("projects", _create_tables, requires=(TOPIC_SCHEMA,))
+
+
+def _registry(database: MemoryDatabase | str | Path | None) -> MemoryDatabase:
+    registry = MemoryDatabase.of(database)
+    registry.ensure(SCHEMA)
+    return registry
+
+
+def project_topic(
+    project_id: str, database: MemoryDatabase | str | Path | None = None
+) -> str | None:
+    """The topic a project is registered under, or None if it is not registered."""
+    with _registry(database).reading() as cursor:
+        row = cursor.execute(
+            "select topic_id from project_table where project_id = ?", (project_id,)
+        ).fetchone()
+    return row[0] if row is not None else None
+
+
+def is_registered(
+    project_id: str, database: MemoryDatabase | str | Path | None = None
+) -> bool:
+    """Whether a project row exists — what a refused foreign key usually means."""
+    return project_topic(project_id, database) is not None
+
+
 def list_topic_projects(
-    topic_id: str, db_path: str | Path | None = None
+    topic_id: str, database: MemoryDatabase | str | Path | None = None
 ) -> List[TopicProject]:
     """Every project under a topic, oldest first."""
-    connection = _registry(db_path)
-    if connection is None:
-        return []
-    with connection as conn:
-        cursor = conn.cursor()
-        if not _registry_has(cursor, "project_table"):
-            return []
+    with _registry(database).reading() as cursor:
         cursor.execute(
             """
             select project_id, project_name, project_summary
@@ -76,16 +135,10 @@ def list_topic_projects(
 
 
 def list_topic_vector_ids(
-    topic_id: str, db_path: str | Path | None = None
+    topic_id: str, database: MemoryDatabase | str | Path | None = None
 ) -> List[Tuple[str, int]]:
     """[(project_id, vector_id)] for every project under a topic."""
-    connection = _registry(db_path)
-    if connection is None:
-        return []
-    with connection as conn:
-        cursor = conn.cursor()
-        if not _registry_has(cursor, "project_mapping_table"):
-            return []
+    with _registry(database).reading() as cursor:
         cursor.execute(
             """
             select project_id, project_summary_vector_id
@@ -115,33 +168,32 @@ class ProjectRow(NamedTuple):
 
 
 class ProjectMetaData:
-    __project_db = Config.DATA_DIR / Path("project_db/project.sql")
-
-    @classmethod
-    def default_db_path(cls) -> Path:
-        """Where the shared registry lives when no path is given."""
-        return cls.__project_db
-
     def __init__(
         self,
         project_id: str,
         topic_id: str,
-        db_path: str | Path | None = None,
+        database: MemoryDatabase | str | Path | None = None,
         vector_repository: VectorRepository | None = None,
     ) -> None:
-        self.__connection: sqlite3.Connection | None = None
         self.__project_vector_handler = vector_repository
         self.__owns_vector_handler = vector_repository is None
 
         self.project_id = project_id
         self.topic_id = self.__validate_topic_id(topic_id)
-        self.db_path = Path(db_path) if db_path is not None else self.__project_db
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.database = _registry(database)
 
-        self._lock = threading.RLock()
-        self.__connection = connect(self.db_path, check_same_thread=False)
-        self.journal_mode = enable_wal(self.__connection, self.db_path)
-        self.__db_init()
+    def __refused(self, error: sqlite3.IntegrityError) -> Exception:
+        """Name the relationship a foreign key refused; SQLite says only that one did."""
+        if "FOREIGN KEY" not in str(error):
+            return error
+        if not TopicPoolMetaHandler(self.database).has_topic_id(self.topic_id):
+            return TopicNotFound(self.topic_id)
+        project = self.__get_project()
+        if project is None:
+            return ProjectNotFound(self.project_id)
+        if project.topic_id != self.topic_id:
+            return ProjectInAnotherTopic(self.project_id, self.topic_id, project.topic_id)
+        return error
 
     @property
     def vector_handler(self) -> VectorRepository:
@@ -149,65 +201,6 @@ class ProjectMetaData:
         if self.__project_vector_handler is None:
             self.__project_vector_handler = VectorRepository(self.project_id)
         return self.__project_vector_handler
-
-    @contextmanager
-    def _reading(self) -> Iterator[sqlite3.Cursor]:
-        """A cursor held under the lock for as long as the caller needs it."""
-        with self._lock:
-            assert self.__connection is not None
-            yield self.__connection.cursor()
-
-    @contextmanager
-    def _writing(self) -> Iterator[sqlite3.Cursor]:
-        """A cursor under the lock, committed on success, rolled back on failure."""
-        with self._lock:
-            assert self.__connection is not None
-            cursor = self.__connection.cursor()
-            try:
-                yield cursor
-                self.__connection.commit()
-            except BaseException:
-                self.__connection.rollback()
-                raise
-
-    def __db_init(self) -> None:
-        with self._writing() as curr:
-            curr.execute("""create table if not exists project_table(
-                    project_id text primary key,
-                    project_name text not null,
-                    topic_id text not null, 
-                    created_at date not null,
-                    updated_at date not null,
-                    project_summary text not null,
-                    user_id text
-                    );""")
-            curr.execute("""create table if not exists project_description_table(
-                    topic_id text not null, 
-                    project_id text not null,
-                    project_description_id text not null,
-                    project_description text not null,
-                    created_at date not null,
-                    primary key (project_id, project_description_id),
-                    foreign key (project_id) references project_table(project_id)
-                    );""")
-            curr.execute("""create table if not exists project_mapping_table(
-                    project_id text not null,
-                    topic_id text not null,
-                    project_summary_vector_id integer not null,
-                    created_at date not null,
-                    primary key (project_id, project_summary_vector_id),
-                    foreign key (project_id) references project_table(project_id)
-                    );""")
-            # Both topic-wide reads filter on topic_id, which no primary key
-            # covers; the router runs them on every query.
-            curr.execute(
-                "create index if not exists idx_project_topic "
-                "on project_table(topic_id);"
-            )
-            curr.execute(
-                "create index if not exists idx_project_mapping_topic "
-                "on project_mapping_table(topic_id);"
-            )
 
     @staticmethod
     def __validate_vector_id(vector_id) -> int:
@@ -283,11 +276,6 @@ class ProjectMetaData:
                     user_id,
             ),
         )
-        for table in ("project_mapping_table", "project_description_table"):
-            cursor.execute(
-                f"update {table} set topic_id = ? where project_id = ? and topic_id <> ?",
-                (self.topic_id, self.project_id, self.topic_id),
-            )
 
     def __write_meta_data(
         self,
@@ -299,21 +287,24 @@ class ProjectMetaData:
         user_id: str | None,
     ) -> None:
         """Both metadata tables in one transaction."""
-        with self._writing() as cursor:
-            self.__upsert_project(
-                cursor, project_name, project_summary, created_at, updated_at, user_id
-            )
-            cursor.executemany(
-                """
-                insert or ignore into project_mapping_table
-                    (project_id, topic_id, project_summary_vector_id, created_at)
-                values (?, ?, ?, ?)
-                """,
-                [
-                    (self.project_id, self.topic_id, vector_id, updated_at)
-                    for vector_id in vector_ids
-                ],
-            )
+        try:
+            with self.database.writing() as cursor:
+                self.__upsert_project(
+                    cursor, project_name, project_summary, created_at, updated_at, user_id
+                )
+                cursor.executemany(
+                    """
+                    insert or ignore into project_mapping_table
+                        (project_id, topic_id, project_summary_vector_id, created_at)
+                    values (?, ?, ?, ?)
+                    """,
+                    [
+                        (self.project_id, self.topic_id, vector_id, updated_at)
+                        for vector_id in vector_ids
+                    ],
+                )
+        except sqlite3.IntegrityError as error:
+            raise self.__refused(error) from error
 
     def __compensate(self, vector_ids: Sequence[int]) -> None:
         """Remove vectors whose metadata failed to land."""
@@ -397,7 +388,7 @@ class ProjectMetaData:
 
         self.vector_handler.update(checked_id, vector)
 
-        with self._writing() as cursor:
+        with self.database.writing() as cursor:
             cursor.execute(
                 "update project_table set updated_at = ? where project_id = ?",
                 (updated, self.project_id),
@@ -407,7 +398,15 @@ class ProjectMetaData:
         self, rows: Sequence[Tuple[str, str]], created_at: str
     ) -> None:
         """Insert descriptions, or refresh the text of ones already stored."""
-        with self._writing() as cursor:
+        try:
+            self.__insert_descriptions(rows, created_at)
+        except sqlite3.IntegrityError as error:
+            raise self.__refused(error) from error
+
+    def __insert_descriptions(
+        self, rows: Sequence[Tuple[str, str]], created_at: str
+    ) -> None:
+        with self.database.writing() as cursor:
             cursor.executemany(
                 """
                 insert into project_description_table
@@ -430,7 +429,7 @@ class ProjectMetaData:
             )
 
     def __get_description(self, description_id: str) -> str | None:
-        with self._reading() as cursor:
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 select project_description
@@ -443,7 +442,7 @@ class ProjectMetaData:
             return row[0] if row is not None else None
 
     def __get_descriptions(self) -> List[Tuple[str, str, str]]:
-        with self._reading() as cursor:
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 select project_description_id, project_description, created_at
@@ -459,7 +458,7 @@ class ProjectMetaData:
         summary = self.__validate_summary(project_summary)
         updated = as_timestamp(updated_at)
 
-        with self._writing() as cursor:
+        with self.database.writing() as cursor:
             cursor.execute(
                 "update project_table set project_summary = ?, updated_at = ? "
                 "where project_id = ?",
@@ -473,7 +472,7 @@ class ProjectMetaData:
         return self.vector_handler.search(self.__validate_vector_id(vector_id))
 
     def __get_all_summary_vector_id(self) -> List[int]:
-        with self._reading() as cursor:
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 select project_summary_vector_id
@@ -486,7 +485,7 @@ class ProjectMetaData:
             return [row[0] for row in cursor.fetchall()]
 
     def __get_project(self) -> ProjectRow | None:
-        with self._reading() as cursor:
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 select project_id, project_name, topic_id, created_at, updated_at,
@@ -497,32 +496,6 @@ class ProjectMetaData:
             )
             row = cursor.fetchone()
             return ProjectRow(*row) if row is not None else None
-
-    def __get_topic_projects(self) -> List[TopicProject]:
-        with self._reading() as cursor:
-            cursor.execute(
-                """
-                select project_id, project_name, project_summary
-                from project_table
-                where topic_id = ?
-                order by datetime(created_at), created_at, rowid
-                """,
-                (self.topic_id,),
-            )
-            return [TopicProject(*row) for row in cursor.fetchall()]
-
-    def __get_topic_summary_vector_ids(self) -> List[Tuple[str, int]]:
-        with self._reading() as cursor:
-            cursor.execute(
-                """
-                select project_id, project_summary_vector_id
-                from project_mapping_table
-                where topic_id = ?
-                order by project_id, datetime(created_at), created_at, rowid
-                """,
-                (self.topic_id,),
-            )
-            return cursor.fetchall()
 
     def add_project_vector(
         self,
@@ -631,7 +604,7 @@ class ProjectMetaData:
 
     def get_topic_projects(self) -> List[TopicProject]:
         """Every project under this topic, oldest first."""
-        return self.__get_topic_projects()
+        return list_topic_projects(self.topic_id, self.database)
 
     def get_project(self) -> ProjectRow | None:
         """This project's row, or None."""
@@ -639,12 +612,10 @@ class ProjectMetaData:
 
     def get_topic_summary_vector_ids(self) -> List[Tuple[str, int]]:
         """[(project_id, vector_id)] for every project under this topic."""
-        return self.__get_topic_summary_vector_ids()
+        return list_topic_vector_ids(self.topic_id, self.database)
 
     def close(self) -> None:
-        if self.__connection is not None:
-            self.__connection.close()
-            self.__connection = None
+        """Closes the vector store this registry opened; the database is shared."""
         if self.__owns_vector_handler and self.__project_vector_handler is not None:
             self.__project_vector_handler.close()
             self.__project_vector_handler = None

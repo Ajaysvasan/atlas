@@ -22,6 +22,7 @@ from memory.topic_pool.project_pool.project_snapshot import (
 )
 
 PROJECT_ID = "proj_1"
+DB = "memory.db"
 
 
 @pytest.fixture
@@ -41,11 +42,17 @@ def _embed(_text):
     return np.ones(128, dtype=np.float32)
 
 
+@pytest.fixture(autouse=True)
+def _projects_registered(tmp_path, seed_projects):
+    """Snapshot rows reference their project, so the ones used here are registered."""
+    seed_projects(tmp_path / DB, "topic", PROJECT_ID, "proj_2")
+
+
 @pytest.fixture
 def conversations(tmp_path):
     """Two conversations writing snapshots into one project's database."""
-    a = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_A")
-    b = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_B")
+    a = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_A", tmp_path / DB)
+    b = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_B", tmp_path / DB)
     yield a, b
     a.close()
     b.close()
@@ -56,7 +63,6 @@ def project(tmp_path, conversations):
     a, _ = conversations
     snapshot = ProjectSnapshot(
         PROJECT_ID, "Proj", meta_repo=a, embed=_embed,
-        project_db_path=tmp_path / "project.sql",
     )
     # The vectors live in PostgreSQL; this covers the flow, not the store.
     snapshot.snap_shot._vector_manager = mock.MagicMock()
@@ -125,7 +131,7 @@ class TestItSpansEveryConversation:
     def test_another_project_is_not_pulled_in(self, project, tmp_path,
                                               conversations):
         a, _ = conversations
-        other = ConversationVectorMetaDataRepository(tmp_path, "proj_2", "conv_X")
+        other = ConversationVectorMetaDataRepository("proj_2", "conv_X", tmp_path / DB)
         other.insert_cumulative_vector_meta_data(301, "someone else", "2026-10-01",
                                                  "proj_2", 5)
         a.insert_cumulative_vector_meta_data(101, "ours", "2026-10-01",
@@ -194,7 +200,6 @@ class TestAnEmptySummary:
                                              PROJECT_ID, 5)
         snapshot = ProjectSnapshot(
             PROJECT_ID, "Proj", meta_repo=a, embed=_embed,
-            project_db_path=tmp_path / "project.sql",
         )
         snapshot.snap_shot._vector_manager = mock.MagicMock()
 

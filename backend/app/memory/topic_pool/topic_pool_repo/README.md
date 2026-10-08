@@ -12,17 +12,19 @@ owns the rules about when each operation is allowed.
 create table if not exists topics_mapping_table(
     topic_id text primary key not null,
     topic_name text not null,
-    created_at DATE NOT NULL,
-    is_active CHAR(2)
+    created_at text not null,
+    is_active text not null default 't' check (is_active in ('t', 'f'))
 );
 ```
 
-`is_active` holds `'t'` or `'f'`. Every read filters on `'t'`, so a soft-deleted
-topic is invisible to `is_topic_exists` and `get_topic_id` while its row stays on
-disk.
+`is_active` holds `'t'` or `'f'`, and the `CHECK` refuses anything else. Every
+read filters on `'t'`, so a soft-deleted topic is invisible to `is_topic_exists`
+and `get_topic_id` while its row stays on disk — `has_topic_id` alone sees both,
+because a soft-deleted row still satisfies the projects' foreign key.
 
-The default file is `data/topic_db/topic.sql`; a caller can pass its own path,
-which is what the tests do.
+The table lives in the memory database with every other table in this layer
+(`memory/README.md`). A caller can pass a database or a path to one, which is
+what the tests do; with neither, the handler uses the shared database.
 
 ## Why deletion is soft
 
@@ -52,21 +54,17 @@ the whole table: 211 microseconds at ten thousand topics against 2.3 with it.
 Creating a topic is therefore a bare INSERT that converts `IntegrityError` into
 `TopicAlreadyExists` — there is no check to race.
 
-## Why the connection is shared and locked
+## Why it holds no connection
 
-One connection, opened through `memory/sqlite_setup.connect()` with
-`check_same_thread=False`, and every statement taken under an `RLock` through
-`__reading()` / `__writing()`.
-
-Both halves are needed. Without `check_same_thread=False` SQLite rejects any use
-from another thread outright, so the lock would be protecting something nothing
-else could reach. Without the lock, `commit()` and `rollback()` apply to the
-whole connection rather than to one cursor, so threads publish each other's
-half-written transactions.
-
-`close()` takes the same lock. Closing a connection while another thread is
-mid-statement does not raise — it segfaults the interpreter, which is why the
-test for it runs in a subprocess and asserts on how that process died.
+Every statement goes through `MemoryDatabase.reading()` / `writing()`, on the
+one connection the whole layer shares. The properties this module used to
+guarantee for itself — `check_same_thread=False` so other threads can reach the
+connection, one lock so threads cannot publish each other's half-written
+transactions, a `close()` that waits for a statement in flight rather than
+segfaulting under it — are now the database's, and hold for every owner at
+once. `close()` here releases nothing: the database outlives its owners. The
+subprocess test that closes the database under a writing thread still lives in
+this module's tests, because topic writes are what it drives.
 
 ## Why an UPDATE that matches nothing raises
 
@@ -76,5 +74,5 @@ that it worked.
 
 ## Tests
 
-`test/memory_layer_testing/test_topic_manager.py` — 24 tests covering both this
-module and `TopicManager`.
+`test/memory_layer_testing/test_topic_manager.py`, covering both this module and
+`TopicManager`.

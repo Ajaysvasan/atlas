@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from config import get_logger
+from memory.memory_database import MemoryDatabase
 from memory.memory_pool_exceptions import (
     InvalidCursorException,
     InvalidSnapshotScope,
@@ -41,27 +42,24 @@ SCOPES = frozenset({CONVERSATION, PROJECT})
 class SnapShot:
     def __init__(
         self,
-        conversation_dir: str | Path,
         project_id: str,
         project_name: str,
         conversation_id: str = "",
         meta_repo: ConversationVectorMetaDataRepository | None = None,
         scope: str = CONVERSATION,
         snapshot_repo: ProjectSnapshotRepository | None = None,
-        project_db_path: str | Path | None = None,
+        database: MemoryDatabase | str | Path | None = None,
     ) -> None:
         if scope not in SCOPES:
             raise InvalidSnapshotScope(scope, SCOPES)
         self.scope = scope
-        self.conversation_dir = Path(conversation_dir)
         self.project_id = project_id
         self.project_name = project_name
 
-        # The two scopes keep their history in different stores, so each builds
-        # only the one it reads: a conversation snapshot walks this project's
-        # cumulative summaries in the conversation database, a project snapshot
-        # walks the project registry. conversation_id is meaningless to the
-        # second, which is why it is only required for the first.
+        # Each scope builds only the repository it reads: a conversation
+        # snapshot walks this conversation's cumulative summaries, a project
+        # snapshot walks the project's snapshot chain. conversation_id is
+        # meaningless to the second, which is why only the first requires it.
         self._owns_meta_repo = False
         self._owns_snapshot_repo = False
         self.meta_repo: ConversationVectorMetaDataRepository | None = None
@@ -73,13 +71,13 @@ class SnapShot:
             )
             self._owns_meta_repo = meta_repo is None
             self.meta_repo = meta_repo or ConversationVectorMetaDataRepository(
-                self.conversation_dir, project_id, self.conversation_id
+                project_id, self.conversation_id, database
             )
         else:
             self.conversation_id = conversation_id
             self._owns_snapshot_repo = snapshot_repo is None
             self.snapshot_repo = snapshot_repo or ProjectSnapshotRepository(
-                project_id, db_path=project_db_path
+                project_id, database
             )
 
         self._vector_manager: ConversationVectorManager | None = None

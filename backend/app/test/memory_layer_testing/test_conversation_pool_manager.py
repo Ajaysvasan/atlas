@@ -34,6 +34,15 @@ _CID = "conv_abc"
 # Unit level
 # ---------------------------------------------------------------------------
 
+DB = "memory.db"
+
+
+@pytest.fixture(autouse=True)
+def _projects_registered(tmp_path, seed_projects):
+    """Turn and snapshot rows reference their project, so the one used here is registered."""
+    seed_projects(tmp_path / DB, "topic", _PID)
+
+
 @pytest.fixture
 def mgr(tmp_path):
     """Yields (manager, mock_full_conversation, mock_summariser)."""
@@ -43,7 +52,7 @@ def mgr(tmp_path):
         mock_cs.summary_repo.get_cumulative_vector_meta_data_ids.return_value = []
         mock_fc.next_sequence_number.return_value = 1
         manager = ConversationPoolManager(
-            conversation_dir=tmp_path,
+            database=tmp_path / DB,
             project_id=_PID,
             project_name=_PNAME,
             conversation_id=_CID,
@@ -65,18 +74,18 @@ class TestWiring:
     def test_summariser_gets_the_same_directory(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER) as MockCS:
             MockCS.return_value.summary_repo.get_cumulative_vector_meta_data_ids.return_value = []
-            ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
-        assert MockCS.call_args.kwargs["full_conversation_dir"] == tmp_path
+            manager = ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB)
+        assert MockCS.call_args.kwargs["database"] is manager.database
 
     def test_rejects_a_zero_threshold(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER):
             with pytest.raises(ValueError):
-                ConversationPoolManager(tmp_path, _PID, _PNAME, _CID, snapshot_every_n_turns=0)
+                ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB, snapshot_every_n_turns=0)
 
     def test_rejects_a_negative_threshold(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER):
             with pytest.raises(ValueError):
-                ConversationPoolManager(tmp_path, _PID, _PNAME, _CID, snapshot_every_n_turns=-3)
+                ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB, snapshot_every_n_turns=-3)
 
 
 class TestCursorRestoration:
@@ -91,14 +100,14 @@ class TestCursorRestoration:
                 (1,),
                 (2,),
             ]
-            manager = ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
+            manager = ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB)
         manager.snap_shot.sync_cursors.assert_called_once()
 
     def test_cursors_not_touched_when_no_snapshots(self, tmp_path):
         with patch(_FULL_CONV), patch(_SUMMARISER) as MockCS:
             mock_cs = MockCS.return_value
             mock_cs.summary_repo.get_cumulative_vector_meta_data_ids.return_value = []
-            manager = ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
+            manager = ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB)
         manager.snap_shot.sync_cursors.assert_not_called()
 
 
@@ -287,7 +296,7 @@ def live(tmp_path):
         _ConversationSummary__unload_model=lambda self, m: None,
     ):
         manager = ConversationPoolManager(
-            conversation_dir=tmp_path,
+            database=tmp_path / DB,
             project_id=_PID,
             project_name=_PNAME,
             conversation_id=_CID,
@@ -385,8 +394,12 @@ class TestIntegration:
             fired = [manager.record_turn(role, text)[1] for role, text in dialogue]
 
         assert fired[-1] == "A rolled-up summary."
-        model.create_chat_completion.assert_called_once()
-        prompt = model.create_chat_completion.call_args.kwargs["messages"][1]["content"]
+        # Two calls: the conversation summary, then the project snapshot that
+        # every conversation snapshot rolls forward. This asserted one call and
+        # passed only because an earlier run had left this project's snapshots
+        # in the real registry, so the roll-forward found nothing pending.
+        conversation_call, project_call = model.create_chat_completion.call_args_list
+        prompt = conversation_call.kwargs["messages"][1]["content"]
         assert (
             "User: How does DiskANN work?\n"
             "Assistant: It builds a Vamana graph.\n"
@@ -394,6 +407,9 @@ class TestIntegration:
             "Assistant: Greedy traversal from an entry point.\n"
             "User: Thanks."
         ) in prompt
+        project_prompt = project_call.kwargs["messages"][1]["content"]
+        assert "A rolled-up summary." in project_prompt
+        assert "User:" not in project_prompt
 
     def test_the_summariser_receives_a_labelled_transcript(self, live):
         manager, _ = live
@@ -424,7 +440,7 @@ class TestIntegration:
             manager.record_turn("user", f"turn {i}")
 
         reopened = ConversationPoolManager(
-            conversation_dir=tmp_path,
+            database=tmp_path / DB,
             project_id=_PID,
             project_name=_PNAME,
             conversation_id=_CID,
@@ -455,18 +471,18 @@ class TestConnectionsAreReleased:
                 self.closed = True
 
         with patch(_VEC_REPO, TrackingRepo):
-            with ConversationPoolManager(tmp_path, _PID, _PNAME, _CID) as manager:
+            with ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB) as manager:
                 manager.snap_shot.vector_manager  # opens the connection
             assert opened and all(repo.closed for repo in opened)
 
     def test_a_manager_that_never_searched_closes_cleanly(self, tmp_path):
         with patch(_VEC_REPO, _FakeVectorRepository):
-            with ConversationPoolManager(tmp_path, _PID, _PNAME, _CID) as manager:
+            with ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB) as manager:
                 manager.add_turn("user", "no search happened")
 
     def test_closing_twice_is_safe(self, tmp_path):
         with patch(_VEC_REPO, _FakeVectorRepository):
-            manager = ConversationPoolManager(tmp_path, _PID, _PNAME, _CID)
+            manager = ConversationPoolManager(_PID, _PNAME, _CID, database=tmp_path / DB)
             manager.snap_shot.vector_manager  # opens the connection
             manager.close()
             manager.close()

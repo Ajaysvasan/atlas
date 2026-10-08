@@ -38,11 +38,13 @@ class KeywordSearch:
     def __init__(
         self,
         mapping,
-        chunk_store_path: str | Path = Config.DB_PATH,
+        chunk_store_path: str | Path | None = None,
         fts_path: str | Path = FTS_PATH,
     ) -> None:
         self.mapping = mapping
-        self.chunk_store_path = Path(chunk_store_path)
+        self.chunk_store_path = Path(
+            chunk_store_path if chunk_store_path is not None else Config.DB_PATH
+        )
         self.fts_path = Path(fts_path)
         self.fts_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = connect(self.fts_path, check_same_thread=False)

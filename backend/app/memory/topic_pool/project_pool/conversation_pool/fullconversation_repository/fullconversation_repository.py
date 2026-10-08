@@ -1,21 +1,17 @@
 import hashlib
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Tuple
 
 from config import get_logger
-from storage.timestamps import utc_now
-from storage.sqlite_setup import (
-    connect,
-    enable_wal,
-)
-
-from memory.topic_pool.project_pool.conversation_pool.schema_migrations import (
-    migrate,
-)
-
 from memory.identifiers import require_identifier
+from memory.memory_database import MemoryDatabase, Schema
+from memory.memory_pool_exceptions import ProjectNotFound
+from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
+    SCHEMA as PROJECT_SCHEMA,
+    is_registered,
+)
+from storage.timestamps import utc_now
 
 logger = get_logger(__name__)
 
@@ -39,87 +35,90 @@ class Turn(NamedTuple):
     created_at: str
     chunk_id: str
 
+def _create_tables(cursor: sqlite3.Cursor) -> None:
+    # This module owns summary_chunks: turns are its rows, and full_conversation
+    # points at them. ConversationVectorMetaDataRepository writes snapshot
+    # chunks into it too, but no longer creates it (bug 4.65).
+    cursor.execute("""
+        create table if not exists summary_chunks(
+            chunk_id text primary key,
+            conversation_id text not null,
+            chunk text not null,
+            created_at text not null,
+            chunker_type text not null,
+            unique (chunk_id, conversation_id)
+        )
+    """)
+    # The pair is the foreign key, so a turn and its text cannot disagree about
+    # which conversation they belong to.
+    cursor.execute("""
+        create table if not exists full_conversation(
+            project_id text not null references project_table(project_id),
+            conversation_id text not null,
+            sequence_number integer not null,
+            chunk_id text not null,
+            role text not null check (role in ('user', 'assistant', 'system')),
+            created_at text not null,
+            primary key (conversation_id, sequence_number),
+            foreign key (chunk_id, conversation_id)
+                references summary_chunks(chunk_id, conversation_id)
+        )
+    """)
+    # get_sequence_number() looks a turn up by chunk_id, which the primary key
+    # (conversation_id, sequence_number) cannot serve.
+    cursor.execute(
+        "create index if not exists idx_full_conversation_chunk "
+        "on full_conversation(chunk_id)"
+    )
+
+
+SCHEMA = Schema("conversation_turns", _create_tables, requires=(PROJECT_SCHEMA,))
+
+
 class FullConversationRepository:
     def __init__(
-            self, conversation_path: str | Path, project_id: str, project_name: str , conversation_id : str
+        self,
+        project_id: str,
+        project_name: str,
+        conversation_id: str,
+        database: MemoryDatabase | str | Path | None = None,
     ):
         self.project_id = project_id
         self.project_name = project_name
-        self.conversation_dir = Path(conversation_path)
-        self.conversation_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.conversation_dir / f"{project_id}_conversation.db"
         self.conversation_id = require_identifier(conversation_id, "conversation_id")
-        self.__init_db()
+        self.database = MemoryDatabase.of(database)
+        self.database.ensure(SCHEMA)
 
-    def __init_db(self):
-        # Before any statement: a database written before `conversation_id`
-        # existed needs its tables rebuilt, and CREATE TABLE IF NOT EXISTS
-        # would leave it untouched.
-        migrate(self.db_path)
-        with connect(self.db_path) as conn:
-            self.journal_mode = enable_wal(conn, self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("""
-            create table if not exists summary_chunks (
-                chunk_id text primary key,
-                conversation_id text not null, 
-                chunk text not null,
-                created_at date not null,
-                chunker_type text not null
-            )
-            """)
-            cursor.execute("""
-            create table if not exists full_conversation(
-                project_id text not null,
-                conversation_id text not null,
-                sequence_number int not null,
-                chunk_id text not null,
-                role text not null,
-                created_at date not null,
-                primary key (conversation_id, sequence_number),
-                foreign key (chunk_id) references summary_chunks (chunk_id)
-            )
-            """)
-            # Read by ConversationVectorMetaDataRepository, not from here:
-            # get_highest_summarised_sequence() joins this table on chunk_id on
-            # every snapshot decision, and without the index SQLite builds a
-            # transient one per call.
-            cursor.execute(
-                "create index if not exists idx_full_conversation_chunk "
-                "on full_conversation(chunk_id);"
-            )
-            conn.commit()
+    def __refused(self, error: sqlite3.IntegrityError) -> Exception:
+        if "FOREIGN KEY" in str(error) and not is_registered(self.project_id, self.database):
+            return ProjectNotFound(self.project_id)
+        return error
 
     def __add_chunks(
         self,
         full_conversaton_meta_datas: List[Tuple[str, str, int, str, str]],
         chunks: List[Tuple[str, str , str, str, str]],
     ) -> None:
-        with connect(self.db_path) as conn:
-            # summary_chunks is the FK parent, so its rows must land first.
-            try:
-                cursor = conn.cursor()
+        try:
+            with self.database.writing() as cursor:
+                # summary_chunks is the FK parent, so its rows must land first.
                 cursor.executemany(
-                    """
-                INSERT INTO summary_chunks(chunk_id , conversation_id ,  chunk , created_at , chunker_type) VALUES (? , ? ,? , ? , ?);
-                """,
+                    "INSERT INTO summary_chunks(chunk_id , conversation_id ,  chunk , created_at , chunker_type) VALUES (? , ? ,? , ? , ?);",
                     chunks,
                 )
                 cursor.executemany(
-                    """
-        INSERT INTO full_conversation(project_id , conversation_id, sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ? , ?  , ?);
-        """,
+                    "INSERT INTO full_conversation(project_id , conversation_id, sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ? , ?  , ?);",
                     full_conversaton_meta_datas,
                 )
-
-                conn.commit()
-            except sqlite3.Error as e:
-                conn.rollback()
-                raise e
+        except sqlite3.IntegrityError as error:
+            raise self.__refused(error) from error
 
     def __make_chunk_id(self, sequence_number: int, text: str) -> str:
         """Deterministic, collision-free id for one conversation turn."""
-        payload = f"{self.project_id}\x00{sequence_number}\x00{text}"
+        payload = (
+            f"{self.project_id}\x00{self.conversation_id}\x00"
+            f"{sequence_number}\x00{text}"
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def __next_sequence_number(self, cursor) -> int:
@@ -136,13 +135,10 @@ class FullConversationRepository:
             return []
 
         created_at = utc_now()
-        conn = connect(self.db_path, isolation_level=None)
         try:
-            # The write lock up front, so the MAX() read and the INSERT cannot
-            # interleave with another writer and reuse a sequence_number.
-            conn.execute("BEGIN IMMEDIATE;")
-            try:
-                cursor = conn.cursor()
+            # BEGIN IMMEDIATE, through writing(): the MAX() read and the INSERT
+            # cannot interleave with another writer and reuse a sequence_number.
+            with self.database.writing() as cursor:
                 first_sequence = self.__next_sequence_number(cursor)
 
                 chunk_rows = []
@@ -169,17 +165,12 @@ class FullConversationRepository:
                     "INSERT INTO full_conversation(project_id , conversation_id,  sequence_number , chunk_id , role , created_at) VALUES (? , ? , ? , ? , ? , ?);",
                     meta_rows,
                 )
-                conn.execute("COMMIT;")
-                return sequences
-            except sqlite3.Error:
-                conn.execute("ROLLBACK;")
-                raise
-        finally:
-            conn.close()
+            return sequences
+        except sqlite3.IntegrityError as error:
+            raise self.__refused(error) from error
 
     def __get_sequence_number(self, chunk_id: str) -> int | None:
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute(
                 f"""SELECT sequence_number from full_conversation where chunk_id = ? and conversation_id = ?;""",
                 (chunk_id,self.conversation_id),
@@ -192,8 +183,7 @@ class FullConversationRepository:
         # and would return the entire conversation.
         if n <= 0:
             return []
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 SELECT chunk FROM (
@@ -213,8 +203,7 @@ class FullConversationRepository:
             return cursor.fetchall()
 
     def __get_ranged_chunks(self, start: int, end: int):
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 select s.chunk
@@ -233,8 +222,7 @@ class FullConversationRepository:
 
     def __get_ranged_rows(self, start: int, end: int):
         """Full chunk rows for a range, not just the text."""
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
                 select s.chunk_id , s.chunk , s.created_at , s.chunker_type
@@ -251,8 +239,7 @@ class FullConversationRepository:
             return cursor.fetchall()
 
     def __get_messages_after(self, sequence_number: int):
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute(
                 """
             select chunk 
@@ -270,8 +257,7 @@ class FullConversationRepository:
 
     def __get_all_from_conversation(self):
 
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute("""
             select chunk
             from summary_chunks as s
@@ -286,15 +272,14 @@ class FullConversationRepository:
     def __select_turns(self, clause: str, params: tuple = ()) -> List[Turn]:
         # _TURN_QUERY already carries `WHERE f.conversation_id = ?`, so its
         # parameter leads and every clause here continues with AND.
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
+        with self.database.reading() as cursor:
+            rows = cursor.execute(
                 _TURN_QUERY + clause, (self.conversation_id, *params)
             ).fetchall()
         return [Turn(*row) for row in rows]
 
     def __get_conversation_size(self):
-        with connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self.database.reading() as cursor:
             cursor.execute("""
             select count(chunk) 
             from summary_chunks as s
@@ -321,8 +306,8 @@ class FullConversationRepository:
 
     def next_sequence_number(self) -> int:
         """The sequence_number the next appended turn will receive."""
-        with connect(self.db_path) as conn:
-            return self.__next_sequence_number(conn.cursor())
+        with self.database.reading() as cursor:
+            return self.__next_sequence_number(cursor)
 
     def get_sequence_number(self, chunk_id: str) -> int:
         return self.__get_sequence_number(chunk_id)

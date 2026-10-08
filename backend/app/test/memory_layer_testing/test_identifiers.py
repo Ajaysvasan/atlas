@@ -50,7 +50,7 @@ class TestTheConversationLayerRefusesABadId:
     def test_the_repository(self, tmp_path, value):
         with pytest.raises(InvalidIdentifier):
             FullConversationRepository(
-                conversation_path=tmp_path, project_id="p",
+                database=tmp_path / "memory.db", project_id="p",
                 project_name="n", conversation_id=value,
             )
 
@@ -59,28 +59,32 @@ class TestTheConversationLayerRefusesABadId:
         """A pass-through, but it must still fail at construction."""
         with pytest.raises(InvalidIdentifier):
             FullConversation(
-                full_conversation_dir=tmp_path, project_id="p",
+                database=tmp_path / "memory.db", project_id="p",
                 project_name="n", conversation_id=value,
             )
 
     @pytest.mark.parametrize("value", ["", "   ", None])
     def test_the_metadata_repository(self, tmp_path, value):
         with pytest.raises(InvalidIdentifier):
-            ConversationVectorMetaDataRepository(tmp_path, "p", value)
+            ConversationVectorMetaDataRepository("p", value, tmp_path / "memory.db")
 
     @pytest.mark.parametrize("value", ["", "   ", None])
     def test_the_snapshot(self, tmp_path, value):
         with pytest.raises(InvalidIdentifier):
             SnapShot(
-                conversation_dir=tmp_path, project_id="p",
+                database=tmp_path / "memory.db", project_id="p",
                 project_name="n", conversation_id=value,
             )
 
 
 class TestAGoodIdStillWorks:
+    @pytest.fixture(autouse=True)
+    def _project_registered(self, tmp_path, seed_projects):
+        seed_projects(tmp_path / "memory.db", "topic", "p")
+
     def test_the_repository_accepts_one(self, tmp_path):
         repo = FullConversationRepository(
-            conversation_path=tmp_path, project_id="p",
+            database=tmp_path / "memory.db", project_id="p",
             project_name="n", conversation_id="conv_1",
         )
         assert repo.conversation_id == "conv_1"
@@ -89,13 +93,13 @@ class TestAGoodIdStillWorks:
     def test_a_padded_id_is_stored_stripped(self, tmp_path):
         """So the value written to the column matches what readers filter on."""
         repo = FullConversationRepository(
-            conversation_path=tmp_path, project_id="p",
+            database=tmp_path / "memory.db", project_id="p",
             project_name="n", conversation_id="  conv_1  ",
         )
         repo.append_turns([("user", "hello")])
 
         same = FullConversationRepository(
-            conversation_path=tmp_path, project_id="p",
+            database=tmp_path / "memory.db", project_id="p",
             project_name="n", conversation_id="conv_1",
         )
         assert [t.text for t in same.get_all_turns()] == ["hello"]

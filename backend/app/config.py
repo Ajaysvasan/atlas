@@ -59,6 +59,7 @@ class Config:
         )
     )
     PROJECT = Path(os.path.join(DATA_DIR, "memory", "topic_pool", "project_pool"))
+    MEMORY_DB = Path(DATA_DIR) / "memory" / "memory_layer" / "memory_layer.db"
     VECTOR_DIMENSIONS = 128
 
     # Vector ids are stored in signed 64-bit columns (SQLite INTEGER, Postgres

@@ -3,103 +3,63 @@
 ## Overview & Purpose
 The `conversation_data_management` sub-module holds the two classes that stand between the snapshot layer and its two storage backends:
 
-1. `conversationVectorMetaManager.py` defines `ConversationVectorMetaDataRepository` — the SQLite metadata for one project's snapshots.
+1. `conversationVectorMetaManager.py` defines `ConversationVectorMetaDataRepository` — the SQLite metadata for one conversation's snapshots.
 2. `conversationVectorManager.py` defines `ConversationVectorManager` — a thin proxy onto the PostgreSQL/pgvector `VectorRepository`.
 
 ---
 
 ## `class ConversationVectorMetaDataRepository`
 
-One project, one database file: `<conversation_dir>/<project_id>_conversation.db`. `FullConversationRepository` writes the conversation turns into that **same** file, which is what lets `get_highest_summarised_sequence()` join snapshot metadata against `full_conversation` without a second connection.
+Snapshot metadata for one conversation, in the memory database alongside the
+turns it covers and the project it belongs to.
 
 ### Constructor
 ```python
-def __init__(self, conversation_path: str | Path, project_id: str) -> None:
+ConversationVectorMetaDataRepository(project_id: str, conversation_id: str,
+                                     database: MemoryDatabase | str | Path | None = None)
 ```
-Creates the directory if it does not exist, opens the connection, enables `PRAGMA foreign_keys`, and creates the four tables if they are missing. Constructing it twice against the same path is a no-op.
+`conversation_id` must be a non-blank string (`InvalidIdentifier`). `database` is
+a `MemoryDatabase` or a path to one; `None` uses the shared memory database.
+Creates its three tables if they are missing, after the project and turn tables
+they reference. Constructing it twice is a no-op.
 
 ### Thread safety
-**Safe to share across threads.** The connection is opened with `check_same_thread=False` and every statement runs under a `threading.RLock` held for the whole operation — execute, fetch, and commit or rollback together.
-
-Both halves are needed, and the lock is the important one:
-
-- Without `check_same_thread=False`, any use from a second thread raises `sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread`. This is the failure a caller sees first, and it is the harmless one.
-- Without the lock, `commit()` and `rollback()` are the hazard. They act on the **connection**, not on a cursor, so a second thread's `commit()` lands in the middle of the first thread's transaction and publishes its half-written rows — and its `rollback()` discards them. Under a 12-thread write load this produces orphaned `summary_chunks` rows from snapshots that reported failure, plus spurious `DatabaseError: not an error` and `no more rows available` from cursors being stepped on mid-fetch.
-- `close()` takes the same lock. Closing a connection while another thread is mid-statement does not raise — it segfaults the interpreter.
-
-The lock covers this repository's own connection only. `FullConversationRepository` opens short-lived connections to the same file; those are serialised by SQLite's file locking, and by WAL — see below.
-
-Two callers rely on the shared instance: `SnapShot` holds one for its lifetime (and accepts one through its `meta_repo` argument so it does not open a redundant second connection), and `ConversationSummary` builds its own.
-
-### Connection setup
-Every open of the conversation database goes through `sqlite_setup.connect()`, and its initialisers additionally call `sqlite_setup.enable_wal()`. The split is not cosmetic — the two kinds of pragma behave differently:
-
-| Pragma | Value | Scope | Set by |
-|---|---|---|---|
-| `journal_mode` | `WAL` | Written into the **file**; survives every later open, across processes | `enable_wal()`, at initialisation |
-| `synchronous` | `NORMAL` | Per **connection**; resets to `FULL` on every open | `connect()`, every time |
-| `foreign_keys` | `ON` | Per **connection**; resets to off on every open | `connect()`, every time |
-
-`FullConversationRepository` opens a connection per call, so the per-connection pragmas are not one-time setup that can be checked at construction. A new method with a raw `sqlite3.connect()` would silently get `FULL` and no foreign keys — which has happened before, in `__add_chunks`, where it let orphan rows into `full_conversation`. Routing every open through `connect()` is what stops it recurring, and a test asserts neither module contains a raw `sqlite3.connect()`.
-
-`enable_wal()` cannot convert the file while another connection holds a write transaction. Losing that race returns the current mode instead of raising: the database is still perfectly correct in a rollback journal, just slower, and the next open tries again. `journal_mode` on either repository reports the mode actually in force.
-
-### Why WAL and NORMAL
-Two repositories share this file. Under the default rollback journal a reader holding a transaction open blocks **every** writer with `database is locked` — and a reader with a transaction open is precisely what `SnapShot.search()` is while `append_turns()` wants to write. `synchronous=FULL` then fsyncs the log on every single commit on top of that.
-
-Measured through the real classes on an NVMe/btrfs filesystem — one writer appending turns against six readers, plus a separate metadata commit loop on the long-lived connection:
-
-| journal | synchronous | appends/s | reads/s | metadata commits/s |
-|---|---|---|---|---|
-| `delete` | `FULL` | ~330 | ~5 | ~390 |
-| `wal` | `FULL` | ~850 | ~6500 | ~1000 |
-| `wal` | `NORMAL` | ~2200 | ~5300 | ~20000–100000 |
-
-WAL is what unblocks reads — three orders of magnitude, because under a rollback journal they spend nearly all their time waiting behind the writer. `NORMAL` is what unblocks commits, most visibly on the metadata repository's long-lived connection. Reads dip slightly in the last row: the writer is no longer the bottleneck, so it competes for more of the time. Zero `database is locked` errors in every configuration.
-
-**Measure these on real storage, not `/tmp`.** It is `tmpfs` on most Linux systems, where `fsync` is free and both settings look like they do nothing.
-
-### The durability trade
-`synchronous = NORMAL` is a deliberate weakening, chosen with the risk understood:
-
-- **Process crash — still safe.** The write-ahead log is on disk and intact; the next open recovers every committed transaction.
-- **OS crash or power loss — the last few committed transactions can be rolled back.** They were written but not fsynced.
-- **Corruption — not a risk either way.** WAL keeps the database consistent regardless; the exposure is bounded to losing recent commits, never to a broken file.
-
-For conversation turns and snapshot metadata that is an acceptable trade: the cost of losing the last few turns after a power cut is a re-ask, and the alternative was paying an fsync on every commit forever. Set `SYNCHRONOUS = "FULL"` in `sqlite_setup.py` to reverse it — one constant, and it applies everywhere because every open goes through `connect()`.
-
-### Operational notes
-- **The database is no longer one file.** SQLite keeps `<name>.db-wal` and `<name>.db-shm` alongside it. Copying or backing up the `.db` on its own can lose recently committed transactions.
-- **WAL needs shared memory**, so it does not work over most network filesystems. On one, `enable_wal()` falls back to the existing mode rather than failing.
-- **Existing databases convert in place** on the next open, with their rows intact. No migration step.
+**Safe to share across threads.** It holds no connection: every statement —
+execute, fetch, and commit or rollback together — runs on the memory database's
+connection under that database's lock. `SnapShot` holds one for its lifetime
+(and accepts one through `meta_repo` so it does not build a second), and
+`ConversationSummary` builds its own on the same database. Connection setup,
+WAL and the durability trade are documented in `memory_database.md`.
 
 ### Schema
 | Table | Key | Notes |
 |-------|-----|-------|
-| `summary_chunks` | `chunk_id TEXT PK` | Shared with `FullConversationRepository` |
-| `summary_vector_meta_data` | `summary_vector_id INTEGER PK` | FK → `summary_chunks.chunk_id` |
-| `cumulative_vector_meta_data` | `cumulative_vector_id INTEGER PK` | One row per snapshot |
+| `summary_chunks` | `chunk_id TEXT PK` | Owned and created by `FullConversationRepository`; this repository inserts snapshot chunks into it |
+| `summary_vector_meta_data` | `summary_vector_id INTEGER PK` | FK → `summary_chunks.chunk_id`, FK → `project_table`; indexed on `chunk_id` |
+| `cumulative_vector_meta_data` | `cumulative_vector_id INTEGER PK`, `UNIQUE (project_id, seq)` | FK → `project_table`; carries `conversation_id` and the monotonic `seq` |
 | `summary_snapshot_map` | `UNIQUE (cumulative_vector_id, summary_vector_id)` | FK onto both tables above |
 
 ### Public methods
 
 **Writing a snapshot**
-- `insert_snapshot(chunks, cumulative_row, summary_vector_rows, map_rows)`: all four inserts in **one** transaction, ordered so FK parents land first. The whole snapshot commits or none of it does. This is the path `SnapShot.add()` uses; the four calls below predate it and each commit on their own.
+- `insert_snapshot(chunks, cumulative_row, summary_vector_rows, map_rows)`: all four inserts in **one** transaction, ordered so FK parents land first. The whole snapshot commits or none of it does. Raises `ProjectNotFound` if `cumulative_row`'s project was never registered, with nothing written. This is the path `SnapShot.add()` uses; the calls below predate it and each commit on their own.
 - `batch_insert_summary_chunks(records)`: `[(chunk_id, chunk, created_at, chunker_type)]`. `INSERT OR IGNORE` — the turns a snapshot covers are normally already in the table, written by `append_turns()`.
-- `batch_insert_summary_vector_meta_data(records)`: `[(summary_vector_id, chunk_id, project_id)]`. `INSERT OR IGNORE` — snapshot windows overlap by design, so a chunk legitimately reappears with the same id.
-- `insert_cumulative_vector_meta_data(cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary)` and `batch_insert_cumulative_vector_meta_data(records)`: plain inserts, so a duplicate id raises `sqlite3.IntegrityError`.
+- `batch_insert_summary_vector_meta_data(records)`: `[(summary_vector_id, chunk_id, project_id)]`. `INSERT OR IGNORE` — snapshot windows overlap by design, so a chunk legitimately reappears with the same id. `OR IGNORE` does not cover foreign keys: an unknown chunk or project still raises.
+- `insert_cumulative_vector_meta_data(cumulative_vector_id, cumulative_summary, created_at, project_id, len_of_the_summary)` and `batch_insert_cumulative_vector_meta_data(records)`: each row takes the next `seq` **of its own project**, allocated inside the write. A duplicate id raises `sqlite3.IntegrityError`; an unregistered project raises `ProjectNotFound`.
 - `insert_map_table(cumulative_vector_id, summary_vector_id)` / `batch_insert_map_table(records)`: the batch form is `INSERT OR IGNORE` against the UNIQUE constraint; the single form is not.
 
 **Reading**
-- `get_cumulative_vector_meta_data_ids()`: every snapshot id, `ORDER BY datetime(created_at), created_at`. The raw-TEXT tiebreaker recovers sub-second precision that `datetime()` truncates away — `SnapShot`'s cursors index into this list, so ties would make its ordering arbitrary.
-- `get_latest_summary() -> str | None`: the most recent `cumulative_summary`, ordered the same way. Returns the string, not a row.
+- `get_cumulative_vector_meta_data_ids()`: this conversation's snapshot ids, `ORDER BY seq`. `SnapShot`'s cursors index into this list, so its order must be total; `seq` cannot tie the way whole-second timestamps did.
+- `get_latest_summary() -> str | None`: this conversation's most recent `cumulative_summary`, by `seq`. Returns the string, not a row.
+- `get_project_snapshots_since(seq) -> [(seq, cumulative_vector_id, cumulative_summary)]`: the **project's** snapshot summaries after `seq`, across every conversation — what `ProjectSnapshot` folds in.
+- `get_highest_snapshot_seq() -> int`: the project's highest `seq`, `0` when it has none.
+- `get_highest_summarised_sequence() -> int | None`: the highest `sequence_number` **in this conversation** that a snapshot covers, `None` when none does. It was project-wide, so a new conversation inherited a sibling's progress and its snapshot trigger stayed silent.
 - `get_cumulative_vector_meta_data(id)` / `batch_get_cumulative_vector_meta_data(ids)`
 - `get_summary_vector_meta_data(id)` / `batch_get_summary_vector_meta_data(ids)`
 - `get_summary_vector_ids_from_map(cumulative_vector_id) -> List[int]`: the chunks one snapshot covers.
-- `get_highest_summarised_sequence() -> int | None`: the highest `full_conversation.sequence_number` any snapshot has covered. Returns `None` when the `full_conversation` table does not exist yet, so the repository stays usable when constructed on its own.
 
 **Lifecycle**
-- `close()`: idempotent, and called from `__del__`. Both use `getattr` rather than attribute access, so a failure inside the constructor surfaces as itself instead of as `AttributeError` inside `Exception ignored in`.
+- `close()`: releases nothing — the database is shared and outlives its owners.
 
 Empty-list arguments are no-ops on every batch method; the `batch_get_*` methods return `[]` rather than issuing a query with no placeholders.
 

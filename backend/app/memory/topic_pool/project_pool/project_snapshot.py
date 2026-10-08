@@ -6,6 +6,7 @@ from typing import Callable, List, Sequence, Tuple
 from numpy import ndarray
 
 from config import get_logger
+from memory.memory_database import MemoryDatabase
 from memory.snapshot import PROJECT, SnapShot
 from storage.timestamps import utc_now
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
@@ -59,21 +60,19 @@ class ProjectSnapshot:
         project_name: str,
         meta_repo: ConversationVectorMetaDataRepository,
         embed: Callable[[str], ndarray],
-        conversation_dir: str | Path | None = None,
-        project_db_path: str | Path | None = None,
         snapshot_repo: ProjectSnapshotRepository | None = None,
+        database: MemoryDatabase | str | Path | None = None,
     ) -> None:
         self.project_id = project_id
         self.project_name = project_name
         self.meta_repo = meta_repo
         self.embed = embed
         self.snap_shot = SnapShot(
-            conversation_dir=conversation_dir or meta_repo.conversation_dir,
             project_id=project_id,
             project_name=project_name,
             scope=PROJECT,
             snapshot_repo=snapshot_repo,
-            project_db_path=project_db_path,
+            database=database if database is not None else meta_repo.database,
         )
 
     @property

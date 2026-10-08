@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from memory.memory_database import MemoryDatabase
+
 sys.modules.setdefault("psycopg", MagicMock())
 sys.modules.setdefault("dotenv", MagicMock())
 
@@ -36,57 +38,50 @@ ROWS = 400
 
 @pytest.fixture
 def stores(tmp_path):
-    """One of every database the memory layer creates, with rows in them.
+    """Every memory table, in the one database, with rows in them.
 
     The rows are the point. SQLite plans from row estimates, so an empty table
     hides the very choices these tests exist to pin — with nothing in it the
     planner will not bother building the AUTOMATIC index that a populated one
-    provokes.
+    provokes. They go in through the database with foreign keys on, so every
+    child row has its parent, as it would in use.
     """
-    topic = TopicPoolMetaHandler(tmp_path / "topic.sql")
-    project = ProjectMetaData(
-        "p", "t", db_path=tmp_path / "project.sql", vector_repository=MagicMock()
-    )
-    FullConversationRepository(tmp_path / "conv", "p", "n", "c1")
-    meta = ConversationVectorMetaDataRepository(tmp_path / "conv", "p", "conv_abc")
+    path = tmp_path / "memory.db"
+    database = MemoryDatabase(path)
+    TopicPoolMetaHandler(database)
+    ProjectMetaData("p", "t", database, vector_repository=MagicMock())
+    FullConversationRepository("p", "n", "c1", database)
+    ConversationVectorMetaDataRepository("p", "conv_abc", database)
 
-    paths = {
-        "topic": tmp_path / "topic.sql",
-        "project": tmp_path / "project.sql",
-        "conversation": tmp_path / "conv" / "p_conversation.db",
-    }
-    with sqlite3.connect(paths["topic"]) as conn:
-        conn.executemany(
+    with database.writing() as cursor:
+        cursor.executemany(
             "insert into topics_mapping_table values (?,?,'2026','t')",
-            [(f"id{i}", f"topic {i}") for i in range(ROWS)],
+            [("t", "t")] + [(f"t{j}", f"topic t{j}") for j in range(20)]
+            + [(f"id{i}", f"topic {i}") for i in range(ROWS)],
         )
-    with sqlite3.connect(paths["project"]) as conn:
-        conn.executemany(
+        cursor.executemany(
             "insert into project_table values (?,?,?,'2026','2026','s',null)",
-            [(f"p{i}", f"name{i}", f"t{i % 20}") for i in range(ROWS)],
+            [("p", "name", "t")] + [(f"p{i}", f"name{i}", f"t{i % 20}") for i in range(ROWS)],
         )
-        conn.executemany(
+        cursor.executemany(
             "insert into project_mapping_table values (?,?,?,'2026')",
             [(f"p{i}", f"t{i % 20}", i) for i in range(ROWS)],
         )
-    with sqlite3.connect(paths["conversation"]) as conn:
-        conn.executemany(
+        cursor.executemany(
             "insert into summary_chunks values (?,'c1',?,'2026','turn')",
             [(f"chunk{i}", f"text {i}") for i in range(ROWS)],
         )
-        conn.executemany(
+        cursor.executemany(
             "insert into full_conversation values ('p','c1',?,?,'user','2026')",
             [(i, f"chunk{i}") for i in range(ROWS)],
         )
-        conn.executemany(
+        cursor.executemany(
             "insert into summary_vector_meta_data values (?,?,'p')",
             [(i, f"chunk{i}") for i in range(ROWS)],
         )
 
-    yield paths
-    topic.close()
-    project.close()
-    meta.close()
+    yield {"topic": path, "project": path, "conversation": path}
+    database.close()
 
 
 def plan(db: Path, sql: str, params=()) -> str:
@@ -105,7 +100,11 @@ HOT_QUERIES = [
      "select sequence_number from full_conversation where chunk_id = ?", ("c",)),
     ("conversation", "the summarised watermark",
      "select max(f.sequence_number) from summary_vector_meta_data m"
-     " join full_conversation f on f.chunk_id = m.chunk_id where m.project_id = ?", ("p",)),
+     " join full_conversation f on f.chunk_id = m.chunk_id"
+     " where m.project_id = ? and f.conversation_id = ?", ("p", "c1")),
+    ("conversation", "a turn by its chunk id",
+     "select sequence_number from full_conversation where chunk_id = ? and conversation_id = ?",
+     ("c", "c1")),
 ]
 
 
@@ -119,12 +118,7 @@ def test_the_query_uses_an_index(stores, store, label, sql, params):
 def test_the_watermark_join_does_not_build_its_own_index(stores):
     """SQLite writes an AUTOMATIC index when it needs one that does not exist —
     per call, every call. It is a correct answer arrived at the expensive way."""
-    result = plan(
-        stores["conversation"],
-        "select max(f.sequence_number) from summary_vector_meta_data m"
-        " join full_conversation f on f.chunk_id = m.chunk_id where m.project_id = ?",
-        ("p",),
-    )
+    result = plan(stores["conversation"], _WATERMARK, ("p", "c1"))
     assert "AUTOMATIC" not in result, result
 
 
@@ -147,19 +141,20 @@ def test_primary_key_lookups_need_no_extra_index(stores):
 
 def test_indexes_are_created_on_an_existing_database(tmp_path):
     """They go in with CREATE INDEX IF NOT EXISTS at open, so a database written
-    before they existed picks them up rather than needing a migration."""
-    db = tmp_path / "project.sql"
-    with sqlite3.connect(db) as conn:
-        conn.executescript(
-            "create table project_table(project_id text primary key, project_name text,"
-            " topic_id text not null, created_at date not null, updated_at date not null,"
-            " project_summary text not null, user_id text);"
-        )
-    meta = ProjectMetaData("p", "t", db_path=db, vector_repository=MagicMock())
-    with sqlite3.connect(db) as conn:
-        names = {r[0] for r in conn.execute(
+    before one existed picks it up rather than needing a migration."""
+    path = tmp_path / "memory.db"
+    first = MemoryDatabase(path)
+    ProjectMetaData("p", "t", first, vector_repository=MagicMock())
+    with first.writing() as cursor:
+        cursor.execute("drop index idx_project_topic")
+    first.close()
+
+    reopened = MemoryDatabase(path)
+    ProjectMetaData("p", "t", reopened, vector_repository=MagicMock())
+    with reopened.reading() as cursor:
+        names = {r[0] for r in cursor.execute(
             "select name from sqlite_master where type='index' and name not like 'sqlite_%'")}
-    meta.close()
+    reopened.close()
     assert "idx_project_topic" in names
 
 
@@ -169,25 +164,23 @@ def test_indexes_are_created_on_an_existing_database(tmp_path):
 
 _WATERMARK = (
     "select max(f.sequence_number) from summary_vector_meta_data m"
-    " join full_conversation f on f.chunk_id = m.chunk_id where m.project_id = ?"
+    " join full_conversation f on f.chunk_id = m.chunk_id"
+    " where m.project_id = ? and f.conversation_id = ?"
 )
 
 
-def test_the_watermark_join_seeks_rather_than_skip_scans(stores):
-    """Guards the index against being "upgraded" to a composite on shape alone.
-
-    `(conversation_id, chunk_id)` looks like the natural shape once rows carry a
-    conversation_id, and it is 7x slower than the current index on this query --
-    worse than no index at all. The join is project-wide and never constrains
-    conversation_id, so a conversation_id-leading index cannot be seeked; SQLite
-    skip-scans it instead, which the plan reports as `ANY(conversation_id)`.
-    Measured at 40k rows: 3724us for (chunk_id), 25960us for the composite,
-    15024us for neither.
+def test_the_watermark_walks_one_conversation_and_probes_by_chunk(stores):
+    """The watermark is per conversation: project-wide, one conversation read
+    another's progress as its own. Scoped to the conversation, the planner
+    drives from its primary key and probes summary_vector_meta_data through
+    idx_summary_vector_chunk. Measured at 5 conversations x 8000 turns: 5.3 ms
+    without that index, 3-5 us with it.
     """
-    result = plan(stores["conversation"], _WATERMARK, ("p",))
+    result = plan(stores["conversation"], _WATERMARK, ("p", "c1"))
 
-    assert "ANY(" not in result, f"the planner is skip-scanning: {result}"
-    assert "chunk_id=?" in result, result
+    assert "conversation_id=?" in result, result
+    assert "idx_summary_vector_chunk" in result, result
+    assert "SCAN" not in result, result
 
 
 def test_the_conversation_scoped_readers_are_served_by_the_primary_key(stores):
@@ -205,3 +198,25 @@ def test_the_conversation_scoped_readers_are_served_by_the_primary_key(stores):
     )
 
     assert "SCAN" not in result, result
+
+
+def test_the_snapshot_chain_is_read_through_its_primary_key(tmp_path):
+    """project_snapshot_mapping's key leads with project_id, so a separate
+    index on project_id duplicated it: same plan, 12.7 us against 15.9 us for
+    latest(), and one more index to maintain on every write."""
+    from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo import (
+        ProjectSnapshotRepository,
+    )
+
+    database = MemoryDatabase(tmp_path / "memory.db")
+    ProjectSnapshotRepository("p", database)
+    with database.reading() as cursor:
+        names = {r[0] for r in cursor.execute(
+            "select name from sqlite_master where type='index' "
+            "and tbl_name='project_snapshot_mapping'")}
+        result = " / ".join(r[-1] for r in cursor.execute(
+            "explain query plan select project_snapshot_id from project_snapshot_mapping "
+            "where project_id = ?", ("p",)))
+    database.close()
+    assert "idx_project_snapshot_mapping_project" not in names
+    assert "sqlite_autoindex_project_snapshot_mapping_1" in result, result

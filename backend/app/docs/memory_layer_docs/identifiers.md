@@ -47,7 +47,7 @@ At the points that **store or write** an id, not at every hop:
 | `ConversationSummary` | `conversation_id` |
 | `SnapShot` | `conversation_id` (conversation scope only) |
 | `ProjectSnapshotRepository` | `project_id` |
-| `MemoryMappingHandler` | `conversation_id`, `user_id`, `project_id` |
+| `MemoryMappingHandler` | `conversation_id`, `user_id`; `topic_id` and `project_id` when routing |
 
 Pass-through layers — `FullConversation`, `ConversationPoolManager` — inherit
 it: they hand the id straight down, so construction still fails immediately with

@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import List
 import uuid
-from datetime import datetime , timezone
 
+from memory.memory_database import MemoryDatabase
 from memory.memory_pool_exceptions import TopicNotFound
 from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
     Topic,
@@ -24,7 +24,7 @@ class TopicManager:
         self,
         topic: str,
         query: str | None = None,
-        topic_pool_path: str | Path | None = None,
+        database: MemoryDatabase | str | Path | None = None,
     ) -> None:
         if topic is None or topic == "":
             raise ValueError("topic cannot be empty")
@@ -33,7 +33,7 @@ class TopicManager:
         self.topic = topic
         self.query = query
 
-        self.__repo = TopicPoolMetaHandler(topic_pool_path)
+        self.__repo = TopicPoolMetaHandler(database)
 
     def __is_topic_exists(self) -> bool:
         return self.__repo.is_topic_exists(self.topic)

@@ -21,22 +21,13 @@ ones, and soft-deletes it. Each of those is a single SQL statement, and
 uniqueness is enforced by a partial index rather than by a check before the
 write. `topic_pool_repo/` holds the storage behind it — see its README.
 
-What is still missing:
+`project_table.topic_id` is a foreign key onto `topics_mapping_table`, so a
+project cannot name a topic that does not exist; that became possible once both
+tables moved into the one memory database (see `memory/README.md`). A
+soft-deleted topic keeps its row, so its projects stay valid.
 
-- **Nothing hands `(topic_id, query)` down to `ProjectManager` yet.** The two
-  layers exist and do not talk.
-- `topic_id` on the project tables is still plain text with no foreign key onto
-  `topics_mapping_table`, so a project can name a topic that does not exist. The
-  two databases are separate files, which is why the constraint cannot simply be
-  added.
-- The on-disk scheme for topic -> project -> conversation directories is still
-  undecided (`todo.md` section 2), and `Config.TOPIC` was added for it but is not
-  read by anything — the handler builds its own default path.
-
-That on-disk scheme is the open decision blocking this layer; see `todo.md`
-section 2. Related: **4.1 Conversation identity** in `todo.md` — there is no
-`conversation_id` anywhere, so two conversations in one project are separated
-only by the directory the caller passes.
+What is still missing: **nothing hands `(topic_id, query)` down to
+`ProjectManager` yet.** The two layers exist and do not talk.
 
 ## Sub-modules
 

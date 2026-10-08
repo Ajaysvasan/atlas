@@ -105,8 +105,10 @@ def clean_stores():
 
 
 @pytest.fixture
-def db_path(tmp_path):
-    return tmp_path / "project_db" / "project.sql"
+def db_path(tmp_path, seed_topics):
+    path = tmp_path / "project_db" / "project.sql"
+    seed_topics(path, TOPIC, "topic_misc")
+    return path
 
 
 @pytest.fixture
@@ -119,7 +121,7 @@ def handler():
 def seed_project(db_path, project_id, name, vectors, topic=TOPIC):
     """A project with a summary vector and one vector per extra direction."""
     meta = ProjectMetaData(
-        project_id, topic, db_path=db_path,
+        project_id, topic, database=db_path,
         vector_repository=FakeVectorRepository(project_id),
     )
     summary, *descriptions = vectors
@@ -136,7 +138,7 @@ def seed_project(db_path, project_id, name, vectors, topic=TOPIC):
 
 def manager(db_path, handler, query, directions, **kwargs):
     return ProjectManager(
-        TOPIC, query, db_path=db_path,
+        TOPIC, query, database=db_path,
         embedder=FakeEmbedder(directions), vector_handler=handler, **kwargs,
     )
 
@@ -247,7 +249,7 @@ class TestResolve:
     def test_the_query_is_embedded_once(self, db_path, handler):
         seed_project(db_path, "proj_a", "A", [axis(0)])
         embedder = FakeEmbedder({"q": axis(0)})
-        m = ProjectManager(TOPIC, "q", db_path=db_path, embedder=embedder, vector_handler=handler)
+        m = ProjectManager(TOPIC, "q", database=db_path, embedder=embedder, vector_handler=handler)
         m.resolve()
         m.resolve()
         assert embedder.calls == ["q"]
@@ -340,7 +342,7 @@ class TestUpdateProjectSummary:
         m.update_project_summary(project_id, "second")
 
         assert handler.get_project_summary_vector(project_id).tolist() == axis(8).tolist()
-        meta = ProjectMetaData(project_id, TOPIC, db_path=db_path,
+        meta = ProjectMetaData(project_id, TOPIC, database=db_path,
                                vector_repository=FakeVectorRepository(project_id))
         assert meta.get_project().project_summary == "second"
         meta.close()
@@ -374,19 +376,19 @@ class TestConstruction:
     @pytest.mark.parametrize("bad", ["", "   ", None, 7])
     def test_an_empty_query_is_refused(self, db_path, handler, bad):
         with pytest.raises(EmptyQueryException):
-            ProjectManager(TOPIC, bad, db_path=db_path, vector_handler=handler)
+            ProjectManager(TOPIC, bad, database=db_path, vector_handler=handler)
 
     @pytest.mark.parametrize("bad", ["", "   ", None, 7])
     def test_an_unusable_topic_id_is_refused(self, db_path, handler, bad):
         with pytest.raises(ValueError):
-            ProjectManager(bad, "q", db_path=db_path, vector_handler=handler)
+            ProjectManager(bad, "q", database=db_path, vector_handler=handler)
 
     def test_the_embedder_is_not_loaded_until_used(self, db_path):
         """~100MB of weights; constructing the manager must not pay for them."""
-        m = ProjectManager(TOPIC, "q", db_path=db_path)
+        m = ProjectManager(TOPIC, "q", database=db_path)
         assert m._ProjectManager__embedder is None
 
     def test_an_injected_handler_is_left_open(self, db_path, handler):
-        with ProjectManager(TOPIC, "q", db_path=db_path, vector_handler=handler) as m:
+        with ProjectManager(TOPIC, "q", database=db_path, vector_handler=handler) as m:
             m.projects()
         handler.get_project_summary_vector  # still usable; the manager did not own it

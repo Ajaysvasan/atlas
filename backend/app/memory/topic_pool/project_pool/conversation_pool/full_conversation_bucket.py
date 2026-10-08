@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Iterable, List, Tuple
 
 from config import get_logger
+from memory.memory_database import MemoryDatabase
 from memory.memory_pool_exceptions import EmptyTurnContent, InvalidRole
 
 from .fullconversation_repository.fullconversation_repository import (
@@ -25,16 +26,16 @@ class FullConversation:
 
     def __init__(
         self,
-        full_conversation_dir: str | Path,
         project_id: str,
         project_name: str,
         conversation_id: str,
+        database: MemoryDatabase | str | Path | None = None,
     ) -> None:
         self.fullConversationoRep = FullConversationRepository(
             project_id=project_id,
-            conversation_path=full_conversation_dir,
             project_name=project_name,
             conversation_id=conversation_id,
+            database=database,
         )
 
     @staticmethod

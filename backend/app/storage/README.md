@@ -31,5 +31,6 @@ formats in one database do not sort against each other.
 
 ## Who uses it
 
-Every SQLite store: the conversation database, the topic registry, the project
-registry, the conversation mapping table, and the KSV acquisition store.
+Every SQLite store: the memory database (`memory/memory_database.py`, which
+every memory-layer table now shares), the data layer's chunk store, the
+retrieval layer's keyword index, and the KSV acquisition store.

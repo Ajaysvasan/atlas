@@ -60,9 +60,20 @@ single join rather than a second connection. There is no foreign key on
 cannot reference whichever of two tables holds it; the previous declaration
 named a table in another file and made every insert fail (bug 5.2).
 
+## Why a chunk has one label
+
+A chunk id binds its content and position, so the same id with the same model
+is the same vector. Allocation used to insert unconditionally, and re-ingesting
+an unchanged folder — which writes no new chunks — still gave every chunk a new
+label; once vectors were stored, every copy was rebuilt into the index and could
+fill retrieval's candidate pool with one chunk (bug 5.21). `unique (chunkId,
+embeddingModelUsed)` makes the database refuse a second label, and allocation
+is an upsert that hands the existing one back.
+
 ## Known gaps
 
 - There is no delete path, here or anywhere in the data layer (**bug 5.5**), so
-  a re-ingested edited document leaves its old vectors stored and indexed.
+  a re-ingested *edited* document — new chunk ids — leaves its old vectors stored
+  and indexed.
 - Rows written before vectors were kept stay unsearchable by meaning until their
   chunks are re-embedded.

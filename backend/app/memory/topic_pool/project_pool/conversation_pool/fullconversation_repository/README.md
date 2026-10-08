@@ -7,14 +7,23 @@ Stores conversation turns and reads them back, in SQLite.
 ## Schema
 
 ```sql
-summary_chunks      chunk_id PK, chunk, created_at, chunker_type
-full_conversation   sequence_number PK, project_id, chunk_id, role, created_at
-                    FK chunk_id -> summary_chunks
+summary_chunks      chunk_id PK, conversation_id, chunk, created_at, chunker_type
+                    UNIQUE (chunk_id, conversation_id)
+full_conversation   PK (conversation_id, sequence_number), project_id, chunk_id,
+                    role CHECK in (user, assistant, system), created_at
+                    FK project_id -> project_table
+                    FK (chunk_id, conversation_id) -> summary_chunks
 ```
 
 The text lives in `summary_chunks`; the position and the speaker live in
 `full_conversation`. They are split because `summary_chunks` is shared with the
-snapshot metadata repository, which references the same rows.
+snapshot metadata repository, which references the same rows. This module owns
+it and is the only one that creates it.
+
+A turn's text and its position each carry `conversation_id`, and the pair is the
+foreign key, so the two copies cannot disagree. The role `CHECK` holds the
+bucket's validation for writes that bypass the bucket through `add()`. A turn
+for a project that was never registered is refused as `ProjectNotFound`.
 
 `summary_chunks` must be created **before** `full_conversation`, and its rows
 must be inserted before the rows that reference them — the foreign key is
@@ -24,26 +33,31 @@ after which every reader's JOIN silently drops it while it keeps its
 
 ## Why `full_conversation` is indexed on `chunk_id`
 
-`idx_full_conversation_chunk` is created here but read from elsewhere. Its
-beneficiary is `ConversationVectorMetaDataRepository.get_highest_summarised_sequence()`,
-which joins `summary_vector_meta_data` to this table on `chunk_id` to find the
-watermark — and which runs on every snapshot decision, via
-`turns_since_last_snapshot()` and `__window_start()`. Without it SQLite builds an
-AUTOMATIC PARTIAL COVERING INDEX per call: 11.0 ms against 3.1 ms at 40 000
-turns.
+`get_sequence_number()` finds a turn by its chunk id, which the primary key
+`(conversation_id, sequence_number)` cannot serve.
 
-The mirror index on the other side of that join,
-`summary_vector_meta_data(project_id, chunk_id)`, was measured and **rejected**.
-Once this index exists the planner drives from the meta table and searches here,
-so the second one moved the join by ~2% — inside noise — while costing +93% on
-every insert into a table that is written once per summarised turn. `todo.md`
-records it so it is not re-added on shape.
+It used to be justified by the summarised watermark, which joined on `chunk_id`
+project-wide: the planner drove from `summary_vector_meta_data` and searched
+here, so an index on the other side of the join was measured and rejected
+(bug 4.68). The watermark is now per conversation, which reverses the drive —
+the planner walks this table by primary key and probes the other side — so the
+index that pays for it now is `idx_summary_vector_chunk` there, not this one.
+See `conversation_data_management/README.md` for the numbers.
 
 ## Why sequence numbers are allocated under `BEGIN IMMEDIATE`
 
 `append_turns` reads `MAX(sequence_number)` and then inserts. Without the write
 lock taken up front, two concurrent appends both read the same maximum and hand
-out the same sequence number. `BEGIN IMMEDIATE` closes that window.
+out the same sequence number. `MemoryDatabase.writing()` opens with `BEGIN
+IMMEDIATE`, which closes that window for writers in other processes; in this
+one, the database's lock already serialises them.
+
+## Why a turn's id binds its conversation
+
+`chunk_id` is `sha256(project_id, conversation_id, sequence_number, text)`. It
+was the same without `conversation_id`, so two conversations in one project that
+opened with the same words — "hello" — produced one id, and the second failed on
+`summary_chunks`' primary key.
 
 ## Why `created_at` is stamped here
 
@@ -67,6 +81,6 @@ reach SQLite as `LIMIT -1`, which means "no limit" and returns everything.
 
 ## Tests
 
-`test/memory_layer_testing/test_full_converation.py`. The ordering guards
+`test/memory_layer_testing/test_full_conversation.py`. The ordering guards
 deliberately insert rows whose `created_at` order contradicts their
 `sequence_number` order, so an accidental `ORDER BY created_at` fails them.

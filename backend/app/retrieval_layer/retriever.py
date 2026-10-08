@@ -33,7 +33,7 @@ class Retriever:
         self,
         settings: RetrievalSettings | None = None,
         *,
-        chunk_store_path: str | Path = Config.DB_PATH,
+        chunk_store_path: str | Path | None = None,
         keyword_index_path: str | Path = FTS_PATH,
         preparation: QueryPreparation | None = None,
         vector_search: VectorSearch | None = None,
@@ -43,6 +43,8 @@ class Retriever:
         cache: ResultCache | None = None,
     ) -> None:
         self.settings = RetrievalSettings() if settings is None else settings
+        if chunk_store_path is None:
+            chunk_store_path = Config.DB_PATH
         self.__owned: list = []
         if keyword_search is None:
             mapping = VectorMetaDataRepository(str(chunk_store_path))

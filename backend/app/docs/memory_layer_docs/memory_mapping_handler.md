@@ -3,8 +3,8 @@
 ## Overview & Purpose
 
 Answers "where does this conversation belong" — which topic, which project, and
-which project snapshot was current when it was last touched. It is the lookup
-`MemoryManager` needs to resume a conversation without routing it again.
+that project's latest snapshot. It is the lookup `MemoryManager` needs to resume
+a conversation without routing it again.
 
 Architecture and rationale live in `memory/README.md`. This page is the API.
 
@@ -13,28 +13,26 @@ Architecture and rationale live in `memory/README.md`. This page is the API.
 ## `MemoryMappingHandler`
 
 ```python
-MemoryMappingHandler(db_path: str | Path | None = None)
+MemoryMappingHandler(database: MemoryDatabase | str | Path | None = None)
 ```
 
 | Parameter | Meaning |
 | :--- | :--- |
-| `db_path` | Where the table lives. `None` uses `data/memory_mapping/memory_mapping.sql` |
+| `database` | A `MemoryDatabase`, or a path to one. `None` uses the shared memory database at `Config.MEMORY_DB` |
 
 **It takes no `conversation_id`.** One handler serves the whole table; every
-method names the conversation it acts on. The connection is opened
-`check_same_thread=False`, WAL is enabled, and every statement runs under an
-`RLock`.
+method names the conversation it acts on. It holds no connection: statements run
+through the memory database's, under its lock.
 
 | Method | Returns | Raises |
 | :--- | :--- | :--- |
 | `populate_conversation_id(conversation_id, user_id)` | `None` | `InvalidIdentifier`, `sqlite3.IntegrityError` if the pair already has a row |
-| `insert_into_mapping_table(conversation_id, user_id, topic_id, project_id, new_latest_project_snapshot_id, created_at)` | `None` | `InvalidIdentifier` |
-| `update_latest_project_snapshot_id(user_id, project_id, new_latest_project_snapshot_id)` | `None` | `InvalidIdentifier` |
+| `insert_into_mapping_table(conversation_id, user_id, topic_id, project_id, created_at)` | `None` | `InvalidIdentifier` (any of the four ids blank), `ProjectNotFound`, `ProjectInAnotherTopic` |
 | `search(conversation_id, user_id)` | `MemoryMapping` or `None` | `InvalidIdentifier` |
-| `close()` | `None` | — |
+| `close()` | `None`. Releases nothing — the database is shared | — |
 
-`journal_mode` is set on construction and reports the journal actually in force
-(`"wal"` unless the filesystem refused it).
+`update_latest_project_snapshot_id` and the `new_latest_project_snapshot_id`
+argument are gone with the column they wrote; see below.
 
 ### `MemoryMapping`
 
@@ -42,9 +40,11 @@ method names the conversation it acts on. The connection is opened
 MemoryMapping(topic_id, project_id, latest_project_snapshot_id)
 ```
 
-A `NamedTuple`, so it compares equal to a plain 3-tuple. Every field is
-`str | None`: a row opened by `populate_conversation_id` has all three unset
-until routing fills them in.
+A `NamedTuple`, so it compares equal to a plain 3-tuple. `topic_id` and
+`project_id` are `str | None`; `latest_project_snapshot_id` is `int | None` —
+the integer the snapshot is stored under, in SQLite and pgvector alike. A row
+opened by `populate_conversation_id` has all three unset until routing fills
+them in, and a routed project with no snapshot yet has the last one `None`.
 
 ---
 
@@ -62,11 +62,10 @@ handler.search("conv_1", "user_1")
 
 handler.insert_into_mapping_table(
     conversation_id="conv_1", user_id="user_1",
-    topic_id="topic_1", project_id="project_1",
-    new_latest_project_snapshot_id="snap_1", created_at=utc_now(),
+    topic_id="topic_1", project_id="project_1", created_at=utc_now(),
 )
 handler.search("conv_1", "user_1")
-# MemoryMapping('topic_1', 'project_1', 'snap_1')
+# MemoryMapping('topic_1', 'project_1', <its latest snapshot id, or None>)
 ```
 
 `insert_into_mapping_table` is an UPDATE despite the name, so it needs the row
@@ -74,37 +73,52 @@ to exist. A zero-row UPDATE is not an error to SQLite, so calling it first would
 otherwise look like success — it **logs a warning** instead, naming the
 conversation and telling you to call `populate_conversation_id`.
 
+Routing to a project that was never registered raises `ProjectNotFound`; to a
+project registered under a different topic, `ProjectInAnotherTopic`, whose
+`actual_topic_id` names the right one. Both keep the database error as
+`__cause__`.
+
 `search` on a conversation with no row returns `None`, not a tuple of `None`s.
 The two are different: the first means "never seen", the second "seen, not yet
 routed".
+
+### Where the snapshot comes from
+
+`search` asks `ProjectSnapshotRepository(project_id).latest()` every time, so a
+snapshot taken after routing is seen without any call on this handler. The
+column that used to cache it is gone: it existed so resuming would not open a
+second database file, and it was stale whenever the explicit update was missed.
 
 ---
 
 ## Schema
 
 ```sql
-memory_mapping_table
-    conversation_id             text not null
-    user_id                     text not null
-    topic_id                    text
-    project_id                  text
-    latest_project_snapshot_id  text
-    created_at                  text
-    primary key (conversation_id, user_id)
+create table if not exists memory_mapping_table(
+    conversation_id text not null,
+    user_id text not null,
+    topic_id text,
+    project_id text,
+    created_at text,
+    primary key (conversation_id, user_id),
+    foreign key (project_id, topic_id)
+        references project_table(project_id, topic_id) on update cascade,
+    check ((topic_id is null) = (project_id is null))
+);
 
-idx_memory_mapping_project on (project_id, user_id)
+create index if not exists idx_memory_mapping_project
+on memory_mapping_table(project_id, topic_id);
 ```
 
 The primary key is what makes "which project is this conversation in" answerable
 — without it the same conversation could hold two rows and the question would
-have two answers. The index serves `update_latest_project_snapshot_id`, which
-rewrites by `(project_id, user_id)`, a pair no part of the key covers.
+have two answers.
 
-`latest_project_snapshot_id` is a **cache** of
-`ProjectSnapshotRepository.latest()`, which owns the ordered chain in
-`project_snapshot_mapping`. It is held here so resuming a conversation does not
-have to open the project registry. It is not the history, and nothing should
-read it as one.
+The foreign key is the pair, so a routing row cannot name a project under the
+wrong topic, and moving a project to another topic carries its conversations
+with it. A pair with a null in it is not checked as a foreign key, which is what
+lets the unrouted row exist; the `CHECK` is what stops a half-routed one. The
+index serves the cascade, which looks rows up by that pair.
 
 ---
 
@@ -119,6 +133,6 @@ See `bugs.md` 4.83 and the scope note in Section 4c.
 
 ## Tests
 
-`test/memory_layer_testing/test_memory_mapping_handler.py` — 16 tests, the
-regression guards for Bugs 4.73-4.83. Reverting any one fix fails between 1 and
-11 of them.
+`test/memory_layer_testing/test_memory_mapping_handler.py` — the regression
+guards for Bugs 4.73-4.83, the relationships the database holds, and the
+snapshot being read from the chain rather than cached.

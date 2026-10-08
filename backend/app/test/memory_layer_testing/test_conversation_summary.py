@@ -48,6 +48,13 @@ _PROJ_NAME = "TestProject"
 _CONV_ID = "conv_abc"
 _WINDOW    = 100   # main_model_context_window_length used by fixtures
 _DRAFT_CTX = 131072
+DB = "memory.db"
+
+
+@pytest.fixture(autouse=True)
+def _projects_registered(tmp_path, seed_projects):
+    """Snapshot rows reference their project, so the one used here is registered."""
+    seed_projects(tmp_path / DB, "topic", _PROJ_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +68,7 @@ def _turn(text: str, role: str = "user", seq: int = 1) -> Turn:
 
 def _make_cs(tmp_path, mock_fc, mock_mr, window=_WINDOW):
     return ConversationSummary(
-        full_conversation_dir=tmp_path,
+        database=tmp_path / DB,
         project_id=_PROJ_ID,
         project_name=_PROJ_NAME,
         main_model_context_window_length=window,
@@ -539,7 +546,7 @@ class TestMultiBatchRollingSummary:
             # 600-char conversation, will be batched
             mock_fc.get_turns.return_value = [_turn("x" * 600)]
             instance = ConversationSummary(
-                full_conversation_dir=tmp_path,
+                database=tmp_path / DB,
                 project_id=_PROJ_ID,
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=100,
@@ -944,15 +951,15 @@ class TestTakeSnapshot:
 # ---------------------------------------------------------------------------
 
 class TestSnapshotSharesDatabase:
-    def test_snapshot_built_against_the_same_directory(self, tmp_path):
+    def test_snapshot_built_against_the_same_database(self, tmp_path):
         """
         SnapShot used to hardcode Config.CONVERSATION while ConversationSummary
         used the directory it was given. Writing the summary to one database and
         reading it from another left the rolling summary blind to its own output.
         """
         with patch(_FULL_CONV), patch(_META_REPO), patch(_SNAPSHOT) as MockSnap:
-            _make_cs(tmp_path, None, None)
-        assert MockSnap.call_args.kwargs["conversation_dir"] == tmp_path
+            instance = _make_cs(tmp_path, None, None)
+        assert MockSnap.call_args.kwargs["database"] is instance.database
 
     def test_snapshot_receives_project_identity(self, tmp_path):
         with patch(_FULL_CONV), patch(_META_REPO), patch(_SNAPSHOT) as MockSnap:
@@ -1096,7 +1103,7 @@ class TestDraftWindowIsHonoured:
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             instance = ConversationSummary(
-                full_conversation_dir=tmp_path,
+                database=tmp_path / DB,
                 project_id=_PROJ_ID,
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=_WINDOW,
@@ -1132,7 +1139,7 @@ class TestDraftWindowIsHonoured:
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
             instance = ConversationSummary(
-                full_conversation_dir=tmp_path,
+                database=tmp_path / DB,
                 project_id=_PROJ_ID,
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=_WINDOW,
@@ -1389,7 +1396,7 @@ class TestRealBatchingReachesTheModel:
             mock_mr.get_highest_summarised_sequence.return_value = None
             mock_fc.get_turns.return_value = turns
             instance = ConversationSummary(
-                full_conversation_dir=tmp_path,
+                database=tmp_path / DB,
                 project_id=_PROJ_ID,
                 project_name=_PROJ_NAME,
                 main_model_context_window_length=_WINDOW,

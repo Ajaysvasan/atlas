@@ -35,18 +35,26 @@ Welcome to the official API documentation for the **Final Year Project Backend A
   - All twelve data-layer exceptions, their exact messages, and the known naming problems among them.
 
 ### 4. Memory & Conversation Pool Layer
+- [The Memory Database (`MemoryDatabase`)](../memory_layer_docs/memory_database.md)
+  - The one SQLite file every memory table lives in: the shared connection, `writing()` with savepoints, `Schema` and the owners' creation order, the schema version, and the WAL / `synchronous=NORMAL` trade.
 - [Reading a Conversation (`Turn`)](../memory_layer_docs/conversation_turns.md)
   - Role-carrying readers on `FullConversationRepository`, `FullConversation` and `ConversationPoolManager`, the speaker-labelled transcript the summariser builds, and why batching never separates a turn from its speaker.
-- [Conversation Vector Metadata Manager (`ConversationVectorMetaDataManager`)](../memory_layer_docs/conversation_vector_manager.md)
-  - SQLite and memory-mapped vector management for conversational snapshots, summary vectors, and cumulative file offsets.
-- [Conversational Snapshots (`SnapShot` & `SnapShotNode`)](../memory_layer_docs/snapshot.md)
-  - Bidirectional cursor-based snapshot history tracker and cosine similarity search engine.
+- [Conversation Snapshot Metadata (`ConversationVectorMetaDataRepository`)](../memory_layer_docs/conversation_vector_manager.md)
+  - The SQLite metadata for a conversation's snapshots, the per-project `seq`, the per-conversation watermark, and the pgvector proxy beside it.
+- [Snapshot History (`SnapShot`)](../memory_layer_docs/snapshot.md)
+  - Cursor-based navigation and cosine search over a conversation's or a project's snapshot history.
+- [Project Snapshots (`ProjectSnapshot` & `ProjectSnapshotRepository`)](../memory_layer_docs/project_snapshot.md)
+  - A project's incremental rolling description and the append-only chain that stores it.
 - [Topics (`TopicManager` & `TopicPoolMetaHandler`)](../memory_layer_docs/topic_manager.md)
-  - Creating, reading and soft-deleting a topic; the `topics_mapping_table` schema and the locking the shared connection needs.
+  - Creating, reading and soft-deleting a topic, and the `topics_mapping_table` schema.
 - [Project Registry (`ProjectMetaData`)](../memory_layer_docs/project_meta_data.md)
-  - `project_table`, `project_description_table` and `project_mapping_table`, the summary text and its embedding, and the vectors-first write with a compensating delete.
+  - `project_table`, `project_description_table` and `project_mapping_table`, the foreign keys that keep a project's topic consistent, and the vectors-first write with a compensating delete.
+- [Conversation Mapping (`MemoryMappingHandler`)](../memory_layer_docs/memory_mapping_handler.md)
+  - Which topic and project a conversation was routed to, and its project's latest snapshot, read from the chain.
+- [Identifiers (`require_identifier`)](../memory_layer_docs/identifiers.md)
+  - The validation every id that scopes a row goes through, and where it is applied.
 - [Memory Pool Exceptions (`memory_pool_exceptions.py`)](../memory_layer_docs/memory_pool_exceptions.md)
-  - Custom exceptions for cursor boundary errors, null pointers, and vector dimensionality validation.
+  - Cursor and dimension errors, and the named refusals for a foreign key the memory database rejects.
 
 ---
 

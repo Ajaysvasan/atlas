@@ -155,9 +155,14 @@ Allocates one label per chunk and stores every vector beside it in a single tran
 | :--- | :--- | :--- |
 | `embedded_objs` | `List[EmbeddedChunk]` | List of embedded chunk instances to insert. |
 
+Re-ingesting a chunk returns the label it already has (bug 5.21). The pipeline
+records which labels its own index holds and inserts only new ones — DiskANN
+refuses a label it already has — so the same chunks ingested twice in one
+session, or twice in one batch, are indexed once. `ingest_vector` does the same.
+
 ###### Return Value
 - **Type**: `List[int]`
-- **Description**: The allocated labels, in the order of `embedded_objs`. The label, not `EmbeddedChunk.vector_id`, is what DiskANN indexes: that id is 63-bit for pgvector and DiskANN labels are `uint32` (bug 5.16).
+- **Description**: The labels, in the order of `embedded_objs` — existing ones for chunks seen before. The label, not `EmbeddedChunk.vector_id`, is what DiskANN indexes: that id is 63-bit for pgvector and DiskANN labels are `uint32` (bug 5.16).
 
 > There is no `persist_index()`. It wrote DiskANN's own index files, which diskannpy 0.7.0 cannot load back (bug 5.20); the stored vectors replace it.
 

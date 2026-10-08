@@ -42,3 +42,56 @@ if _app_dir not in sys.path:
 _memory_dir = os.path.join(_app_dir, "memory")
 if _memory_dir not in sys.path:
     sys.path.insert(0, _memory_dir)
+
+
+# --------------------------------------------------------------------------- #
+# Every project row now references a real topic row, so a test that registers
+# a project has to register its topic first, through the topic owner itself.
+# --------------------------------------------------------------------------- #
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def seed_topics():
+    def seed(database, *topic_ids):
+        from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
+            TopicPoolMetaHandler,
+        )
+
+        handler = TopicPoolMetaHandler(database)
+        for topic_id in topic_ids:
+            if handler.get_topic_id(topic_id) is None:
+                handler.create_new_topic(topic_id, topic_id, None)
+    return seed
+
+
+class _NoVectors:
+    """Seeding registers project rows only; the vector store is not under test."""
+
+    def insert(self, *args): pass
+    def batch_insert(self, *args): pass
+    def batch_delete(self, *args): pass
+    def close(self): pass
+
+
+@pytest.fixture
+def seed_projects(seed_topics):
+    def seed(database, topic_id, *project_ids):
+        import numpy as np
+
+        from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
+            ProjectMetaData,
+        )
+        from memory.topic_pool.project_pool.project_data_repo.project_vector_handler import (
+            summary_vector_id,
+        )
+
+        seed_topics(database, topic_id)
+        for project_id in project_ids:
+            registry = ProjectMetaData(project_id, topic_id, database, _NoVectors())
+            if registry.get_project() is None:
+                registry.add_project_vector(
+                    np.zeros(128, dtype=np.float32), summary_vector_id(project_id),
+                    project_id, f"{project_id} summary",
+                )
+    return seed

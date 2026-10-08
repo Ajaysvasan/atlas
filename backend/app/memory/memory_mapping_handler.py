@@ -1,14 +1,21 @@
 """Which topic, project and project snapshot a conversation belongs to."""
 
 import sqlite3
-import threading
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import NamedTuple
 
-from config import Config, get_logger
+from config import get_logger
 from memory.identifiers import require_identifier
-from storage.sqlite_setup import connect, enable_wal
+from memory.memory_database import MemoryDatabase, Schema
+from memory.memory_pool_exceptions import ProjectInAnotherTopic, ProjectNotFound
+from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
+    SCHEMA as PROJECT_SCHEMA,
+    project_topic,
+)
+from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo import (
+    SCHEMA as PROJECT_SNAPSHOT_SCHEMA,
+    ProjectSnapshotRepository,
+)
 from storage.timestamps import utc_now
 
 logger = get_logger(__name__)
@@ -17,148 +24,69 @@ logger = get_logger(__name__)
 class MemoryMapping(NamedTuple):
     topic_id: str | None
     project_id: str | None
-    latest_project_snapshot_id: str | None
+    latest_project_snapshot_id: int | None
+
+
+def _create_tables(cursor: sqlite3.Cursor) -> None:
+    # A row is opened before routing and filled in by it, so topic and project
+    # are null together or set together. A pair with a null in it is not
+    # checked as a foreign key, which is what lets the unrouted row exist; the
+    # CHECK is what stops a half-routed one.
+    cursor.execute("""
+        create table if not exists memory_mapping_table(
+            conversation_id text not null,
+            user_id text not null,
+            topic_id text,
+            project_id text,
+            created_at text,
+            primary key (conversation_id, user_id),
+            foreign key (project_id, topic_id)
+                references project_table(project_id, topic_id) on update cascade,
+            check ((topic_id is null) = (project_id is null))
+        )
+    """)
+    cursor.execute(
+        "create index if not exists idx_memory_mapping_project "
+        "on memory_mapping_table(project_id, topic_id)"
+    )
+
+
+SCHEMA = Schema(
+    "memory_mapping", _create_tables, requires=(PROJECT_SCHEMA, PROJECT_SNAPSHOT_SCHEMA)
+)
 
 
 class MemoryMappingHandler:
     """The mapping table, for every conversation — not one conversation.
 
     Takes no `conversation_id`: every method names the conversation it acts on,
-    so one handler serves them all. The original signature also took a `query`,
-    which nothing read.
+    so one handler serves them all.
     """
 
-    __mapping_db = Config.DATA_DIR / Path("memory_mapping/memory_mapping.sql")
+    def __init__(self, database: MemoryDatabase | str | Path | None = None) -> None:
+        self.database = MemoryDatabase.of(database)
+        self.database.ensure(SCHEMA)
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
-        self.__db_path = Path(db_path) if db_path is not None else self.__mapping_db
-        self.__db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self.__connection: sqlite3.Connection | None = connect(
-            self.__db_path, check_same_thread=False
-        )
-        self.journal_mode = enable_wal(self.__connection, self.__db_path)
-        self.__db_init()
-        logger.debug(
-            "Memory mapping store ready at %s (journal=%s)",
-            self.__db_path,
-            self.journal_mode,
-        )
-
-    @property
-    def db_path(self) -> Path:
-        return self.__db_path
-
-    @contextmanager
-    def _reading(self) -> Iterator[sqlite3.Cursor]:
-        """A cursor held under the lock for as long as the caller needs it."""
-        with self._lock:
-            assert self.__connection is not None
-            yield self.__connection.cursor()
-
-    @contextmanager
-    def _writing(self) -> Iterator[sqlite3.Cursor]:
-        """A cursor under the lock, committed on success, rolled back on failure."""
-        with self._lock:
-            assert self.__connection is not None
-            cursor = self.__connection.cursor()
-            try:
-                yield cursor
-                self.__connection.commit()
-            except BaseException:
-                self.__connection.rollback()
-                logger.debug("Rolled back a write on %s", self.__db_path)
-                raise
-
-    def __db_init(self) -> None:
-        with self._writing() as curr:
-            # latest_project_snapshot_id is overwritten in place rather than
-            # appended to: it is a cache of ProjectSnapshotRepository.latest(),
-            # which owns the ordered chain in project_snapshot_mapping. Read it
-            # here to resume a conversation without opening the project
-            # registry; do not treat it as the history.
-            curr.execute("""
-                create table if not exists memory_mapping_table (
-                    conversation_id text not null,
-                    user_id text not null,
-                    topic_id text,
-                    project_id text,
-                    latest_project_snapshot_id text,
-                    created_at text,
-                    primary key (conversation_id, user_id)
-                );
-            """)
-            # The snapshot pointer is rewritten by (project_id, user_id), which
-            # no part of the primary key covers.
-            curr.execute(
-                "create index if not exists idx_memory_mapping_project "
-                "on memory_mapping_table(project_id, user_id);"
-            )
-
-    def __populate_conversation_id(
-        self, cursor: sqlite3.Cursor, conversation_id: str, user_id: str
-    ) -> None:
-        cursor.execute(
-            "insert into memory_mapping_table (conversation_id, user_id, created_at) "
-            "values (?, ?, ?);",
-            (conversation_id, user_id, utc_now()),
-        )
-
-    def __insert_into_mapping_table(
-        self,
-        curr: sqlite3.Cursor,
-        conversation_id: str,
-        user_id: str,
-        topic_id: str,
-        project_id: str,
-        new_latest_project_snapshot_id: str,
-        created_at: str,
-    ) -> int:
-        curr.execute(
-            "update memory_mapping_table set topic_id = ?, project_id = ?, "
-            "latest_project_snapshot_id = ?, created_at = ? "
-            "where conversation_id = ? and user_id = ?;",
-            (
-                topic_id,
-                project_id,
-                new_latest_project_snapshot_id,
-                created_at,
-                conversation_id,
-                user_id,
-            ),
-        )
-        return curr.rowcount
-
-    def __search(self, conversation_id: str, user_id: str) -> MemoryMapping | None:
-        with self._reading() as cursor:
-            cursor.execute(
-                "select topic_id, project_id, latest_project_snapshot_id "
-                "from memory_mapping_table "
-                "where conversation_id = ? and user_id = ?;",
-                (conversation_id, user_id),
-            )
-            row = cursor.fetchone()
-        return MemoryMapping(*row) if row is not None else None
-
-    def __update_latest_project_snapshot_id(
-        self, user_id: str, project_id: str, new_latest_project_snapshot_id: str
-    ) -> int:
-        with self._writing() as cursor:
-            cursor.execute(
-                "update memory_mapping_table set latest_project_snapshot_id = ? "
-                "where project_id = ? and user_id = ?;",
-                (new_latest_project_snapshot_id, project_id, user_id),
-            )
-            return cursor.rowcount
-
-    # Public APIs
+    def __refused(self, error: sqlite3.IntegrityError, topic_id: str, project_id: str) -> Exception:
+        if "FOREIGN KEY" not in str(error):
+            return error
+        registered_under = project_topic(project_id, self.database)
+        if registered_under is None:
+            return ProjectNotFound(project_id)
+        if registered_under != topic_id:
+            return ProjectInAnotherTopic(project_id, topic_id, registered_under)
+        return error
 
     def populate_conversation_id(self, conversation_id: str, user_id: str) -> None:
         """Open a row for a conversation that has not been routed yet."""
         conversation_id = require_identifier(conversation_id, "conversation_id")
         user_id = require_identifier(user_id, "user_id")
-        with self._writing() as cursor:
-            self.__populate_conversation_id(cursor, conversation_id, user_id)
+        with self.database.writing() as cursor:
+            cursor.execute(
+                "insert into memory_mapping_table (conversation_id, user_id, created_at) "
+                "values (?, ?, ?);",
+                (conversation_id, user_id, utc_now()),
+            )
         logger.debug(
             "Opened a mapping row for conversation %s (user %s)",
             conversation_id,
@@ -171,22 +99,23 @@ class MemoryMappingHandler:
         user_id: str,
         topic_id: str,
         project_id: str,
-        new_latest_project_snapshot_id: str,
         created_at: str,
     ) -> None:
         """Record the topic and project a conversation was routed to."""
         conversation_id = require_identifier(conversation_id, "conversation_id")
         user_id = require_identifier(user_id, "user_id")
-        with self._writing() as cursor:
-            updated = self.__insert_into_mapping_table(
-                curr=cursor,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                topic_id=topic_id,
-                project_id=project_id,
-                new_latest_project_snapshot_id=new_latest_project_snapshot_id,
-                created_at=created_at,
-            )
+        topic_id = require_identifier(topic_id, "topic_id")
+        project_id = require_identifier(project_id, "project_id")
+        try:
+            with self.database.writing() as cursor:
+                cursor.execute(
+                    "update memory_mapping_table set topic_id = ?, project_id = ?, "
+                    "created_at = ? where conversation_id = ? and user_id = ?;",
+                    (topic_id, project_id, created_at, conversation_id, user_id),
+                )
+                updated = cursor.rowcount
+        except sqlite3.IntegrityError as error:
+            raise self.__refused(error, topic_id, project_id) from error
         if updated:
             logger.info(
                 "Mapped conversation %s (user %s) to topic %s, project %s",
@@ -205,52 +134,35 @@ class MemoryMappingHandler:
                 user_id,
             )
 
-    def update_latest_project_snapshot_id(
-        self, user_id: str, project_id: str, new_latest_project_snapshot_id: str
-    ) -> None:
-        """Point this user's conversations in a project at its newest snapshot."""
-        user_id = require_identifier(user_id, "user_id")
-        project_id = require_identifier(project_id, "project_id")
-        updated = self.__update_latest_project_snapshot_id(
-            user_id=user_id,
-            project_id=project_id,
-            new_latest_project_snapshot_id=new_latest_project_snapshot_id,
-        )
-        logger.debug(
-            "Moved %d conversation(s) in project %s (user %s) to snapshot %s",
-            updated,
-            project_id,
-            user_id,
-            new_latest_project_snapshot_id,
-        )
-
     def search(self, conversation_id: str, user_id: str) -> MemoryMapping | None:
-        """Where this conversation belongs, or None if it has no row."""
+        """Where this conversation belongs, or None if it has no row.
+
+        The snapshot is asked of the project's snapshot chain on every read
+        rather than cached here: a cache had to be rewritten by hand each time
+        a project moved on, and was stale whenever that was missed.
+        """
         conversation_id = require_identifier(conversation_id, "conversation_id")
         user_id = require_identifier(user_id, "user_id")
-        found = self.__search(conversation_id=conversation_id, user_id=user_id)
-        if found is None:
+        with self.database.reading() as cursor:
+            row = cursor.execute(
+                "select topic_id, project_id from memory_mapping_table "
+                "where conversation_id = ? and user_id = ?;",
+                (conversation_id, user_id),
+            ).fetchone()
+        if row is None:
             logger.debug(
                 "No mapping for conversation %s (user %s)", conversation_id, user_id
             )
-        return found
+            return None
+        topic_id, project_id = row
+        latest = (
+            ProjectSnapshotRepository(project_id, self.database).latest()
+            if project_id is not None
+            else None
+        )
+        return MemoryMapping(
+            topic_id, project_id, latest.project_snapshot_id if latest else None
+        )
 
     def close(self) -> None:
-        # getattr, not attribute access: if connect() failed in __init__ the
-        # attribute never existed, and __del__ would then raise AttributeError
-        # and bury the real construction error. The lock makes this wait for a
-        # write in flight on another thread rather than closing the connection
-        # out from under it, which segfaults rather than raising (Bug 4.47).
-        conn = getattr(self, "_MemoryMappingHandler__connection", None)
-        if conn is None:
-            return
-        lock = getattr(self, "_lock", None)
-        if lock is None:
-            conn.close()
-        else:
-            with lock:
-                conn.close()
-        self.__connection = None
-
-    def __del__(self):
-        self.close()
+        """Releases nothing: the database is shared and outlives its owners."""

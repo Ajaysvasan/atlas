@@ -31,8 +31,10 @@ class Hydration:
     that makes retrieval slow long before the index does.
     """
 
-    def __init__(self, chunk_store_path: str | Path = Config.DB_PATH) -> None:
-        self.chunk_store_path = Path(chunk_store_path)
+    def __init__(self, chunk_store_path: str | Path | None = None) -> None:
+        self.chunk_store_path = Path(
+            chunk_store_path if chunk_store_path is not None else Config.DB_PATH
+        )
 
     def __rows(self, vector_ids: Sequence[int]) -> Dict[int, tuple]:
         if not vector_ids:
