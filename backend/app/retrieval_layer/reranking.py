@@ -44,11 +44,9 @@ class Reranker:
     def __load(self) -> Scorer:
         try:
             from sentence_transformers import CrossEncoder
-        except ImportError as error:
-            raise RerankerUnavailable(self.model_name, str(error)) from error
-        try:
             model = CrossEncoder(self.model_name)
-        except Exception as error:
+        except (ImportError , Exception) as error:
+            # TODO : Implement a logger here which should also contain the stack trace as well
             raise RerankerUnavailable(self.model_name, str(error)) from error
         logger.info("Loaded the reranking model %s", self.model_name)
         return lambda pairs: model.predict(
