@@ -90,7 +90,9 @@ class IngestionPipeline:
             return self.embedder.embed(arg)
 
     def ingest_vector(self, embedded_value: EmbeddedChunk) -> None:
-        label = self.vector_meta.allocate(embedded_value.meta_data.chunk_id)
+        label = self.vector_meta.allocate(
+            embedded_value.meta_data.chunk_id, embedded_value.vector
+        )
         self.vector_db.insert(embedded_value, vector_id=label)
 
     def batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> List[int]:
@@ -99,25 +101,19 @@ class IngestionPipeline:
         The label is allocated rather than taken from the EmbeddedChunk: that id
         is masked into 63 bits for pgvector, and DiskANN indexes uint32 labels.
         Allocating also means the mapping row exists before the vector does, so
-        a hit can never arrive for a chunk the table has not heard of.
+        a hit can never arrive for a chunk the table has not heard of. The
+        vector is stored in that same row: it is what rebuilds the index after a
+        restart, since a saved DiskANN index cannot be loaded back (bug 5.20).
         """
         if not embedded_objs:
             return []
         labels = self.vector_meta.allocate_many(
-            [e.meta_data.chunk_id for e in embedded_objs]
+            [e.meta_data.chunk_id for e in embedded_objs],
+            [e.vector for e in embedded_objs],
         )
         with log_timing(logger, "vector insert", vectors=len(embedded_objs)):
             self.vector_db.batch_insert(embedded_objs, vector_ids=labels)
         return labels
-
-    def persist_index(self, save_path: str = Config.INDEX_PATH) -> None:
-        """Write the DiskANN index to disk.
-
-        Nothing called this, so the index lived only as long as the process and
-        a later search started from an empty one (the open P3 entry).
-        """
-        with log_timing(logger, "index persist"):
-            self.vector_db.save(save_path)
 
     def close(self) -> None:
         self.vector_meta.close()

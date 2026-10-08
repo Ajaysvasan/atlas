@@ -79,6 +79,33 @@ class TestStemming:
         ks.close()
 
 
+class TestBeyondAscii:
+    """The tokenizer is unicode61; a query split on ASCII before it gets there
+    searches "naïve" as "na" OR "ve" and finds nothing."""
+
+    def test_an_accented_word_matches_itself(self, tmp_path):
+        ks = search_over(tmp_path, [("c1", "a naïve bayes classifier"),
+                                    ("c2", "unrelated text about vectors")])
+        assert [h.vector_id for h in ks.search(plan("naïve"), 3)] == [1]
+        ks.close()
+
+    def test_an_unaccented_query_finds_the_accented_word(self, tmp_path):
+        """unicode61 folds diacritics, so this works once nothing upstream
+        has already broken the word apart."""
+        ks = search_over(tmp_path, [("c1", "the café opened at nine")])
+        assert len(ks.search(plan("cafe"), 3)) == 1
+        ks.close()
+
+    def test_a_non_latin_script(self, tmp_path):
+        ks = search_over(tmp_path, [("c1", "индекс базы данных"),
+                                    ("c2", "an index of a database")])
+        assert [h.vector_id for h in ks.search(plan("индекс"), 3)] == [1]
+        ks.close()
+
+    def test_the_expression_keeps_the_word_whole(self):
+        assert match_expression("naïve café") == '"naïve" OR "café"'
+
+
 class TestRanking:
     def test_the_better_match_ranks_first(self, tmp_path):
         ks = search_over(tmp_path, [

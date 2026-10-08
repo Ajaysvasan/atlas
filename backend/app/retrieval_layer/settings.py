@@ -74,3 +74,7 @@ class RetrievalSettings:
     def candidates(self) -> int:
         """How many each searcher fetches before fusion narrows them."""
         return self.top_k * self.candidate_multiplier
+
+# A pasted stack trace is a legitimate query, and two thousand OR'd terms is a
+# legitimate way to make FTS5 walk most of its index for one search.
+MAX_QUERY_TERMS = 32

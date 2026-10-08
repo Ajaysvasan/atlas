@@ -80,13 +80,51 @@ class VectorDbManager:
             numpy.array(vector_ids, dtype=numpy.uint32),
         )
 
-    def search_vector(self, query):
-        return self.vector_db.search_vector(query, self.k_neighbors, self.complexity)
+    def count(self) -> int:
+        return self.vector_db.count()
 
-    def batch_search_vectors(self, queries):
-        return self.vector_db.batch_search_vector(
-            queries, self.k_neighbors, self.complexity
-        )
+    def restore(self, store, after: int = 0) -> int:
+        """Index the store's vectors labelled above `after`; returns the highest label now indexed.
+
+        Labels only grow, so passing back what this returned indexes just what
+        was ingested since, rather than rebuilding the whole graph.
+        """
+        through, restored = int(after), 0
+        for labels, vectors in store.vectors(after=through):
+            with self.lock:
+                self.vector_db.batch_insert(vectors, labels)
+            restored += len(labels)
+            through = int(labels[-1])
+        if restored:
+            logger.info("Indexed %d stored vector(s), through label %d", restored, through)
+        unusable = store.missing_vectors()
+        if unusable:
+            logger.warning(
+                "%d label(s) have no usable stored vector and cannot be found "
+                "by meaning until they are re-embedded",
+                unusable,
+            )
+        return through
+
+    def __within_count(self, k_neighbors: int | None) -> int:
+        # Never more than the index holds. diskannpy returns k slots regardless
+        # and fills the surplus from uninitialised memory: labels that can be
+        # real ones, at distance 0.0, so they sort ahead of every true result.
+        return min(k_neighbors or self.k_neighbors, self.count())
+
+    def search_vector(self, query, k_neighbors: int | None = None):
+        k = self.__within_count(k_neighbors)
+        if k < 1:
+            return numpy.empty(0, numpy.uint32), numpy.empty(0, numpy.float32)
+        return self.vector_db.search_vector(query, k, self.complexity)
+
+    def batch_search_vectors(self, queries, k_neighbors: int | None = None):
+        k = self.__within_count(k_neighbors)
+        if k < 1:
+            rows = len(queries)
+            return (numpy.empty((rows, 0), numpy.uint32),
+                    numpy.empty((rows, 0), numpy.float32))
+        return self.vector_db.batch_search_vector(queries, k, self.complexity)
 
     def delete_vector(self, vector_id) -> None:
         with self.lock:

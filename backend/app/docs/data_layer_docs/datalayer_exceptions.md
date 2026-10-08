@@ -100,7 +100,7 @@ Raised by `VectorRepository.__init__` when any of `DB_NAME`, `DB_USER`, `DB_PASS
 ---
 
 ### `class InvalidVectorDimension(Exception)`
-Raised by `VectorRepository` when a vector's length differs from `Config.EMBEDDING_DIMENSIONS`.
+Raised by `VectorRepository` when a vector's length differs from `Config.EMBEDDING_DIMENSIONS`, and by `VectorMetaDataRepository.allocate` / `allocate_many` when a vector's shape is not `(dimensions,)`.
 
 | Constructor | `__init__(self, passed_dimension: int, expected_dimension: int) -> None` |
 | :--- | :--- |

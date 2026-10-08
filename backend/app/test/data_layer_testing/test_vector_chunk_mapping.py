@@ -155,3 +155,122 @@ class TestTheStore:
         )
         with pytest.raises(InvalidBatchSize):
             repo.batch_insert([1, 2], ["only_one"], "model", 128)
+
+
+class TestTheVectorIsKept:
+    """Bug 5.20: diskannpy cannot load an index it saved, so the vectors kept
+    here are what the index is rebuilt from after a restart."""
+
+    def vecs(self, n, seed=0):
+        return list(np.random.default_rng(seed).standard_normal((n, 128)).astype(np.float32))
+
+    def test_a_batch_comes_back_exactly(self, repo):
+        stored = self.vecs(5)
+        labels = repo.allocate_many([f"c{i}" for i in range(5)], stored)
+        (got_labels, got_vectors), = list(repo.vectors())
+        assert got_labels.tolist() == labels
+        np.testing.assert_array_equal(got_vectors, np.stack(stored))
+
+    def test_a_single_allocation_keeps_its_vector(self, repo):
+        vector = self.vecs(1)[0]
+        label = repo.allocate("c1", vector)
+        (got_labels, got_vectors), = list(repo.vectors())
+        assert got_labels.tolist() == [label]
+        np.testing.assert_array_equal(got_vectors[0], vector)
+
+    def test_a_vector_is_stored_as_float32(self, repo):
+        repo.allocate("c1", np.ones(128, dtype=np.float64))
+        (_, got), = list(repo.vectors())
+        assert got.dtype == np.float32
+
+    def test_one_vector_per_chunk_is_required(self, repo):
+        from data_layer.datalayer_exceptions.datalayer_exceptions import InvalidBatchSize
+
+        with pytest.raises(InvalidBatchSize):
+            repo.allocate_many(["a", "b"], self.vecs(1))
+        assert repo.count() == 0
+
+    def test_a_vector_of_the_wrong_width_is_refused_before_anything_is_written(self, repo):
+        from data_layer.datalayer_exceptions.datalayer_exceptions import (
+            InvalidVectorDimension,
+        )
+
+        with pytest.raises(InvalidVectorDimension):
+            repo.allocate_many(["a", "b"], [np.ones(128), np.ones(64)])
+        assert repo.count() == 0
+
+    def test_they_come_back_a_page_at_a_time_in_label_order(self, repo):
+        repo.allocate_many([f"c{i}" for i in range(10)], self.vecs(10))
+        pages = list(repo.vectors(batch_size=3))
+        assert [len(labels) for labels, _ in pages] == [3, 3, 3, 1]
+        everything = np.concatenate([labels for labels, _ in pages]).tolist()
+        assert everything == sorted(everything) and len(everything) == 10
+
+    def test_only_labels_after_the_one_given(self, repo):
+        labels = repo.allocate_many([f"c{i}" for i in range(6)], self.vecs(6))
+        later = np.concatenate([l for l, _ in repo.vectors(after=labels[3])]).tolist()
+        assert later == labels[4:]
+
+    def test_nothing_after_the_last_label(self, repo):
+        labels = repo.allocate_many(["a"], self.vecs(1))
+        assert list(repo.vectors(after=labels[-1])) == []
+
+    def test_a_label_without_a_vector_is_skipped_and_counted(self, repo):
+        repo.allocate("no vector")
+        repo.allocate("has one", self.vecs(1)[0])
+        labels = np.concatenate([l for l, _ in repo.vectors()]).tolist()
+        assert len(labels) == 1
+        assert repo.missing_vectors() == 1
+
+    def test_another_models_vectors_are_never_mixed_in(self, repo):
+        """A different model is a different space; its neighbours are noise."""
+        repo.allocate("old", self.vecs(1)[0], embeddingModelUsed="some/other-model")
+        repo.allocate("new", self.vecs(1, seed=1)[0])
+        labels = np.concatenate([l for l, _ in repo.vectors()]).tolist()
+        assert len(labels) == 1
+        assert repo.missing_vectors() == 1
+
+
+class TestMigratingAnOldTable:
+    """Stores written before vectors were kept have the table without the
+    column; they are upgraded in place and their rows kept."""
+
+    def old_store(self, tmp_path, rows=3):
+        path = str(tmp_path / "old.db")
+        with sqlite3.connect(path) as conn:
+            conn.execute("""create table vector_meta_data(
+                vectorId integer primary key autoincrement,
+                chunkId text not null, embeddingModelUsed text not null,
+                dimensions integer not null)""")
+            conn.executemany(
+                "insert into vector_meta_data(chunkId, embeddingModelUsed, dimensions) "
+                "values (?, ?, ?)",
+                [(f"c{i}", Config.EMBEDDING_MODEL, 128) for i in range(rows)])
+        return path
+
+    def test_the_column_is_added_and_the_rows_kept(self, tmp_path):
+        path = self.old_store(tmp_path)
+        repo = VectorMetaDataRepository(path)
+        columns = {r[1] for r in repo.connection.execute(
+            "pragma table_info(vector_meta_data)")}
+        assert "vector" in columns
+        assert repo.count() == 3
+        repo.close()
+
+    def test_old_rows_are_reported_as_unsearchable(self, tmp_path):
+        repo = VectorMetaDataRepository(self.old_store(tmp_path))
+        assert repo.missing_vectors() == 3
+        repo.close()
+
+    def test_new_rows_keep_their_vectors_after_the_upgrade(self, tmp_path):
+        repo = VectorMetaDataRepository(self.old_store(tmp_path))
+        label = repo.allocate("new", np.ones(128, dtype=np.float32))
+        assert np.concatenate([l for l, _ in repo.vectors()]).tolist() == [label]
+        repo.close()
+
+    def test_opening_an_upgraded_store_again_changes_nothing(self, tmp_path):
+        path = self.old_store(tmp_path)
+        VectorMetaDataRepository(path).close()
+        repo = VectorMetaDataRepository(path)
+        assert repo.count() == 3
+        repo.close()

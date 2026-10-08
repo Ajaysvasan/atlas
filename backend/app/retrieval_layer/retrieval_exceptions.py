@@ -21,8 +21,8 @@ class IndexUnavailable(Exception):
 
     def __str__(self) -> str:
         return (
-            f"The vector index at {self.path!r} could not be used: {self.reason}. "
-            f"Ingest a corpus and call IngestionPipeline.persist_index() first."
+            f"The vector index could not be built from {self.path!r}: "
+            f"{self.reason}. Ingest a corpus first."
         )
 
 

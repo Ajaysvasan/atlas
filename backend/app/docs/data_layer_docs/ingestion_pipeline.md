@@ -17,7 +17,8 @@ Initializes internal component instances using defaults from `Config`.
 - `self.t_normalizer = NormalizationProfiles.rag_ingestion()`
 - `self.chunker = Chunker()`
 - `self.embedder = EmbeddingManager()`
-- `self.vector_db = VectorDbManager(...)` configured with `Config` metric, dimensions, max vectors, complexity, and thread parameters.
+- `self.vector_db = VectorDbManager(...)` configured with `Config` metric, dimensions, max vectors, complexity, and thread parameters. This index lives only as long as the pipeline; it is not what makes vectors survive a restart.
+- `self.vector_meta = VectorMetaDataRepository(self.chunker.db_path)` — allocates each vector's DiskANN label and **stores the vector itself**, in the chunk store's database file. These rows are what the index is rebuilt from (bug 5.20).
 
 ---
 
@@ -137,7 +138,7 @@ Converts single chunks or chunk lists into dense vector embeddings.
 ---
 
 ##### `ingest_vector(self, embedded_value: EmbeddedChunk) -> None`
-Inserts a single embedded chunk into the active DiskANN vector database index (`self.vector_db.insert`).
+Allocates a label for the chunk and stores its vector in `vector_meta_data` (one transaction), then inserts the vector into the pipeline's DiskANN index under that label.
 
 ###### Parameters
 | Parameter | Type | Description |
@@ -146,10 +147,21 @@ Inserts a single embedded chunk into the active DiskANN vector database index (`
 
 ---
 
-##### `batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> None`
-Batch-inserts a list of embedded chunk nodes into the active DiskANN index (`self.vector_db.batch_insert`).
+##### `batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> List[int]`
+Allocates one label per chunk and stores every vector beside it in a single transaction (`VectorMetaDataRepository.allocate_many`), then batch-inserts the vectors into the pipeline's DiskANN index under those labels. An empty list does nothing.
 
 ###### Parameters
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
 | `embedded_objs` | `List[EmbeddedChunk]` | List of embedded chunk instances to insert. |
+
+###### Return Value
+- **Type**: `List[int]`
+- **Description**: The allocated labels, in the order of `embedded_objs`. The label, not `EmbeddedChunk.vector_id`, is what DiskANN indexes: that id is 63-bit for pgvector and DiskANN labels are `uint32` (bug 5.16).
+
+> There is no `persist_index()`. It wrote DiskANN's own index files, which diskannpy 0.7.0 cannot load back (bug 5.20); the stored vectors replace it.
+
+---
+
+##### `close(self) -> None`
+Closes the label repository's connection.

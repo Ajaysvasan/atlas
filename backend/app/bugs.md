@@ -536,6 +536,61 @@ unusable and so the path was never exercised.
   Masking to 32 bits instead would not work either. At `MAX_VECTORS = 1,000,000` the birthday bound puts expected collisions at **about 116**, and a collision means two chunks sharing a label — a hit resolving to the wrong text.
 - **Status:** **Fixed** by letting `vector_meta_data` allocate the label instead of deriving it. Sequential ids cannot collide and use 0.02% of the `uint32` space at `MAX_VECTORS`. This is what the table was for: the id DiskANN returns is a label, and the table is what translates it back. `EmbeddingManager.vector_id` is unchanged and still correct for pgvector, which is where the memory layer uses it.
 
+## Section 5c: The DiskANN Read Path (found while building the retrieval layer)
+
+Like 5b, invisible until something read the index back: every earlier test of the dense path either mocked diskannpy or used an index smaller than the search list, where a broken graph still reaches every point from the start node.
+
+### Bug 5.17: `VectorDbManager.search_vector` Could Not Return More Than `K_NEIGHBORS` (`vectorDbManager.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P1
+- **Explanation:** `search_vector(query)` always passed `self.k_neighbors` (9) to DiskANN, although the wrapper beneath it takes `k`. The retrieval layer over-fetches `top_k × 4 = 32` per searcher so reranking and MMR have a pool to choose from; the dense half capped at 9 while bm25 supplied 32, so fusion leaned towards keyword results without anyone choosing that.
+- **Status:** **Fixed.** `search_vector` and `batch_search_vectors` take an optional `k_neighbors`, defaulting to the configured value so every other caller is unchanged. DiskANN widens its search list itself when `k > complexity` (verified: `k=120` against `complexity=100` returns 120).
+
+### Bug 5.18: Asking DiskANN for More Neighbours Than It Holds Returns Uninitialised Memory (`vectorDbManager.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** diskannpy returns `k` slots whatever the index holds and fills the surplus from uninitialised memory. Measured on an 8-vector index asked for 12: the 8 real neighbours, then labels such as `1067030938` (the bit pattern of the float 1.2), `64`, `22053` and **`1` — a real, allocated label** — at distance `0.0`. Sorted by distance, the junk ranks **first**, and a junk label that happens to be allocated resolves to a real chunk, so the wrong passage leads the result. On a reloaded index every slot is garbage, the first at distance −2.97e28. A new install's corpus is always smaller than the 32-candidate pool, so this is the first thing a user meets.
+- **Status:** **Fixed** by never asking for more than the index holds: `k = min(k, count())`, where `count()` reads the native `num_points()` — verified to track inserts (8), deletes (7) and reloads (7), excluding the frozen start point, and `k = num_points` is exactly the boundary (`k=7` of 7 is clean, `k=8` brings in label `0`). The count is read through diskannpy's private `_index`; `test_the_count_follows_inserts_deletes_and_reloads` pins that path so a library change fails there rather than inside a search.
+
+### Bug 5.19: The Dynamic Index Is Built Without `saturate_graph`, So Recall@10 Is 0.09 (`vectorDB_diskann.py`) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** diskannpy 0.7.0's `DynamicMemoryIndex` defaults `saturate_graph` to `False`, and with that default the insertion path builds an almost empty graph: the index cannot find a vector that was inserted into it. Measured on 5,000 random 128-d vectors, 200 queries, against brute force:
+
+  | Index | recall@10 | finds an inserted vector exactly |
+  |---|---|---|
+  | `build_memory_index` (static, reference) | 0.958 | — |
+  | Dynamic, as `VectorDb_diskann` builds it | **0.086** | no |
+  | Dynamic, `num_threads` 1 or 4 | 0.098–0.107 | no |
+  | Dynamic, `saturate_graph=True` | **0.965** | yes |
+
+  Raising the search list from 64 to 200 changes nothing, and a 5,000-vector build takes 0.01 s — there is no graph to search. On the 8-point indexes the tests use, the start node links to every point, which is why nothing caught it. At any real corpus size the dense half of retrieval returns about a tenth of the true neighbours.
+- **Status:** **Fixed.** `SATURATE_GRAPH = True` in `vectorDB_diskann.py`, passed to both the constructor and `from_file`, which takes the same flag and would otherwise build the sparse graph for every insert after a load. Build time rises to 0.08 s per 5,000 vectors. With it, 99.7–99.8% of 2,000 vectors find themselves as nearest neighbour across three seeds (0% without). `test/data_layer_testing/test_vector_index.py` requires ≥ 98% and recall@10 ≥ 0.9 against brute force, on the real library; without the flag both fail (recall 0.15). **An index built before the change has to be rebuilt** — the graph is fixed at insertion.
+
+### Bug 5.20: A Saved Index Loses Every Label — `ann.tags` Is Written as Zeros (`vectorDB_diskann.py`, diskannpy 0.7.0) — FIXED
+
+- **Criticality:** Critical
+- **Priority:** P0
+- **Explanation:** `DynamicMemoryIndex.save` writes all-zero tags. Verified: labels `11..18` inserted, `ann.tags` on disk reads `[0, 0, 0, 0, 0, 0, 0, 0, 0]`. A reload in the same process happens to return the right labels; a reload in a **new process** — which is what every restart is — returns pointer-like garbage (`2530163536, 32701`), and the retrieval tests' in-process reload returns `0` for every hit. The vectors and graph survive; the mapping from them to `vector_meta_data` does not. So after any restart the dense half returns labels that resolve to nothing, hydration drops them silently, and retrieval runs on keyword search alone with nothing raised. This is the cause behind the long-standing P3 "DiskANN index not persisted/reloaded correctly between sessions". 0.7.0 is diskannpy's last release (the cp311 ceiling), so no upstream fix is coming.
+- **Repairing the files is not possible.** Writing the correct labels into `ann.tags` after `save()` and reloading in a new process still returns the same garbage for every query, so the loader is broken as well as the writer. No reuse of diskannpy's dynamic save/load can work.
+- **Status:** **Fixed** by making SQLite the source of truth and the index derived data:
+  - `vector_meta_data` gained a `vector` blob, written in the transaction that allocates the label (`allocate` / `allocate_many`), so the label map and the index cannot disagree. Tables written before it gain the column on open, rows kept; those rows are reported as unsearchable until re-embedded.
+  - `VectorDbManager.restore(store, after)` builds the index from those rows a page at a time and returns the highest label indexed. Labels only grow, so `Retriever.refresh()` → `VectorSearch.catch_up()` indexes only what was ingested since, instead of rebuilding the graph.
+  - `VectorSearch` builds from the chunk store, not from DiskANN files; `IngestionPipeline.persist_index()` is gone. `save()` / `load()` remain, unused.
+  - Only one model's vectors at one width are restored: another model's are in a different space.
+- **Cost:** a graph build on the first search, growing faster than linearly — 0.9 s for 10k vectors, 6.3 s for 50k, 16.6 s for 100k at `Config`'s settings (complexity 100, degree 120, 4 threads). Reading the vectors from SQLite is under 0.1 s per 100k. A static-index snapshot (`build_memory_index`, row-position ids mapped to labels) would remove it at the price of a full rebuild per ingest; not done.
+- **Tests:** `test_vector_index.py::TestSurvivingARestart::test_in_a_new_process` rebuilds in a separate interpreter and requires the exact labels back — every in-process reload had looked correct. Also storage and migration (`test_vector_chunk_mapping.py`), restore and catch-up against the real library, and the pipeline storing what it indexes. The two `xfail(strict=True)` markers became passing tests of the store-backed path. 18 mutations, all caught.
+
+### Bug 5.21: Re-ingesting a Chunk Allocates a New Label Every Time, and Since 5.20 the Copies Persist (`vectorMetaDataRepository.py`, `ingestion_pipeline.py`)
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `allocate` / `allocate_many` always insert a new row; nothing checks whether the chunk already has a label. Chunk writes are `on conflict do nothing`, so re-ingesting an unchanged folder adds no chunks — but every chunk still gets a fresh label. Measured in the real `data/hierarchical_db`: **one chunk, 45 labels, 25 of them with a stored vector**, accumulated by test runs (7.5). Before 5.20 the duplicate vectors died with the process; now they are stored, so every rebuild indexes all 25 copies, and a search can fill retrieval's 32-candidate pool with one chunk. Assembly drops repeats, so results stay correct, but recall falls with every re-ingest. **Made permanent by the 5.20 fix**, which is why it is logged with it.
+- **Fix (not applied — it changes the ingestion contract):** make allocation idempotent per `(chunkId, embeddingModelUsed)` — return the existing label, storing the vector if the row had none — and have the pipeline skip the DiskANN insert for labels it reused. A `unique (chunkId, embeddingModelUsed)` constraint would need the existing duplicates collapsed first.
+
 ---
 
 ## Section 6: Dependencies & Tooling (`requirements.txt`, `download_models/`)
@@ -596,3 +651,36 @@ unusable and so the path was never exercised.
 - **Criticality:** Low
 - **Priority:** P3
 - **Explanation:** `preflight()` exists to report setup problems as instructions instead of tracebacks, and it does that for a missing `pgvector`, missing `.env` keys, an unreachable server, an absent extension and an absent database. It imports `psycopg` unconditionally, though, so the one dependency it cannot report is the one it needs to do the reporting. **Introduced in this session.**
+
+### Bug 7.4: Three Data-Layer Test Files Replace `diskannpy` With a MagicMock for the Whole Session
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `test_data_layer_production.py`, `test_data_layer_bugs.py` and `test_non_memory.py` assign `sys.modules["diskannpy"] = mock.MagicMock()` unconditionally at import, and pytest imports every file before running any test, so every later test in the session gets the mock. The retrieval end-to-end tests built a "real" index, every search raised inside the mock, `VectorSearch` returned `[]`, and the tests **passed on keyword search alone**; only an assertion that the dense half produced results noticed. The other files use `setdefault`, which stands down when the real module is already imported — the arrangement the root `conftest.py` makes for `psycopg`. Switching these three to `setdefault` is not enough on its own: `test_data_layer_production.py` also assigns `DynamicMemoryIndex = MockDiskANN` on the module, which would then patch the real library for the rest of the session, so it needs `monkeypatch` instead.
+- **Workaround:** the root `conftest.py` provides `real_diskann`, which imports the real diskannpy once per session and swaps only the `diskannpy` entry in `sys.modules` (and the wrapper's binding) for one test, via `monkeypatch`. Mutation-checked: without the wrapper binding, 7 retrieval tests fail.
+- **The first version of that fixture was itself a bug. Introduced and fixed in this session.** It wrapped the test in `mock.patch.dict(sys.modules)`, which on teardown evicts *every* module the test imported, not just diskannpy. A test that imported `ingestion_pipeline` pulled in torch; teardown evicted it; the next test re-imported torch in the same process, which torch does not support, and formatting that failure segfaulted pytest. It surfaced once two such tests ran in one session.
+
+---
+
+## Section 8: Retrieval Layer (`retrieval_layer/`)
+
+### Bug 8.1: Keyword Search Split Queries on ASCII, So Accented and Non-Latin Words Never Matched (`keyword_search.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P1
+- **Explanation:** `match_expression` extracted terms with `[A-Za-z0-9_]+`, so `naïve` was searched as `"na" OR "ve"` and `café` as `"caf"` — **0 hits** each against a chunk containing the word, verified on a real FTS5 table. FTS5's `unicode61` tokenizer handles these fine; the pattern in front of it broke them first. **Introduced in this session** (retrieval Phase 2).
+- **Status:** **Fixed** with `\w+`. Both now match, and because `unicode61` folds diacritics, `cafe` also finds `café`. Tests include a Cyrillic query.
+
+### Bug 8.2: MMR Re-derived Relevance From Cosine, Undoing the Reranker (`diversity.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `maximal_marginal_relevance` computed relevance as cosine to the query embedding and ignored the scores of whatever ranked the passages before it. It runs after the cross-encoder, so the most expensive and most accurate stage in the pipeline changed nothing about the result: the bi-encoder's ordering came back. Without reranking it equally discarded fusion's judgement — a passage both searchers found lost to one that was merely closer in embedding space. **Introduced in this session** (retrieval Phase 3).
+- **Status:** **Fixed.** MMR takes an optional `relevance`, min-max normalised across the pool so a logit, a bm25 value or an RRF score can be traded against cosine redundancy; the retriever always passes the previous stage's scores. Min-max is relative to the pool — the weakest candidate scores 0 whatever its raw score — which is why MMR is given the whole candidate pool, not a shortlist; `test_relevance_is_relative_to_the_pool` pins that property.
+
+### Bug 7.5: `test_data_layer_production.py` Writes Into the Real Chunk Store
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** The end-to-end pipeline test builds a real `IngestionPipeline`, whose chunker and label repository open `Config.DB_PATH` — the developer's own `data/hierarchical_db` — and the test's own comment says so ("It will write to DB_PATH"). Verified: running that file alone moves the real store from 44 labels to 45. Every full-suite run adds rows, and since 5.20 a stored vector with each, so the suite's results and the developer's data are entangled: the real store carries test chunks, and it migrated to the new schema the first time the suite ran rather than when the app did. The fix is to point the pipeline's paths at `tmp_path` for that test.
+

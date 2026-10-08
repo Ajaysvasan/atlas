@@ -77,6 +77,7 @@ class RetrievalResult(NamedTuple):
     cached: bool = False
     candidates_considered: int = 0
     dropped_unresolvable: int = 0
+    tokens: int = 0
 
     @property
     def text(self) -> str:

@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 FTS_PATH = Config.DATA_DIR / Path("retrieval/keyword_index.sql")
 
-_WORD = re.compile(r"[A-Za-z0-9_]+")
+WORD = re.compile(r"\w+")
 
 
 def match_expression(text: str) -> str:
@@ -24,7 +24,7 @@ def match_expression(text: str) -> str:
     they are not meant. Pulling out the word characters and quoting each one
     leaves a query that always parses and matches on any term.
     """
-    terms = _WORD.findall(text)
+    terms = WORD.findall(text)
     return " OR ".join(f'"{term}"' for term in terms)
 
 

@@ -13,14 +13,18 @@ logger = get_logger(__name__)
 class VectorSearch:
     """The dense half of retrieval.
 
-    Takes an index rather than building one: the ingestion pipeline owns
-    writing, this owns reading, and sharing the object keeps a freshly ingested
-    corpus searchable without a round trip through disk.
+    Builds its index from the vectors stored beside the chunk labels, not from
+    DiskANN's own files: diskannpy 0.7.0 cannot load a dynamic index it saved
+    (bug 5.20). An index can still be handed in, which is what tests do.
     """
 
-    def __init__(self, index=None, index_path: str | Path = Config.INDEX_PATH) -> None:
-        self.index_path = Path(index_path)
+    def __init__(
+        self, index=None, chunk_store_path: str | Path = Config.DB_PATH
+    ) -> None:
+        self.chunk_store_path = Path(chunk_store_path)
         self.__index = index
+        self.__owns_index = index is None
+        self.__indexed_through = 0
 
     @property
     def index(self):
@@ -28,11 +32,32 @@ class VectorSearch:
             self.__index = self.__load()
         return self.__index
 
+    def catch_up(self) -> None:
+        """Index whatever has been ingested since the index was built.
+
+        One handed in belongs to whoever handed it in, who inserts into it.
+        """
+        if self.__owns_index and self.__index is not None:
+            self.__indexed_through = self.__restore(
+                self.__index, self.__indexed_through
+            )
+
+    def __restore(self, index, after: int) -> int:
+        from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
+            VectorMetaDataRepository,
+        )
+
+        store = VectorMetaDataRepository(str(self.chunk_store_path))
+        try:
+            return index.restore(store, after)
+        finally:
+            store.close()
+
     def __load(self):
         from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
-        if not self.index_path.exists():
-            raise IndexUnavailable(str(self.index_path), "no index on disk")
+        if not self.chunk_store_path.exists():
+            raise IndexUnavailable(str(self.chunk_store_path), "no chunk store")
         index = VectorDbManager(
             distance_metrics=Config.DISTANCE_METRIC,
             vector_dtype=Config.VECTOR_DTYPE,
@@ -44,10 +69,9 @@ class VectorSearch:
             k_neighbors=Config.K_NEIGHBORS,
         )
         try:
-            index.load(str(self.index_path))
+            self.__indexed_through = self.__restore(index, 0)
         except Exception as error:
-            raise IndexUnavailable(str(self.index_path), str(error)) from error
-        logger.info("Loaded the vector index from %s", self.index_path)
+            raise IndexUnavailable(str(self.chunk_store_path), str(error)) from error
         return index
 
     def search(self, plan: QueryPlan, k: int) -> List[ScoredId]:
@@ -59,7 +83,7 @@ class VectorSearch:
         # can survive on the lexical results alone.
         index = self.index
         try:
-            labels, distances = index.search_vector(plan.vector)
+            labels, distances = index.search_vector(plan.vector, k)
         except Exception as error:
             logger.warning("Vector search failed: %s", error)
             return []

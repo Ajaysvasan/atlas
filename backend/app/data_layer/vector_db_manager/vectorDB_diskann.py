@@ -10,6 +10,11 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
 
 logger = get_logger(__name__)
 
+# diskannpy defaults this to False, and the dynamic index then builds a graph so
+# sparse it cannot find a vector that was inserted into it: recall@10 of 0.09
+# against 0.96 with it on (bugs.md 5.19). Not a tuning knob.
+SATURATE_GRAPH = True
+
 
 class VectorDb_diskann:
 
@@ -36,6 +41,7 @@ class VectorDb_diskann:
             dimensions=self.dimensions,
             max_vectors=self.max_vectors,
             graph_degree=self.graph_degree,
+            saturate_graph=SATURATE_GRAPH,
             search_threads=self.num_threads,
             complexity=self.complexity,
         )
@@ -73,6 +79,10 @@ class VectorDb_diskann:
     def batch_insert(self, vectors, vector_ids):
         self.__insert_vectors(vectors, vector_ids)
 
+    def count(self) -> int:
+        """Vectors in the index now; diskannpy exposes this only on its native object."""
+        return int(self.dynamic_dann._index.num_points())
+
     def search_vector(self, query, k_neighbors, complexity):
         return self.dynamic_dann.search(
             query=query, k_neighbors=k_neighbors, complexity=complexity
@@ -101,6 +111,7 @@ class VectorDb_diskann:
                 max_vectors=self.max_vectors,
                 complexity=self.complexity,
                 graph_degree=self.graph_degree,
+                saturate_graph=SATURATE_GRAPH,
                 search_threads=self.num_threads,
                 distance_metric=self.distance_metrics,
                 vector_dtype=self.vector_dtype,

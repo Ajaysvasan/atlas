@@ -177,8 +177,8 @@ class TestTheExceptions:
         assert "''" in str(EmptyQuery(""))
 
     def test_a_missing_index_says_how_to_make_one(self):
-        message = str(IndexUnavailable("data/idx", "no such file"))
-        assert "persist_index" in message
+        message = str(IndexUnavailable("data/chunks", "no chunk store"))
+        assert "Ingest a corpus" in message
 
     def test_a_failed_reranker_says_retrieval_still_works(self):
         message = str(RerankerUnavailable("some/model", "offline"))
