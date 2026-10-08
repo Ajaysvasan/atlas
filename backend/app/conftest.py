@@ -94,3 +94,44 @@ def _chunk_store_per_test(_memory_database_dir, monkeypatch):
     monkeypatch.setattr(
         Config, "DB_PATH", str(_memory_database_dir / f"chunks-{uuid.uuid4().hex}")
     )
+
+
+# --------------------------------------------------------------------------- #
+# No test may leave a file in the app directory. A string meant as an id once
+# landed in a `database` parameter, and four SQLite files named after test ids
+# — conv_A, conv_B, conv_abc and '   ' — were written here and committed. The
+# redirects above guard the paths code defaults to; this guards everything else.
+# --------------------------------------------------------------------------- #
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_APP_DIR = Path(__file__).resolve().parent
+_NOT_CHECKED = {".venv", ".git", "__pycache__", ".pytest_cache", "log"}
+
+
+def _app_files() -> set:
+    found = set()
+    for root, dirs, files in os.walk(_APP_DIR):
+        dirs[:] = [d for d in dirs if d not in _NOT_CHECKED]
+        found.update(os.path.relpath(os.path.join(root, f), _APP_DIR) for f in files)
+    return found
+
+
+def pytest_sessionstart(session):
+    session.config._app_files_before = _app_files()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    before = getattr(session.config, "_app_files_before", None)
+    if before is None:
+        return
+    left = sorted(_app_files() - before)
+    if not left:
+        return
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(
+            "Tests left files in the app directory: " + ", ".join(map(repr, left)),
+            red=True,
+        )
