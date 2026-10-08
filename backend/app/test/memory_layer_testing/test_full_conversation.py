@@ -31,6 +31,7 @@ from memory.topic_pool.project_pool.conversation_pool.full_conversation_bucket i
 PROJECT_ID = "proj_123"
 PROJECT_NAME = "test_project"
 CONVERSATION_ID = "conv_abc"
+DB = "memory.db"
 
 
 # ---------------------------------------------------------------------------
@@ -51,10 +52,16 @@ def _make_chunk(chunk_id, text, created_at="2026-08-10", chunker_type="text",
 # FullConversationRepository
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _projects_registered(tmp_path, seed_projects):
+    """Every turn references its project, so the ones used here are registered."""
+    seed_projects(tmp_path / DB, "topic", PROJECT_ID, "proj_bucket", "scale", "stress", "p")
+
+
 @pytest.fixture
 def repo(tmp_path):
     return FullConversationRepository(
-        conversation_path=tmp_path,
+        database=tmp_path / DB,
         project_id=PROJECT_ID,
         project_name=PROJECT_NAME,
         conversation_id=CONVERSATION_ID,
@@ -67,11 +74,11 @@ def repo(tmp_path):
 
 class TestSchema:
     def test_db_file_created(self, repo, tmp_path):
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         assert db_path.exists()
 
     def test_both_tables_exist(self, repo, tmp_path):
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -81,7 +88,7 @@ class TestSchema:
 
     def test_summary_chunks_created_before_full_conversation(self, repo, tmp_path):
         """Regression guard Bug 4.5: summary_chunks must exist for FK to work."""
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='summary_chunks'"
@@ -90,7 +97,7 @@ class TestSchema:
 
     def test_full_conversation_has_fk_on_chunk_id(self, repo, tmp_path):
         """FK from full_conversation.chunk_id → summary_chunks.chunk_id must be enforced."""
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             conn.execute("PRAGMA foreign_keys = ON")
             with pytest.raises(sqlite3.IntegrityError):
@@ -102,9 +109,9 @@ class TestSchema:
 
     def test_repeated_construction_same_path_is_idempotent(self, tmp_path):
         """Two repos on the same path must not duplicate tables."""
-        r1 = FullConversationRepository(tmp_path, PROJECT_ID, PROJECT_NAME, CONVERSATION_ID)
-        r2 = FullConversationRepository(tmp_path, PROJECT_ID, PROJECT_NAME, CONVERSATION_ID)
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        r1 = FullConversationRepository(PROJECT_ID, PROJECT_NAME, CONVERSATION_ID, tmp_path / DB)
+        r2 = FullConversationRepository(PROJECT_ID, PROJECT_NAME, CONVERSATION_ID, tmp_path / DB)
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             tables = [r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -130,7 +137,7 @@ class TestForeignKeyEnforcement:
     def test_orphan_insert_leaves_no_rows_behind(self, repo, tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             repo.add([_make_meta(PROJECT_ID, 1, "GHOST")], [])
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             count = conn.execute(
                 "SELECT COUNT(*) FROM full_conversation"
@@ -201,7 +208,7 @@ class TestAppendTurns:
 
     def test_role_is_persisted(self, repo, tmp_path):
         repo.append_turns([("user", "a"), ("assistant", "b")])
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             roles = [
                 r[0]
@@ -214,7 +221,7 @@ class TestAppendTurns:
     def test_chunker_type_marks_whole_turns(self, repo, tmp_path):
         """One turn -> one chunk; chunker_type records that provenance."""
         repo.append_turns([("user", "a")])
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             types = conn.execute(
                 "SELECT DISTINCT chunker_type FROM summary_chunks"
@@ -224,7 +231,7 @@ class TestAppendTurns:
     def test_created_at_is_iso_utc(self, repo, tmp_path):
         """Bug 4.31 class fix: the repository stamps time, not the caller."""
         repo.append_turns([("user", "a")])
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             stamp = conn.execute("SELECT created_at FROM summary_chunks").fetchone()[0]
         parsed = datetime.fromisoformat(stamp)
@@ -235,7 +242,7 @@ class TestAppendTurns:
         """Same project, sequence and text must reproduce the same id."""
         repo.append_turns([("user", "hello")])
         expected = hashlib.sha256(
-            f"{PROJECT_ID}\x00{1}\x00hello".encode("utf-8")
+            f"{PROJECT_ID}\x00{CONVERSATION_ID}\x00{1}\x00hello".encode("utf-8")
         ).hexdigest()
         assert repo.get_sequence_number(expected) == 1
 
@@ -245,7 +252,7 @@ class TestAppendTurns:
         writers hand out the same sequence_number.
         """
         repo = FullConversationRepository(
-            conversation_path=tmp_path,
+            database=tmp_path / DB,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
             conversation_id=CONVERSATION_ID,
@@ -265,7 +272,7 @@ class TestAppendTurns:
         for t in threads:
             t.join()
 
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             sequences = [
                 r[0]
@@ -636,7 +643,7 @@ class TestTurns:
     def test_fields_match_what_was_stored(self, repo, tmp_path):
         repo.append_turns([("user", "hello")])
         turn = repo.get_all_turns()[0]
-        with sqlite3.connect(tmp_path / f"{PROJECT_ID}_conversation.db") as conn:
+        with sqlite3.connect(tmp_path / DB) as conn:
             chunk_id, created_at = conn.execute(
                 "SELECT chunk_id, created_at FROM full_conversation WHERE sequence_number = 1"
             ).fetchone()
@@ -768,7 +775,7 @@ class TestGetSize:
 class TestRepositoryStress:
     def test_five_hundred_sequential_adds(self, tmp_path):
         repo = FullConversationRepository(
-            conversation_path=tmp_path,
+            database=tmp_path / DB,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
             conversation_id=CONVERSATION_ID,
@@ -781,7 +788,7 @@ class TestRepositoryStress:
     def test_fetch_all_preserves_order_at_scale(self, tmp_path):
         """Regression guard Bug 4.15: ORDER BY sequence_number must hold at scale."""
         repo = FullConversationRepository(
-            conversation_path=tmp_path,
+            database=tmp_path / DB,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
             conversation_id=CONVERSATION_ID,
@@ -796,7 +803,7 @@ class TestRepositoryStress:
 
     def test_range_query_at_scale(self, tmp_path):
         repo = FullConversationRepository(
-            conversation_path=tmp_path,
+            database=tmp_path / DB,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
             conversation_id=CONVERSATION_ID,
@@ -809,7 +816,7 @@ class TestRepositoryStress:
 
     def test_sequence_after_at_scale(self, tmp_path):
         repo = FullConversationRepository(
-            conversation_path=tmp_path,
+            database=tmp_path / DB,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
             conversation_id=CONVERSATION_ID,
@@ -823,7 +830,7 @@ class TestRepositoryStress:
     def test_fetch_all_out_of_order_insertion_still_ordered(self, tmp_path):
         """Inserting in reverse seq order must still return in seq order via fetch_all."""
         repo = FullConversationRepository(
-            conversation_path=tmp_path,
+            database=tmp_path / DB,
             project_id=PROJECT_ID,
             project_name=PROJECT_NAME,
             conversation_id=CONVERSATION_ID,
@@ -843,7 +850,7 @@ class TestRepositoryStress:
 @pytest.fixture
 def bucket(tmp_path):
     return FullConversation(
-        full_conversation_dir=tmp_path,
+        database=tmp_path / DB,
         project_id="proj_bucket",
         project_name="test_bucket",
         conversation_id=CONVERSATION_ID,
@@ -1002,7 +1009,7 @@ class TestFullConversationBucket:
 
     def test_stress_five_hundred_via_bucket(self, tmp_path):
         b = FullConversation(
-            full_conversation_dir=tmp_path,
+            database=tmp_path / DB,
             project_id="stress",
             project_name="stress_proj",
             conversation_id=CONVERSATION_ID,
@@ -1015,7 +1022,7 @@ class TestFullConversationBucket:
     def test_full_conversation_ordering_at_scale(self, tmp_path):
         """fetch_all must respect sequence_number even at 300 records."""
         b = FullConversation(
-            full_conversation_dir=tmp_path,
+            database=tmp_path / DB,
             project_id="scale",
             project_name="scale_proj",
             conversation_id=CONVERSATION_ID,
@@ -1060,17 +1067,14 @@ class TestBucketTurns:
 # ---------------------------------------------------------------------------
 
 class TestSequenceNumbersArePerConversation:
-    """Bug 4.62 in a database the repository created itself.
-
-    test_schema_migrations covers this for a *migrated* database, where the
-    table comes from schema_migrations' own DDL — so it says nothing about the
-    DDL in this module. A mutation reverting the key here passed the whole
-    suite until these tests existed.
+    """Bug 4.62: the key is (conversation_id, sequence_number), as declared by
+    this module. A mutation reverting it passed the whole suite until these
+    tests existed.
     """
 
     def _repo(self, tmp_path, conversation_id):
         return FullConversationRepository(
-            conversation_path=tmp_path, project_id=PROJECT_ID,
+            database=tmp_path / DB, project_id=PROJECT_ID,
             project_name=PROJECT_NAME, conversation_id=conversation_id,
         )
 
@@ -1091,7 +1095,7 @@ class TestSequenceNumbersArePerConversation:
 
     def test_the_declared_key_is_the_composite_one(self, tmp_path):
         self._repo(tmp_path, "conv_A")
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
+        db_path = tmp_path / DB
         with sqlite3.connect(db_path) as conn:
             key = [row[1] for row in
                    conn.execute("pragma table_info(full_conversation)") if row[5]]
@@ -1104,3 +1108,66 @@ class TestSequenceNumbersArePerConversation:
 
         with pytest.raises(sqlite3.IntegrityError):
             repo.add([_make_meta(PROJECT_ID, 1, "c2")], [_make_chunk("c2", "two")])
+
+
+# ---------------------------------------------------------------------------
+# Two conversations opening alike, and the relationships the database holds
+# ---------------------------------------------------------------------------
+
+
+class TestTwoConversationsMaySayTheSameThing:
+    """The turn's chunk_id was sha256(project, sequence, text): two
+    conversations in one project opening with "hello" produced one id, and the
+    second failed on summary_chunks' primary key."""
+
+    def test_both_can_open_with_the_same_words(self, tmp_path):
+        first = FullConversationRepository(PROJECT_ID, PROJECT_NAME, "conv_A", tmp_path / DB)
+        second = FullConversationRepository(PROJECT_ID, PROJECT_NAME, "conv_B", tmp_path / DB)
+        assert first.append_turns([("user", "hello")]) == [1]
+        assert second.append_turns([("user", "hello")]) == [1]
+
+    def test_each_reads_back_its_own_turn(self, tmp_path):
+        first = FullConversationRepository(PROJECT_ID, PROJECT_NAME, "conv_A", tmp_path / DB)
+        second = FullConversationRepository(PROJECT_ID, PROJECT_NAME, "conv_B", tmp_path / DB)
+        first.append_turns([("user", "hello"), ("assistant", "hi, A")])
+        second.append_turns([("user", "hello"), ("assistant", "hi, B")])
+        assert [t.text for t in first.get_all_turns()] == ["hello", "hi, A"]
+        assert [t.text for t in second.get_all_turns()] == ["hello", "hi, B"]
+
+
+class TestTheDatabaseKeepsTheRelationships:
+    def test_a_turn_for_an_unregistered_project_is_refused(self, tmp_path):
+        from memory.memory_pool_exceptions import ProjectNotFound
+
+        stranger = FullConversationRepository("never_registered", "x", CONVERSATION_ID, tmp_path / DB)
+        with pytest.raises(ProjectNotFound):
+            stranger.append_turns([("user", "hello")])
+        assert stranger.get_conversation_size() == 0
+
+    def test_the_refusal_names_the_project(self, tmp_path):
+        from memory.memory_pool_exceptions import ProjectNotFound
+
+        stranger = FullConversationRepository("never_registered", "x", CONVERSATION_ID, tmp_path / DB)
+        with pytest.raises(ProjectNotFound, match="never_registered") as caught:
+            stranger.append_turns([("user", "hello")])
+        assert isinstance(caught.value.__cause__, sqlite3.IntegrityError)
+
+    def test_a_role_the_prompt_builder_cannot_read_is_refused_by_the_database(self, repo):
+        """The bucket validates roles; add() bypasses the bucket, the CHECK does not."""
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            repo.add([_make_meta(PROJECT_ID, 1, "c1", role="narrator")],
+                     [_make_chunk("c1", "once upon a time")])
+
+    def test_a_turn_cannot_point_at_another_conversations_text(self, tmp_path):
+        """The (chunk_id, conversation_id) pair is the foreign key, so the two
+        copies of conversation_id cannot disagree (bugs.md 4.68's neighbour)."""
+        other = FullConversationRepository(PROJECT_ID, PROJECT_NAME, "conv_other", tmp_path / DB)
+        other.add([_make_meta(PROJECT_ID, 1, "shared", conversation_id="conv_other")],
+                  [_make_chunk("shared", "their words", conversation_id="conv_other")])
+        mine = FullConversationRepository(PROJECT_ID, PROJECT_NAME, CONVERSATION_ID, tmp_path / DB)
+        with pytest.raises(sqlite3.IntegrityError):
+            with mine.database.writing() as cursor:
+                cursor.execute(
+                    "insert into full_conversation values (?, ?, 1, 'shared', 'user', 'now')",
+                    (PROJECT_ID, CONVERSATION_ID),
+                )

@@ -116,7 +116,9 @@ project with fifty conversations does not put fifty conversations in one prompt.
 
 The watermark is `seq` on `cumulative_vector_meta_data`, not a timestamp:
 `created_at` is caller-supplied TEXT with no format enforcement, which is what
-made Bug 4.31 possible.
+made Bug 4.31 possible. `seq` is unique per project and shared by all of a
+project's conversations, so their summaries fall into one order; it was unique
+across its whole table only while each project had a database file of its own.
 
 `take()` is handed its summariser per call rather than holding one, because the
 draft model is expensive to load and its lifetime belongs to the caller. That is

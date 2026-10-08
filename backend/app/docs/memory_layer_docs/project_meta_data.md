@@ -10,8 +10,19 @@ sits on top of it, routing a query to one of these projects.
 One instance is scoped to one `project_id` **and its `topic_id`** —
 `ProjectMetaData(project_id, topic_id, ...)`. A project belongs to exactly one
 topic, and `topic_id` is `NOT NULL` in all three tables, so it is supplied once
-at construction rather than per call. The SQLite file itself is a shared registry
-holding every project, which is what makes "list all projects" answerable later.
+at construction rather than per call. The tables live in the memory database and
+hold every project, which is what makes "list all projects in a topic" answerable.
+
+```python
+ProjectMetaData(project_id: str, topic_id: str,
+                database: MemoryDatabase | str | Path | None = None,
+                vector_repository: VectorRepository | None = None)
+```
+
+`database` is a `MemoryDatabase` or a path to one; `None` uses the shared
+memory database. The topic's table is created first if it is missing, since
+`project_table` references it. `close()` closes the vector repository this
+instance opened itself and nothing else — the database is shared.
 
 ---
 
@@ -33,11 +44,12 @@ ingested documents and has nothing to do with project summaries.
 create table if not exists project_table(
     project_id text primary key,
     project_name text not null,
-    topic_id text not null,
-    created_at date not null,
-    updated_at date not null,
+    topic_id text not null references topics_mapping_table(topic_id),
+    created_at text not null,
+    updated_at text not null,
     project_summary text not null,
-    user_id text
+    user_id text,
+    unique (project_id, topic_id)
 );
 
 create table if not exists project_description_table(
@@ -45,18 +57,20 @@ create table if not exists project_description_table(
     project_id text not null,
     project_description_id text not null,
     project_description text not null,
-    created_at date not null,
+    created_at text not null,
     primary key (project_id, project_description_id),
-    foreign key (project_id) references project_table(project_id)
+    foreign key (project_id, topic_id)
+        references project_table(project_id, topic_id) on update cascade
 );
 
 create table if not exists project_mapping_table(
     project_id text not null,
     topic_id text not null,
     project_summary_vector_id integer not null,
-    created_at date not null,
+    created_at text not null,
     primary key (project_id, project_summary_vector_id),
-    foreign key (project_id) references project_table(project_id)
+    foreign key (project_id, topic_id)
+        references project_table(project_id, topic_id) on update cascade
 );
 ```
 
@@ -67,19 +81,16 @@ Both child tables carry their own copy of `topic_id`, which is derivable from
 every summary vector under one topic, and that read is then a single statement
 against `project_mapping_table` with no join.
 
-A denormalised copy is only safe if it moves when the project moves, so
-`__upsert_project` rewrites both child tables' `topic_id` in the same
-transaction whenever a write carries a different topic than the row holds. Left
-out, those rows keep answering for the topic the project has left. Note this
-holds for writes that go through `ProjectMetaData` — a raw `UPDATE` elsewhere
-can still desynchronise them.
+A denormalised copy is only safe if it cannot disagree with the original, so
+the copy is half of the child's foreign key: `(project_id, topic_id)` references
+the project's own pair, which `unique (project_id, topic_id)` exists to make
+referenceable. Moving a project to another topic cascades to both children —
+including through a raw `UPDATE`, which the loop that used to do this never
+saw — and a child written under a topic its project is not in is refused.
 
-`topic_id` has no foreign key, because there is no topic table yet
-(`TopicManager` owns `topics_mapping_table`, but it lives in a different SQLite
-file, so no foreign key can reach it — bug 4.57). The only thing standing
-between a typo and a
-project filed under a topic that does not exist is the non-empty check in the
-constructor.
+`project_table.topic_id` references `topics_mapping_table` (bug 4.57, fixed by
+moving both registries into one database), so a project cannot be filed under a
+topic that does not exist.
 
 Both child tables key on `project_id` first, so two projects may reuse the same
 description id or the same vector id without colliding — and content-derived
@@ -93,6 +104,17 @@ vector ids do collide across projects.
 meta.add_project_vector(vector, vector_id, project_name, project_summary)
 meta.add_batch_project_vector(vectors, vector_ids, project_name, project_summary)
 ```
+
+A refused write names what was wrong, with the database error as `__cause__`:
+
+| Raised | When |
+| :--- | :--- |
+| `TopicNotFound` | the topic was never created |
+| `ProjectNotFound` | a description or other child row for a project nothing has registered |
+| `ProjectInAnotherTopic` | a child row under a topic the project is not in; `actual_topic_id` says where it is |
+
+A project refused after its vector was written still gets the compensating
+delete.
 
 `project_summary` is the text the vector was embedded from. It is required
 because `project_table` stores it `NOT NULL`, and it is validated **before** the
@@ -129,8 +151,9 @@ meta.get_descriptions()          # -> [(description_id, description, created_at)
   description and rewriting it is an update, not a second row.
 - `created_at` survives a rewrite, for the same reason `project_table`'s does:
   it records when the description first appeared.
-- The project row must already exist. The foreign key rejects a description for
-  a project nothing has written yet.
+- The project row must already exist: a description for a project nothing has
+  written yet raises `ProjectNotFound`, and one written through an instance
+  scoped to the wrong topic raises `ProjectInAnotherTopic`.
 - Ids and text must be non-empty strings, and a batch is validated in full
   before any row is written, so a bad pair partway through cannot leave the
   first half committed. A repeated id inside one batch raises `MisMatchCount`.
@@ -226,14 +249,18 @@ vector half instead of holding its own `VectorRepository`. Worth doing when
 
 ---
 
-## Known limitation
+## Module-level functions
 
-The connection is a plain `sqlite3.connect`: no lock, no WAL, and usable only
-from the thread that opened it — while the file is shared by every project. Two
-`ProjectMetaData` instances writing at once will contend. This is the same
-problem already fixed for the conversation database in `sqlite_setup.connect()`,
-and it should be fixed here before `ProjectManager` opens projects concurrently.
-See `todo.md` section 2.
+Topic-wide and registry-wide questions, which no project-scoped instance owns.
+Each takes `database` like the constructor and creates the tables if missing, so
+asking before anything is written answers empty rather than raising.
+
+| Function | Returns |
+| :--- | :--- |
+| `list_topic_projects(topic_id, database=None)` | `List[TopicProject]` — `(project_id, project_name, project_summary)`, oldest first |
+| `list_topic_vector_ids(topic_id, database=None)` | `[(project_id, vector_id)]` for every project under the topic |
+| `project_topic(project_id, database=None)` | the topic a project is registered under, or `None` |
+| `is_registered(project_id, database=None)` | `bool`. What other owners ask when their foreign key onto `project_table` is refused |
 
 ---
 

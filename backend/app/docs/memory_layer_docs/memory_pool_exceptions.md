@@ -45,3 +45,44 @@ Raised by `ConversationVectorManager.add_summary_vectors()` when a submitted sum
 
 #### String Representation (`__str__`)
 Returns: `"Got the dimension {self.dimension}. Expected the dimension {self.expected_dimension}"`
+
+---
+
+## Refusals from the memory database
+
+SQLite reports a refused foreign key as `FOREIGN KEY constraint failed`, never
+which one. The table owners translate it into one of these by asking the
+parent's owner, and raise it `from` the database error, so `__cause__` is the
+original `sqlite3.IntegrityError`.
+
+### `class ProjectNotFound(Exception)`
+Raised when a row is written for a project nothing has registered: a turn, a
+snapshot, a description, a routing row.
+
+| Attribute | Meaning |
+| :--- | :--- |
+| `project_id` | The unregistered project |
+
+### `class ProjectInAnotherTopic(Exception)`
+Raised when a row names a project under a topic the project is not in — a
+description written through a `ProjectMetaData` scoped to the wrong topic, or a
+conversation routed to the wrong pair.
+
+| Attribute | Meaning |
+| :--- | :--- |
+| `project_id` | The project |
+| `topic_id` | The topic the write named |
+| `actual_topic_id` | The topic the project is registered under |
+
+`TopicNotFound` is raised the same way when a project is registered under a
+topic that was never created.
+
+### `class NewerMemorySchema(Exception)`
+Raised by `MemoryDatabase` when the file's `user_version` is higher than the
+`SCHEMA_VERSION` this code knows. The connection is closed before raising.
+
+| Attribute | Meaning |
+| :--- | :--- |
+| `path` | The database file |
+| `found` | Its schema version |
+| `supported` | The highest this code supports |

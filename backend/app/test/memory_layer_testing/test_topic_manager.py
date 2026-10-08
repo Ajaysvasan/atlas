@@ -44,7 +44,7 @@ class TestConstruction:
     def test_a_query_is_optional(self, db_path):
         """It is held for the topic -> project handoff, which does not exist
         yet, so requiring it made callers supply something nothing reads."""
-        with TopicManager("retrieval", topic_pool_path=db_path) as m:
+        with TopicManager("retrieval", database=db_path) as m:
             assert m.query is None
             m.create_new_topic()
 
@@ -57,13 +57,11 @@ class TestConstruction:
         with sqlite3.connect(db_path) as conn:
             assert conn.execute("select count(*) from topics_mapping_table").fetchone()[0] == 1
 
-    def test_the_default_path_is_used_when_none_is_given(self, tmp_path, monkeypatch):
-        from memory.topic_pool.topic_pool_repo import topic_pool_meta_handler as module
+    def test_the_memory_database_is_used_when_none_is_given(self):
+        from config import Config
 
-        monkeypatch.setattr(module.Config, "DATA_DIR", str(tmp_path))
         handler = TopicPoolMetaHandler(None)
-        assert handler.topic_db_path.is_relative_to(tmp_path)
-        handler.close()
+        assert handler.database.path == Config.MEMORY_DB.resolve()
 
 
 class TestCreate:
@@ -208,17 +206,19 @@ class TestLifecycle:
         handler.close()
 
     def test_close_does_not_crash_a_write_in_flight(self, tmp_path):
-        """Closing the connection under a writing thread does not raise — it
-        takes the interpreter down, so it cannot be caught in process. The race
+        """Closing the shared database under a writing thread does not raise —
+        without the lock it takes the interpreter down, so it cannot be caught in process. The race
         runs in a subprocess and the assertion is on how that process died.
         """
         script = tmp_path / "race.py"
         script.write_text(
             "import sys, threading, time\n"
             f"sys.path.insert(0, {str(pathlib.Path.cwd())!r})\n"
+            "from memory.memory_database import MemoryDatabase\n"
             "from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import "
             "TopicPoolMetaHandler\n"
-            f"handler = TopicPoolMetaHandler({str(tmp_path / 'race.sql')!r})\n"
+            f"database = MemoryDatabase({str(tmp_path / 'race.sql')!r})\n"
+            "handler = TopicPoolMetaHandler(database)\n"
             "stop = False\n"
             "def writer():\n"
             "    index = 0\n"
@@ -231,7 +231,7 @@ class TestLifecycle:
             "t = threading.Thread(target=writer, daemon=True)\n"
             "t.start()\n"
             "time.sleep(0.05)\n"
-            "handler.close()\n"
+            "database.close()\n"
             "time.sleep(0.1)\n"
             "stop = True\n"
         )
@@ -349,7 +349,7 @@ class TestQueryCounts:
 
     def statements(self, manager):
         seen = []
-        conn = manager._TopicManager__repo._TopicPoolMetaHandler__connection
+        conn = manager._TopicManager__repo.database.connection
         conn.set_trace_callback(lambda sql: seen.append(sql.strip().split()[0].lower()))
         return seen
 

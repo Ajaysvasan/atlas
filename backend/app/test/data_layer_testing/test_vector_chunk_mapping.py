@@ -274,3 +274,122 @@ class TestMigratingAnOldTable:
         repo = VectorMetaDataRepository(path)
         assert repo.count() == 3
         repo.close()
+
+
+class TestTheSuiteNeverTouchesTheRealChunkStore:
+    """bugs.md 7.5: the pipeline's end-to-end test wrote a label into the
+    developer's own chunk store on every run."""
+
+    def test_the_configured_path_is_a_test_file(self, tmp_path_factory):
+        real = str(Config.ABS_PATH / "data" / "hierarchical_db")
+        assert Config.DB_PATH != real
+        assert str(tmp_path_factory.getbasetemp()) in Config.DB_PATH
+
+    def test_a_chunker_follows_the_path_configured_when_it_is_built(self, tmp_path, monkeypatch):
+        from data_layer.ingestion.Chunker.chunker import Chunker
+
+        monkeypatch.setattr(Config, "DB_PATH", str(tmp_path / "late"))
+        assert Chunker().db_path == str(tmp_path / "late")
+
+    @pytest.mark.parametrize("build", ["hydration", "vector_search"])
+    def test_retrieval_follows_the_path_configured_when_it_is_built(self, tmp_path, monkeypatch, build):
+        from retrieval_layer.hydration import Hydration
+        from retrieval_layer.vector_search import VectorSearch
+
+        monkeypatch.setattr(Config, "DB_PATH", str(tmp_path / "late"))
+        made = Hydration() if build == "hydration" else VectorSearch(index=object())
+        assert str(made.chunk_store_path) == str(tmp_path / "late")
+
+
+class TestOneLabelPerChunk:
+    """Bug 5.21: allocation inserted unconditionally, so a real store held one
+    chunk under 45 labels after repeated ingests."""
+
+    def vec(self, seed=0):
+        return np.random.default_rng(seed).standard_normal(128).astype(np.float32)
+
+    def test_allocating_a_chunk_again_returns_its_label(self, repo):
+        first = repo.allocate("c1", self.vec())
+        assert repo.allocate("c1", self.vec()) == first
+        assert repo.count() == 1
+
+    def test_a_batch_reuses_known_labels_and_keeps_its_order(self, repo):
+        known = repo.allocate_many(["a", "b"], [self.vec(1), self.vec(2)])
+        mixed = repo.allocate_many(["x", "a", "y", "b"], [self.vec(i) for i in range(4)])
+        assert mixed[1] == known[0] and mixed[3] == known[1]
+        assert len({mixed[0], mixed[2]} - set(known)) == 2
+        assert repo.count() == 4
+
+    def test_the_same_chunk_twice_in_one_batch_gets_one_label(self, repo):
+        labels = repo.allocate_many(["a", "a"], [self.vec(), self.vec()])
+        assert labels[0] == labels[1]
+        assert repo.count() == 1
+
+    def test_another_model_gets_its_own_label(self, repo):
+        mine = repo.allocate("c1", self.vec())
+        theirs = repo.allocate("c1", self.vec(), embeddingModelUsed="some/other-model")
+        assert mine != theirs
+
+    def test_a_label_without_a_vector_gains_one(self, repo):
+        """A label written before vectors were kept, re-ingested: same label,
+        and now searchable."""
+        label = repo.allocate("c1")
+        assert repo.allocate("c1", self.vec(3)) == label
+        (labels, vectors), = list(repo.vectors())
+        assert labels.tolist() == [label]
+        np.testing.assert_array_equal(vectors[0], self.vec(3))
+
+    def test_a_stored_vector_is_not_replaced(self, repo):
+        repo.allocate("c1", self.vec(1))
+        repo.allocate("c1", self.vec(2))
+        (_, vectors), = list(repo.vectors())
+        np.testing.assert_array_equal(vectors[0], self.vec(1))
+
+    def test_the_database_refuses_a_second_label(self, repo):
+        repo.allocate("c1", self.vec())
+        with pytest.raises(sqlite3.IntegrityError):
+            with repo._writing() as cursor:
+                cursor.execute(
+                    "insert into vector_meta_data(chunkId, embeddingModelUsed, dimensions) "
+                    "values ('c1', ?, 128)", (Config.EMBEDDING_MODEL,))
+
+
+class TestCollapsingAStoreWrittenBeforeTheConstraint:
+    def old_store(self, tmp_path):
+        path = str(tmp_path / "old.db")
+        vector = np.ones(128, dtype=np.float32).tobytes()
+        with sqlite3.connect(path) as conn:
+            conn.execute("""create table vector_meta_data(
+                vectorId integer primary key autoincrement, chunkId text not null,
+                embeddingModelUsed text not null, dimensions integer not null, vector blob)""")
+            conn.execute("create index idx_vector_meta_chunk on vector_meta_data(chunkId)")
+            rows = [("c1", None), ("c1", vector), ("c1", vector), ("c2", None), ("c2", None)]
+            conn.executemany(
+                "insert into vector_meta_data(chunkId, embeddingModelUsed, dimensions, vector) "
+                "values (?, ?, 128, ?)", [(c, Config.EMBEDDING_MODEL, v) for c, v in rows])
+        return path
+
+    def test_each_chunk_keeps_one_label(self, tmp_path):
+        repo = VectorMetaDataRepository(self.old_store(tmp_path))
+        assert repo.count() == 2
+        repo.close()
+
+    def test_the_label_kept_is_the_one_with_a_vector(self, tmp_path):
+        """Labels 2 and 3 have vectors; the lowest of them survives."""
+        repo = VectorMetaDataRepository(self.old_store(tmp_path))
+        assert repo.vector_ids_for(["c1"]) == {"c1": 2}
+        assert repo.vector_ids_for(["c2"]) == {"c2": 4}
+        repo.close()
+
+    def test_the_removal_is_reported(self, tmp_path, caplog):
+        with caplog.at_level("WARNING"):
+            VectorMetaDataRepository(self.old_store(tmp_path)).close()
+        assert any("3 duplicate label" in r.getMessage() for r in caplog.records)
+
+    def test_reopening_removes_nothing_more(self, tmp_path):
+        path = self.old_store(tmp_path)
+        VectorMetaDataRepository(path).close()
+        repo = VectorMetaDataRepository(path)
+        assert repo.count() == 2
+        repo.close()
+

@@ -18,7 +18,7 @@ Topic
 
 ```
 memory_manager.py        PENDING - the top-level entry point
-sqlite_setup.py          every SQLite open in this layer goes through it
+memory_database.py       the one SQLite database every table here lives in
 topic_pool/
   topic_manager.py       create/load/soft-delete a topic  (built)
   topic_pool_repo/       the topics table                 (built)
@@ -50,11 +50,92 @@ against one project's memory, not everything ever said; a snapshot summarises
 one conversation, not a topic. Every id in the layer therefore carries the scope
 above it, and every read is filtered by it.
 
+## One database
+
+Every table in this layer lives in one SQLite file,
+`data/memory/memory_layer/memory_layer.db` (`Config.MEMORY_DB`). It used to be
+five: topics, the project registry, the mapping table, and one conversation file
+per project. Across files a relationship can only be kept by hand, and several
+were — a loop rewriting `topic_id` on two child tables after every project
+upsert, a cached snapshot id rewritten whenever a project moved on — while
+others were not kept at all.
+
+**Ownership did not move.** `memory_database.py` holds the connection and the
+transaction discipline and no table's SQL. Each owner module declares its own
+tables as a `Schema` and keeps every query against them; `requires` names the
+schemas whose tables it references, so a parent's tables always exist before a
+child's, whichever owner is constructed first.
+
+| Owner | Tables |
+| :--- | :--- |
+| `topic_pool_repo/topic_pool_meta_handler.py` | `topics_mapping_table` |
+| `project_data_repo/project_meta_data.py` | `project_table`, `project_description_table`, `project_mapping_table` |
+| `project_data_repo/project_snapshot_repo.py` | `project_snapshot`, `project_snapshot_mapping` |
+| `fullconversation_repository.py` | `summary_chunks`, `full_conversation` |
+| `conversationVectorMetaManager.py` | `summary_vector_meta_data`, `cumulative_vector_meta_data`, `summary_snapshot_map` |
+| `memory_mapping_handler.py` | `memory_mapping_table` |
+
+**The relationships are the database's to keep.**
+
+```
+topics_mapping_table
+ └─ project_table.topic_id
+     ├─ project_description_table (project_id, topic_id)   cascades on a topic move
+     ├─ project_mapping_table     (project_id, topic_id)   cascades on a topic move
+     ├─ memory_mapping_table      (project_id, topic_id)   cascades on a topic move
+     ├─ project_snapshot.project_id
+     │   └─ project_snapshot_mapping (project_snapshot_id, project_id)
+     ├─ full_conversation.project_id
+     ├─ summary_vector_meta_data.project_id
+     └─ cumulative_vector_meta_data.project_id
+summary_chunks
+ ├─ full_conversation (chunk_id, conversation_id)
+ └─ summary_vector_meta_data.chunk_id
+summary_snapshot_map → cumulative_vector_meta_data, summary_vector_meta_data
+```
+
+Where a child carries a copy of its parent's column — `topic_id` on the project
+tables, `conversation_id` on a turn — the foreign key is the pair, so the copy
+cannot disagree with the original, and moving a project to another topic
+carries its children with it. `CHECK` constraints hold what used to be checked
+only in Python: a turn's role, a topic's active flag, a routing row whose topic
+and project are set together or not at all.
+
+SQLite reports a refused foreign key as `FOREIGN KEY constraint failed`, never
+which one. The owners translate it into what the caller can act on —
+`TopicNotFound`, `ProjectNotFound`, `ProjectInAnotherTopic` — by asking the
+parent's owner, and keep the database error as `__cause__`.
+
+**What deliberately has no parent.** `conversation_id` is a key in several
+tables and a foreign key in none: there is no conversation table, because
+registering conversations is not this layer's job. Vector ids point into
+PostgreSQL, which a SQLite foreign key cannot reach.
+
+**One connection.** `MemoryDatabase.shared()` keeps one per file per process;
+every owner given no database uses it. Reads and writes go through one `RLock`;
+a write opens with `BEGIN IMMEDIATE`, so a read-then-insert such as allocating
+the next `seq` cannot interleave with another writer, and a nested write runs in
+a savepoint, so a failure the caller catches undoes only its own part. Two
+owners can therefore write in one transaction, which separate files never
+allowed. An owner's `close()` releases nothing: the database outlives its
+owners and is closed by whoever opened it. Opening a connection per call, as
+the turn store used to, cost 52 us against 2 us on a shared one.
+
+**Child columns left unindexed, on purpose.** SQLite searches a child table when
+the parent's key changes or the parent row goes. `full_conversation.project_id`,
+`summary_vector_meta_data.project_id` and `summary_snapshot_map.summary_vector_id`
+have no index because nothing deletes a project or a vector and a topic move
+changes `topic_id`, not `project_id`. An index there would be paid on every
+insert for an operation that does not exist. If a delete path is added, they
+need one.
+
 ## Decisions that run through the whole layer
 
 **Ids that act as primary keys are never hashed from content alone.** Content
 repeats — a "yes" turn, an unchanged summary, two projects with the same name.
-`chunk_id` binds `(project_id, sequence_number, text)`;
+`chunk_id` binds `(project_id, conversation_id, sequence_number, text)` —
+without `conversation_id`, two conversations in one project could not both open
+with "hello";
 `cumulative_vector_id` binds `(project_id, timestamp, summary)`; `project_id` is
 a uuid. Fields are separated by `\x00` so they cannot run together into a
 colliding payload.
@@ -97,9 +178,7 @@ conversation pool: the pool is entered *after* this table has said which project
 to open.
 
 It takes no `conversation_id`. Every method names the conversation it acts on,
-so one handler serves the whole table — the alternative, an instance per
-conversation, would open a connection per conversation to a table that has one
-row for each.
+so one handler serves the whole table rather than an instance per row.
 
 The write is two steps because the information arrives in two steps. A row is
 opened when a conversation starts, with topic and project still unset; routing
@@ -107,12 +186,13 @@ fills them in later. That makes "never seen" (`search` returns `None`) and
 "seen, not yet routed" (`MemoryMapping(None, None, None)`) different answers,
 which is deliberate — the caller needs to tell them apart.
 
-`latest_project_snapshot_id` is a **cache** of
-`ProjectSnapshotRepository.latest()`, not a second source of truth. The ordered
-chain of a project's snapshots lives in `project_snapshot_mapping`; this column
-exists so resuming a conversation does not have to open the project registry,
-the same trade as denormalising `topic_id` onto the project tables for the read
-the router needs.
+The latest project snapshot is not stored here. `search` asks
+`ProjectSnapshotRepository.latest()` each time, so it is never stale. The column
+that used to cache it existed so resuming a conversation would not open a second
+database file; with one file that reason is gone, and the cache had to be
+rewritten by hand every time a project moved on. It is a second lookup rather
+than a join because what counts as "latest" — the highest watermark, then the
+newest — belongs to the snapshot repository, and a join here would repeat it.
 
 One open question: `user_id` is the only user-scoped column in the layer.
 Nothing else — topic, project, conversation — has a notion of a user. Either

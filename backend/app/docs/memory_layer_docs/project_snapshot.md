@@ -21,9 +21,8 @@ ProjectSnapshot(
     project_name: str,
     meta_repo: ConversationVectorMetaDataRepository,
     embed: Callable[[str], ndarray],
-    conversation_dir: str | Path | None = None,
-    project_db_path: str | Path | None = None,
     snapshot_repo: ProjectSnapshotRepository | None = None,
+    database: MemoryDatabase | str | Path | None = None,
 )
 ```
 
@@ -31,8 +30,8 @@ ProjectSnapshot(
 | :--- | :--- |
 | `meta_repo` | Supplies the conversation summaries. Injected rather than built, because a project-wide read needs no `conversation_id` |
 | `embed` | `str -> ndarray`. Cheap and stable, so it is held |
-| `conversation_dir` | Defaults to `meta_repo.conversation_dir` |
-| `project_db_path` | Where the project registry lives. `None` uses `data/project_db/project.sql` |
+| `snapshot_repo` | The project's snapshot chain. Built when not given |
+| `database` | Defaults to `meta_repo.database`, so the conversation summaries and the project's snapshots are read from one database |
 
 | Method | Returns |
 | :--- | :--- |
@@ -71,17 +70,21 @@ snapshot, so `take` returns `None` and logs instead.
 ## `ProjectSnapshotRepository`
 
 ```python
-ProjectSnapshotRepository(project_id: str, db_path: str | Path | None = None)
+ProjectSnapshotRepository(project_id: str,
+                          database: MemoryDatabase | str | Path | None = None)
 ```
+
+`database` is a `MemoryDatabase` or a path to one; `None` uses the shared memory
+database. `project_id` must be non-blank (`InvalidIdentifier`).
 
 | Method | Returns |
 | :--- | :--- |
-| `add_snapshot(summary, last_seq_included, created_at=None)` | `int` — the snapshot id |
+| `add_snapshot(summary, last_seq_included, created_at=None)` | `int` — the snapshot id. Raises `ProjectNotFound` for a project never registered, with nothing written |
 | `latest()` | `ProjectSnapshotRow` or `None` |
 | `last_seq_included()` | `int` — the watermark, `0` for a project with no snapshots |
 | `history()` | `List[ProjectSnapshotRow]`, oldest first |
 | `get_snapshot(snapshot_id)` | `ProjectSnapshotRow` or `None` |
-| `close()` | `None` |
+| `close()` | `None`. Releases nothing — the database is shared |
 
 ```python
 ProjectSnapshotRow(project_snapshot_id, project_id, summary,
@@ -106,21 +109,27 @@ project summarised twice to the same words is still two snapshots.
 ```sql
 project_snapshot
     project_snapshot_id   integer primary key
-    project_id            text not null
+    project_id            text not null references project_table(project_id)
     summary               text not null
     len_of_the_summary    integer not null
     last_seq_included     integer not null
-    created_at            date not null
+    created_at            text not null
+    unique (project_snapshot_id, project_id)
 
 project_snapshot_mapping
     project_id            text not null
     project_snapshot_id   integer not null
-    created_at            date not null
+    created_at            text not null
     primary key (project_id, project_snapshot_id)
+    foreign key (project_snapshot_id, project_id)
+        references project_snapshot(project_snapshot_id, project_id)
 
 idx_project_snapshot_project          on project_snapshot(project_id)
-idx_project_snapshot_mapping_project  on project_snapshot_mapping(project_id)
 ```
+
+The mapping's foreign key is the pair, so the chain cannot list another
+project's snapshot. It has no index of its own: its primary key already leads
+with `project_id`.
 
 The mapping is **append-only**: it holds the ordered chain of every snapshot a
 project has had, not a pointer at the newest. Overwriting one row would leave

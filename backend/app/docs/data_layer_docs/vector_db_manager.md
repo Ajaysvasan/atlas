@@ -113,22 +113,28 @@ vector_meta_data(
     dimensions         INTEGER NOT NULL,
     vector             BLOB                                -- float32 bytes, dimensions × 4
 )
--- idx_vector_meta_chunk on (chunkId)
+-- idx_vector_meta_chunk_model: UNIQUE (chunkId, embeddingModelUsed)
 ```
+
+**One label per chunk and model.** The unique index is what makes re-ingesting a
+chunk return its existing label instead of minting another (bug 5.21). A store
+written before it is collapsed on open — one row per chunk and model, preferring
+the row that has a vector — with a warning naming how many were removed. The
+index is rebuilt from this table, so nothing else refers to the rows dropped.
 No foreign key: a chunk id lives in `Chunks` or `RecursiveChunks`, and SQLite cannot reference whichever of two tables holds it (bug 5.2). A table created before the `vector` column existed gains it on open, with its rows kept; those rows have no vector and are reported by `missing_vectors()`.
 
 #### Methods
 
 | Method | Signature | Notes |
 | :--- | :--- | :--- |
-| `allocate` | `(chunkId, vector=None, embeddingModelUsed=Config.EMBEDDING_MODEL, dimensions=Config.EMBEDDING_DIMENSIONS) -> int` | Takes the next label for the chunk and stores `vector` (cast to `float32`) in the same row. Raises `InvalidVectorDimension` when its shape is not `(dimensions,)`. |
-| `allocate_many` | `(chunkIds, vectors=None, embeddingModelUsed=..., dimensions=...) -> List[int]` | Labels for a batch in the order given, one transaction. `InvalidBatchSize` when `vectors` and `chunkIds` differ in length; `InvalidVectorDimension` on any wrong-shaped vector — both before anything is written. |
+| `allocate` | `(chunkId, vector=None, embeddingModelUsed=Config.EMBEDDING_MODEL, dimensions=Config.EMBEDDING_DIMENSIONS) -> int` | The chunk's label: the one it already has for this model, or the next one. One `insert … on conflict … returning` statement, so two writers cannot both decide the chunk is new. Stores `vector` (cast to `float32`) on a new row, or on an existing row that had none; never replaces one. Raises `InvalidVectorDimension` when its shape is not `(dimensions,)`. |
+| `allocate_many` | `(chunkIds, vectors=None, embeddingModelUsed=..., dimensions=...) -> List[int]` | The same per chunk, in the order given, in one transaction; a chunk repeated in the batch gets one label. `InvalidBatchSize` when `vectors` and `chunkIds` differ in length; `InvalidVectorDimension` on any wrong-shaped vector — both before anything is written. |
 | `vectors` | `(batch_size=RESTORE_BATCH, after=0, embeddingModelUsed=..., dimensions=...) -> Iterator[Tuple[ndarray, ndarray]]` | Stored `(labels: uint32[n], vectors: float32[n, dimensions])` with labels above `after`, in label order, `batch_size` (`50_000`) rows a page. Keyset-paginated. Only rows from this model at this width, with a vector of the right length: another model's vectors are in a different space. Each page is read under the lock and yielded outside it. |
 | `missing_vectors` | `(embeddingModelUsed=..., dimensions=...) -> int` | Rows `vectors()` skips: no vector, another model, or the wrong width. |
 | `chunk_ids_for` | `(vectorIds) -> Dict[int, str]` | Every label's chunk in one query; unknown labels are absent rather than raising. |
 | `vector_ids_for` | `(chunkIds) -> Dict[str, int]` | The reverse, in one query. |
 | `count` | `() -> int` | Rows in the table. |
-| `insert` | `(vectorId, chunkId, embeddingModelUsed, dimensions=Config.EMBEDDING_DIMENSIONS)` | Explicit label, no vector. `on conflict (vectorId) do nothing`. |
+| `insert` | `(vectorId, chunkId, embeddingModelUsed, dimensions=Config.EMBEDDING_DIMENSIONS)` | Explicit label, no vector. `on conflict do nothing` — on the label or on the chunk already having one. |
 | `batch_insert` | `(vectorIds, chunkIds, embeddingModelUsed, dimensions)` | Raises `InvalidBatchSize` when the id lists differ in length. |
 | `get_meta_data` | `(vectorId, columnName) -> str \| int` | `columnName` is checked against `("vectorId", "chunkId", "embeddingModelUsed", "dimensions")` and raises `InvalidColumnNameException` otherwise — the column is interpolated into the SQL, so this allowlist is what keeps the query safe. Raises `InvalidVectorID` when no row matches. |
 | `close` | `()` | Waits for a write in flight; safe if construction failed. |

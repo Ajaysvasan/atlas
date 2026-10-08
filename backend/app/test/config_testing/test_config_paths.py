@@ -2,9 +2,24 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
+
 
 TEST_DIR = Path(__file__).resolve().parent
 APP_DIR = TEST_DIR.parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_module(monkeypatch):
+    """Put back the config module these tests replace.
+
+    Left replaced, every later test sees a different `Config` class from the
+    one already-imported modules hold, and a monkeypatch of one misses the
+    other — the memory database redirect included.
+    """
+    original = sys.modules.get("config")
+    if original is not None:
+        monkeypatch.setitem(sys.modules, "config", original)
 
 
 def import_config():

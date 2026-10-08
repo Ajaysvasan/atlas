@@ -10,6 +10,7 @@ from typing import Callable, List
 import numpy as np
 
 from config import Config, get_logger, log_timing
+from memory.memory_database import MemoryDatabase
 from memory.identifiers import require_identifier
 from memory.topic_pool.project_pool.conversation_pool.conversation_data_management.conversationVectorMetaManager import (
     ConversationVectorMetaDataRepository,
@@ -43,31 +44,31 @@ def render_transcript(turns: List[Turn]) -> str:
 class ConversationSummary:
     def __init__(
         self,
-        full_conversation_dir: str | Path,
         project_id: str,
         project_name: str,
         main_model_context_window_length: int,
         draft_model_context_window_length: int,
         conversation_id: str,
+        database: MemoryDatabase | str | Path | None = None,
     ) -> None:
         self.conversation_id = require_identifier(conversation_id, "conversation_id")
+        self.database = MemoryDatabase.of(database)
         self.full_conversation = FullConversation(
-            full_conversation_dir=full_conversation_dir,
             project_id=project_id,
             project_name=project_name,
             conversation_id=conversation_id,
+            database=self.database,
         )
-        self.conversation_dir = full_conversation_dir
         self.project_id = project_id
         self.project_name = project_name
         self.main_model_context_window_length = main_model_context_window_length
         self.summary_repo = ConversationVectorMetaDataRepository(
-            full_conversation_dir, project_id, conversation_id
+            project_id, conversation_id, self.database
         )
         self.draft_model_context_window_length = draft_model_context_window_length
 
         self.snap_shot = SnapShot(
-            conversation_dir=full_conversation_dir,
+            database=self.database,
             project_id=project_id,
             project_name=project_name,
             meta_repo=self.summary_repo,
@@ -154,7 +155,7 @@ class ConversationSummary:
                 project_name=self.project_name,
                 meta_repo=self.summary_repo,
                 embed=lambda text: self.embedder.embed_text(text).vector,
-                conversation_dir=self.conversation_dir,
+                database=self.database,
             )
         return self._project_snapshot
 

@@ -7,7 +7,7 @@ share a transaction:
 
 | Store | Holds |
 | :--- | :--- |
-| SQLite (`project.sql`) | `project_table`, `project_description_table`, `project_mapping_table` |
+| SQLite (the memory database) | `project_table`, `project_description_table`, `project_mapping_table` |
 | PostgreSQL / pgvector | the embeddings themselves |
 
 The embeddings go to pgvector, never to the DiskANN index — DiskANN indexes
@@ -22,21 +22,30 @@ ingested documents and has nothing to do with project summaries.
 
 Module-level `list_topic_projects()` and `list_topic_vector_ids()` answer
 topic-wide questions, which no single project-scoped instance owns.
+`is_registered()` and `project_topic()` answer the question other owners ask
+when one of their foreign keys onto `project_table` is refused, so they never
+query this module's tables themselves.
 
 ## Schema
 
 ```sql
 project_table              project_id PK, project_name, topic_id, created_at,
                            updated_at, project_summary, user_id
+                           FK topic_id -> topics_mapping_table
+                           UNIQUE (project_id, topic_id)
 
 project_description_table  PK (project_id, project_description_id)
                            + topic_id, project_description, created_at
-                           FK project_id -> project_table
+                           FK (project_id, topic_id) -> project_table ON UPDATE CASCADE
 
 project_mapping_table      PK (project_id, project_summary_vector_id)
                            + topic_id, created_at
-                           FK project_id -> project_table
+                           FK (project_id, topic_id) -> project_table ON UPDATE CASCADE
 ```
+
+`UNIQUE (project_id, topic_id)` adds nothing as a key — `project_id` already is
+one — and exists because a foreign key may only reference columns that are
+declared unique.
 
 One summary **text** per project; many summary **vectors** — one for the summary
 and one per description.
@@ -49,8 +58,7 @@ add_project_vector(vector, vector_id, name, summary)
         1. pgvector insert            <- the embedding
         |
         2. one SQLite transaction:    <- project row + mapping row
-             upsert project_table
-             sync child topic_id
+             upsert project_table      (a topic change cascades to the children)
              insert or ignore mapping
         |
    on failure at step 2 -> compensating delete of the vector
@@ -67,13 +75,19 @@ fails. This is the same ordering `SnapShot.__add_snap_shot` settled on.
 **`topic_id` is denormalised into both child tables.** It is derivable by a join
 from `project_table`, and it is copied anyway so that routing a query can read
 every vector id in a topic with one statement and no join — the hot path of the
-project layer. A denormalised copy is only safe if it moves when the project
-moves, so the upsert rewrites both child tables' `topic_id` in the same
-transaction whenever a write carries a different topic. Left unsynchronised,
-those rows keep answering for the topic the project has left.
+project layer. A denormalised copy is only safe if it cannot disagree with the
+original, so the copy is half of the foreign key: `(project_id, topic_id)`
+references the project's own pair. A child written under a topic its project is
+not in is refused (`ProjectInAnotherTopic`), and moving a project cascades to
+both children. That used to be an UPDATE loop after every upsert, which a write
+that skipped the upsert never ran.
 
-`topic_id` has no foreign key: there is no topic table yet. The only guard is a
-non-empty check in the constructor.
+**A refused write says why.** SQLite reports only that *a* foreign key failed.
+`ProjectMetaData` asks which: no such topic (`TopicNotFound`), no such project
+(`ProjectNotFound`), or a project registered under another topic
+(`ProjectInAnotherTopic`), with the database error kept as `__cause__`. A
+project refused after its vector was written still gets the compensating
+delete.
 
 **Vector ids are derived from their source, not supplied.** No handler method
 takes a vector id:
@@ -107,11 +121,6 @@ for a project that was never written.
 
 ## Known limitation
 
-The connection is a plain `sqlite3.connect`: no WAL, no lock, and usable only
-from the thread that opened it — while the file is shared by every project. Two
-instances writing at once will contend. This is the problem already fixed for
-the conversation database in `sqlite_setup.connect()`. Tracked as **bug 4.45**.
-
 `ProjectMetaData` and `ProjectVectorHandler` still write vectors through
 separate paths — the manager keeps them in step by passing
 `summary_vector_id(project_id)` and sharing one repository. Full delegation is
@@ -135,6 +144,12 @@ and a mock records calls without holding state, so it cannot show a disagreement
 The mapping is **append-only**, keyed `(project_id, project_snapshot_id)`. It is
 not a pointer at the current snapshot: overwriting one row would leave the
 earlier snapshots in `project_snapshot` with nothing ordering them.
+
+A snapshot references its project (`ProjectNotFound` for one never registered),
+and a mapping row references its snapshot by `(project_snapshot_id,
+project_id)`, so the chain cannot list another project's snapshot. The mapping
+needs no index of its own: its primary key already leads with `project_id`, and
+a separate one measured slower for `latest()` (15.9 us against 12.7).
 
 `project_snapshot_id` is derived from `(project_id, created_at, summary)` and
 masked into the signed 64-bit range, because **it is also the pgvector

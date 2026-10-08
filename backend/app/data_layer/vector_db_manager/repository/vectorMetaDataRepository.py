@@ -93,12 +93,42 @@ class VectorMetaDataRepository:
             }
             if "vector" not in columns:
                 cursor.execute("alter table vector_meta_data add column vector blob;")
-            # Retrieval reads vectorId -> chunkId, which the key serves. This
-            # covers the other direction, for re-embedding a known chunk.
-            cursor.execute(
-                "create index if not exists idx_vector_meta_chunk "
-                "on vector_meta_data(chunkId);"
+            self.__one_label_per_chunk(cursor)
+
+    def __one_label_per_chunk(self, cursor: sqlite3.Cursor) -> None:
+        """One label per chunk and model, enforced by the database (bug 5.21).
+
+        Allocation used to insert unconditionally, so every re-ingest gave each
+        chunk another label — and since the vectors are stored (5.20) every one
+        of them was rebuilt into the index. A store written before the
+        constraint is collapsed first, keeping the row that has a vector; the
+        index is derived from this table, so the copies dropped are not
+        referenced anywhere else.
+        """
+        present = cursor.execute(
+            "select 1 from sqlite_master where type = 'index' "
+            "and name = 'idx_vector_meta_chunk_model'"
+        ).fetchone()
+        if present is not None:
+            return
+        cursor.execute("""
+            delete from vector_meta_data where vectorId not in (
+                select coalesce(min(case when vector is not null then vectorId end),
+                                min(vectorId))
+                from vector_meta_data group by chunkId, embeddingModelUsed
             )
+        """)
+        if cursor.rowcount:
+            logger.warning(
+                "Removed %d duplicate label(s) left by earlier re-ingests",
+                cursor.rowcount,
+            )
+        # Its columns lead the unique index, which serves the same lookups.
+        cursor.execute("drop index if exists idx_vector_meta_chunk")
+        cursor.execute(
+            "create unique index idx_vector_meta_chunk_model "
+            "on vector_meta_data(chunkId, embeddingModelUsed)"
+        )
 
     def __insert_meta(
         self,
@@ -111,7 +141,7 @@ class VectorMetaDataRepository:
             cursor.execute(
                 "insert into vector_meta_data"
                 "(vectorId, chunkId, embeddingModelUsed, dimensions) "
-                "values (?, ?, ?, ?) on conflict (vectorId) do nothing;",
+                "values (?, ?, ?, ?) on conflict do nothing;",
                 (int(vectorId), chunkId, embeddingModelUsed, int(dimensions)),
             )
 
@@ -134,7 +164,7 @@ class VectorMetaDataRepository:
             cursor.executemany(
                 "insert into vector_meta_data"
                 "(vectorId, chunkId, embeddingModelUsed, dimensions) "
-                "values (?, ?, ?, ?) on conflict (vectorId) do nothing;",
+                "values (?, ?, ?, ?) on conflict do nothing;",
                 rows,
             )
         logger.debug("Mapped %d vector(s) to their chunks", len(rows))
@@ -193,16 +223,23 @@ class VectorMetaDataRepository:
         embeddingModelUsed: str = Config.EMBEDDING_MODEL,
         dimensions: int = Config.EMBEDDING_DIMENSIONS,
     ) -> int:
-        """Take the next DiskANN label for this chunk, and return it."""
+        """This chunk's DiskANN label: the one it already has, or the next one."""
         blob = self.__as_blob(vector, dimensions)
         with self._writing() as cursor:
-            cursor.execute(
-                "insert into vector_meta_data"
-                "(chunkId, embeddingModelUsed, dimensions, vector) "
-                "values (?, ?, ?, ?);",
-                (chunkId, embeddingModelUsed, int(dimensions), blob),
-            )
-            return cursor.lastrowid
+            return self.__label(cursor, chunkId, embeddingModelUsed, dimensions, blob)
+
+    @staticmethod
+    def __label(cursor, chunkId, embeddingModelUsed, dimensions, blob) -> int:
+        # One statement, so two writers cannot both decide the chunk is new. A
+        # chunk seen before keeps its label, and gains a vector if it had none.
+        return cursor.execute(
+            "insert into vector_meta_data"
+            "(chunkId, embeddingModelUsed, dimensions, vector) values (?, ?, ?, ?) "
+            "on conflict (chunkId, embeddingModelUsed) do update set "
+            "vector = coalesce(vector_meta_data.vector, excluded.vector) "
+            "returning vectorId;",
+            (chunkId, embeddingModelUsed, int(dimensions), blob),
+        ).fetchone()[0]
 
     def allocate_many(
         self,
@@ -211,7 +248,7 @@ class VectorMetaDataRepository:
         embeddingModelUsed: str = Config.EMBEDDING_MODEL,
         dimensions: int = Config.EMBEDDING_DIMENSIONS,
     ) -> List[int]:
-        """Labels for a batch, in the order given, in one transaction."""
+        """Labels for a batch, in the order given, in one transaction; a chunk seen before keeps its own."""
         if not chunkIds:
             return []
         if vectors is not None and len(vectors) != len(chunkIds):
@@ -222,18 +259,12 @@ class VectorMetaDataRepository:
             [None] * len(chunkIds) if vectors is None
             else [self.__as_blob(v, dimensions) for v in vectors]
         )
-        # One statement per row: sqlite3 does not set lastrowid reliably after
-        # executemany, and the caller needs each id to label its vector.
+        # One statement per row: executemany cannot return each row's label.
         with self._writing() as cursor:
-            allocated = []
-            for chunkId, blob in zip(chunkIds, blobs):
-                cursor.execute(
-                    "insert into vector_meta_data"
-                    "(chunkId, embeddingModelUsed, dimensions, vector) "
-                    "values (?, ?, ?, ?);",
-                    (chunkId, embeddingModelUsed, int(dimensions), blob),
-                )
-                allocated.append(cursor.lastrowid)
+            allocated = [
+                self.__label(cursor, chunkId, embeddingModelUsed, dimensions, blob)
+                for chunkId, blob in zip(chunkIds, blobs)
+            ]
         logger.debug("Allocated %d vector label(s)", len(allocated))
         return allocated
 

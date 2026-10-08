@@ -212,11 +212,11 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 - **Status:** Fixed. `get_all_topics()` on the handler and `list_topics()` on the manager return `Topic(topic_id, topic_name, created_at)` for every active topic, oldest first. Added for enumeration — `MemoryManager` and the CLI both need it — not to save database hits; see `todo.md` for the measurements that ruled that reasoning out.
 - **Explanation:** The handler can test one topic's existence and fetch its id, both by name. There is no way to ask what topics exist. `MemoryManager` — the layer above, still a stub — has to resolve a topic before it can name one, and the CLI will need to show the user what is there. The rows are present; only the reader is missing.
 
-### Bug 4.57: `topic_id` on the Project Tables Has No Referent (`project_meta_data.py`, `topic_pool_meta_handler.py`)
+### Bug 4.57: `topic_id` on the Project Tables Has No Referent (`project_meta_data.py`, `topic_pool_meta_handler.py`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
-- **Status:** Open, and not fixable in place. A foreign key cannot cross SQLite files, so closing this means deciding whether the topic and project registries share one — part of the on-disk scheme in `todo.md` section 2.
+- **Status:** **Fixed** by the move to one memory database (Section 4d). `project_table.topic_id` references `topics_mapping_table`; a project under an unknown topic raises `TopicNotFound`, and a soft-deleted topic keeps its row, so its projects stay valid.
 - **Explanation:** `project_table`, `project_description_table` and `project_mapping_table` all carry `topic_id text not null`, and `topics_mapping_table` now exists with `topic_id` as its primary key — but they live in **different SQLite files** (`project_db/project.sql` and `topic_db/topic.sql`), so no foreign key can join them. A project can name a topic that was never created, or one that has been soft-deleted, and nothing notices. The only guard is the non-empty check in `ProjectMetaData.__validate_topic_id`. Whether the two registries should share one file is part of the on-disk scheme decision in `todo.md` section 2.
 
 ### Bug 4.58: `utc_now` Is Defined Four Times (`memory/`) — FIXED
@@ -436,6 +436,59 @@ that has to reach the other tables, or it is scope that does not belong yet.
 
 ---
 
+## Section 4d: One Memory Database (found during the migration)
+
+Every memory table moved into `data/memory/memory_layer/memory_layer.db`, with the relationships between them declared as foreign keys (see `memory/README.md`). Moving them surfaced these.
+
+### Bug 4.84: Two Conversations in One Project Could Not Open With the Same Words (`fullconversation_repository.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** A turn's `chunk_id` was `sha256(project_id, sequence_number, text)`. Since one project file held several conversations (4.64), two of them opening with "hello" produced one id, and the second failed with `UNIQUE constraint failed: summary_chunks.chunk_id`. Reproduced directly. The most common opening message in any chat was enough to break a second conversation.
+- **Status:** **Fixed.** `chunk_id` binds `conversation_id` too. Existing ids are not rewritten — pgvector stores vectors under ids derived from them. `TestTwoConversationsMaySayTheSameThing`.
+
+### Bug 4.85: A Conversation's Summarised Watermark Was Read Across the Whole Project (`conversationVectorMetaManager.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `get_highest_summarised_sequence()` filtered on `project_id` alone. A conversation with 10 turns and no snapshot reported a watermark of **50**, borrowed from a sibling; `turns_since_last_snapshot()` became `max(0, 10 − 50) = 0`, so the new conversation's snapshot trigger stayed silent until it overtook the old one. Reproduced with two conversations in one project.
+- **Status:** **Fixed** by filtering on `conversation_id` as well, with `idx_summary_vector_chunk` added: the per-conversation query drives from the conversation's primary key and probes by chunk, 5.3 ms → 3–5 µs per call, for +75% on a 0.37 µs insert. The plan is pinned in `test_indexes.py`; the regression is `TestTheWatermarkIsPerConversation`.
+
+### Bug 4.86: Tests Wrote Into the Real Project Registry, and One Passed Only Because of It (`test_conversation_pool_manager.py`, `project_snapshot.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `ProjectSnapshot` defaulted to the real `data/project_db/project.sql`, and the pool manager's end-to-end test reached it. The three rows in that file — project `proj_pool`, summary "A rolled-up summary." — are that test's output. Worse, `test_a_snapshot_sends_the_model_who_said_what` asserted the model was called **once** per snapshot and passed only because those rows existed: with the watermark already ahead, the project snapshot found nothing pending and skipped its call. Isolated, the roll-forward runs, and the model is called twice, as designed.
+- **Status:** **Fixed.** The root `conftest.py` points `Config.MEMORY_DB` at a fresh file per test; `TestTheSuiteNeverTouchesTheRealDatabase` guards the redirect; the test now asserts both calls and what each prompt holds. The stray rows remain in the old file, which nothing reads.
+
+### Bug 4.87: `seq` Was Unique Per File, Which Held Only While Each Project Had Its Own (`conversationVectorMetaManager.py`) — FIXED
+
+- **Criticality:** High (latent)
+- **Priority:** P1
+- **Explanation:** `seq integer not null unique` and `MAX(seq) + 1` over the whole table. Correct while a file held one project; in a shared database two projects would collide on `seq` 1.
+- **Status:** **Fixed** before it could fire: `UNIQUE (project_id, seq)` and allocation per row's project, shared across that project's conversations so the project watermark keeps its order. `TestSeqIsPerProject`.
+
+### Bug 4.88: The Mapping Table Cached the Latest Snapshot by Hand, as Text (`memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `latest_project_snapshot_id` copied `ProjectSnapshotRepository.latest()` so resuming would not open a second file, and was stale whenever `update_latest_project_snapshot_id` was not called. It was also `text` against an `integer` key.
+- **Status:** **Fixed** by removing it: `search()` reads the chain each time and returns the integer id. `update_latest_project_snapshot_id` and the `new_latest_project_snapshot_id` argument are gone.
+
+### Bug 4.89: Relationships Kept by Code, or Not at All (`project_meta_data.py`, `project_snapshot_repo.py`, `fullconversation_repository.py`, `memory_mapping_handler.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** Across files nothing could be a foreign key, and some relationships were not one even within a file: `project_snapshot.project_id` had no foreign key though it shared `project.sql` with `project_table`. `ProjectMetaData` kept the child tables' `topic_id` in step with an UPDATE loop that a write skipping the upsert never ran. A turn's two copies of `conversation_id` were never required to agree, and roles were checked only in Python.
+- **Status:** **Fixed.** Every relationship in the layer is a foreign key; denormalised copies reference the pair; a project's topic move cascades; `CHECK` holds roles, `is_active` and the routing row's topic/project pairing; refusals are named. Each relationship has a test, and 15 mutations removing them were all caught.
+
+### Bug 7.6: `test_config_paths.py` Left a Different `config` Module Behind for Every Later Test — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** The tests pop `config` from `sys.modules` and re-import it, and never put the original back. Every later test saw a different `Config` class from the one already-imported modules held, so a monkeypatch of one silently missed the other. Found because the memory database redirect missed `MemoryDatabase` in the full suite and a test created the real database file.
+- **Status:** **Fixed** with an autouse fixture restoring the original module. Removing it fails the redirect guard.
+
 ## Section 5: Data Layer — Ingestion, Chunking & Vector Stores (`data_layer/`)
 
 ### Bug 5.1: The pgvector Write and Read Paths Cannot Work Against a Real PostgreSQL Server (`vectorRepository.py`) — FIXED AND PROVEN END TO END
@@ -584,12 +637,12 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Cost:** a graph build on the first search, growing faster than linearly — 0.9 s for 10k vectors, 6.3 s for 50k, 16.6 s for 100k at `Config`'s settings (complexity 100, degree 120, 4 threads). Reading the vectors from SQLite is under 0.1 s per 100k. A static-index snapshot (`build_memory_index`, row-position ids mapped to labels) would remove it at the price of a full rebuild per ingest; not done.
 - **Tests:** `test_vector_index.py::TestSurvivingARestart::test_in_a_new_process` rebuilds in a separate interpreter and requires the exact labels back — every in-process reload had looked correct. Also storage and migration (`test_vector_chunk_mapping.py`), restore and catch-up against the real library, and the pipeline storing what it indexes. The two `xfail(strict=True)` markers became passing tests of the store-backed path. 18 mutations, all caught.
 
-### Bug 5.21: Re-ingesting a Chunk Allocates a New Label Every Time, and Since 5.20 the Copies Persist (`vectorMetaDataRepository.py`, `ingestion_pipeline.py`)
+### Bug 5.21: Re-ingesting a Chunk Allocates a New Label Every Time, and Since 5.20 the Copies Persist (`vectorMetaDataRepository.py`, `ingestion_pipeline.py`) — FIXED
 
 - **Criticality:** High
 - **Priority:** P1
 - **Explanation:** `allocate` / `allocate_many` always insert a new row; nothing checks whether the chunk already has a label. Chunk writes are `on conflict do nothing`, so re-ingesting an unchanged folder adds no chunks — but every chunk still gets a fresh label. Measured in the real `data/hierarchical_db`: **one chunk, 45 labels, 25 of them with a stored vector**, accumulated by test runs (7.5). Before 5.20 the duplicate vectors died with the process; now they are stored, so every rebuild indexes all 25 copies, and a search can fill retrieval's 32-candidate pool with one chunk. Assembly drops repeats, so results stay correct, but recall falls with every re-ingest. **Made permanent by the 5.20 fix**, which is why it is logged with it.
-- **Fix (not applied — it changes the ingestion contract):** make allocation idempotent per `(chunkId, embeddingModelUsed)` — return the existing label, storing the vector if the row had none — and have the pipeline skip the DiskANN insert for labels it reused. A `unique (chunkId, embeddingModelUsed)` constraint would need the existing duplicates collapsed first.
+- **Status:** **Fixed.** `unique (chunkId, embeddingModelUsed)` on `vector_meta_data`; `allocate` / `allocate_many` are one `insert … on conflict … do update … returning vectorId`, so a chunk seen before gets its own label back and a label with no vector gains one, atomically. A store written before the constraint is collapsed on open — one row per chunk and model, preferring the row with a stored vector, with a warning naming the count. The pipeline records the labels its own index holds and skips repeats, since DiskANN refuses a label twice (`RuntimeError: … unable to be inserted`). Tests in `test_vector_chunk_mapping.py` and `test_vector_index.py`; 9 mutations, all caught. **The real store was collapsed by a test run:** a mutation that removed 7.5's redirect let the pipeline test open `data/hierarchical_db`, taking it from 55 labels to 1 for its one chunk — the duplicates this bug produced, so nothing distinct was lost.
 
 ---
 
@@ -640,11 +693,12 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Priority:** P3
 - **Explanation:** The pass that shortened every docstring to its summary kept the first *line* rather than the first *sentence*, so any docstring whose opening sentence wrapped now ends mid-clause. Affected: `normalizer._is_mostly_letters` ("fires on anything without a"), `text_extractor._flatten_json` ("stay attached to what"), `project_meta_data.__validate_topic_id` ("has no table of its own"), `project_meta_data.__validate_summary` ("rather than at the"), `conversationVectorManager.batch_delete` ("undo a partially written"), and `conversation_summary.make_summary` ("the current conversation"). **Introduced in this session.** The full text of each is recoverable from the archive taken before the pass.
 
-### Bug 7.2: The "No Raw `sqlite3.connect`" Guard Covers Two Modules Out of Four (`test_conversation_data_management.py`)
+### Bug 7.2: The "No Raw `sqlite3.connect`" Guard Covers Two Modules Out of Four (`test_conversation_data_management.py`) — FIXED
 
 - **Criticality:** Low
 - **Priority:** P3
 - **Explanation:** `test_every_conversation_connection_goes_through_connect` inspects `fullconversation_repository` and `conversationVectorMetaManager` only. Two more modules now open SQLite through `memory/sqlite_setup.connect()` and depend on the same per-connection pragmas: `project_meta_data.py` (since Bug 4.45) and `topic_pool_meta_handler.py`. Neither is in the guard's list, so a new method in either could silently get `synchronous=FULL` and foreign keys off — the exact defect the guard exists to prevent. Verified by reading the module list the test imports.
+- **Status:** **Fixed.** `test_no_memory_module_opens_its_own_connection` reads every module under `memory/` and fails on any `connect(` outside `memory_database.py`, which is now the only place a memory connection is opened.
 
 ### Bug 7.3: `scripts/smoke.py` Cannot Report a Missing `psycopg` (`scripts/smoke.py`)
 
@@ -678,9 +732,10 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Explanation:** `maximal_marginal_relevance` computed relevance as cosine to the query embedding and ignored the scores of whatever ranked the passages before it. It runs after the cross-encoder, so the most expensive and most accurate stage in the pipeline changed nothing about the result: the bi-encoder's ordering came back. Without reranking it equally discarded fusion's judgement — a passage both searchers found lost to one that was merely closer in embedding space. **Introduced in this session** (retrieval Phase 3).
 - **Status:** **Fixed.** MMR takes an optional `relevance`, min-max normalised across the pool so a logit, a bm25 value or an RRF score can be traded against cosine redundancy; the retriever always passes the previous stage's scores. Min-max is relative to the pool — the weakest candidate scores 0 whatever its raw score — which is why MMR is given the whole candidate pool, not a shortlist; `test_relevance_is_relative_to_the_pool` pins that property.
 
-### Bug 7.5: `test_data_layer_production.py` Writes Into the Real Chunk Store
+### Bug 7.5: `test_data_layer_production.py` Writes Into the Real Chunk Store — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
 - **Explanation:** The end-to-end pipeline test builds a real `IngestionPipeline`, whose chunker and label repository open `Config.DB_PATH` — the developer's own `data/hierarchical_db` — and the test's own comment says so ("It will write to DB_PATH"). Verified: running that file alone moves the real store from 44 labels to 45. Every full-suite run adds rows, and since 5.20 a stored vector with each, so the suite's results and the developer's data are entangled: the real store carries test chunks, and it migrated to the new schema the first time the suite ran rather than when the app did. The fix is to point the pipeline's paths at `tmp_path` for that test.
+- **Status:** **Fixed** for every test, not just that one. `Chunker` and the retrieval constructors bound `Config.DB_PATH` as a default argument, which Python evaluates at import, so no redirect could reach them; they now read it when called. The root `conftest.py` points `Config.DB_PATH` at a per-test path, as it does `Config.MEMORY_DB`. Verified: a full run leaves the real store's label count and modification time unchanged. `TestTheSuiteNeverTouchesTheRealChunkStore` guards both halves.
 

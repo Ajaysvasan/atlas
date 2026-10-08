@@ -43,6 +43,10 @@ class IngestionPipeline:
         # (bug 5.3). It shares the chunk store's database file so retrieval can
         # reach the text in one join.
         self.vector_meta = VectorMetaDataRepository(self.chunker.db_path)
+        # Labels this pipeline's own index already holds. Allocation hands a
+        # chunk seen before its old label back (bug 5.21), and DiskANN refuses
+        # a label it already has, so a repeat must not be inserted twice.
+        self._indexed_labels: set = set()
         logger.debug("Ingestion pipeline ready")
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:
@@ -93,7 +97,10 @@ class IngestionPipeline:
         label = self.vector_meta.allocate(
             embedded_value.meta_data.chunk_id, embedded_value.vector
         )
+        if label in self._indexed_labels:
+            return
         self.vector_db.insert(embedded_value, vector_id=label)
+        self._indexed_labels.add(label)
 
     def batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> List[int]:
         """Index the vectors under labels the mapping table hands out.
@@ -111,8 +118,14 @@ class IngestionPipeline:
             [e.meta_data.chunk_id for e in embedded_objs],
             [e.vector for e in embedded_objs],
         )
-        with log_timing(logger, "vector insert", vectors=len(embedded_objs)):
-            self.vector_db.batch_insert(embedded_objs, vector_ids=labels)
+        fresh: dict = {}
+        for embedded, label in zip(embedded_objs, labels):
+            if label not in self._indexed_labels:
+                fresh.setdefault(label, embedded)
+        if fresh:
+            with log_timing(logger, "vector insert", vectors=len(fresh)):
+                self.vector_db.batch_insert(list(fresh.values()), vector_ids=list(fresh))
+            self._indexed_labels.update(fresh)
         return labels
 
     def close(self) -> None:

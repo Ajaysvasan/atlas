@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable, List, Tuple
 
 from config import Config, get_logger
+from memory.memory_database import MemoryDatabase
 
 from .conversation_summary_pipeline.conversation_summary import ConversationSummary
 from .full_conversation_bucket import FullConversation
@@ -18,30 +19,30 @@ logger = get_logger(__name__)
 class ConversationPoolManager:
     def __init__(
         self,
-        conversation_dir: str | Path,
         project_id: str,
         project_name: str,
         conversation_id: str,
         main_model_context_window_length: int = Config.MAIN_MODEL_CONTEXT_WINDOW_TURNS,
         draft_model_context_window_length: int = Config.DRAFT_MODEL_CONTEXT_WINDOW,
         snapshot_every_n_turns: int = Config.SNAPSHOT_EVERY_N_TURNS,
+        database: MemoryDatabase | str | Path | None = None,
     ) -> None:
         if snapshot_every_n_turns < 1:
             raise ValueError("snapshot_every_n_turns must be at least 1")
 
-        self.conversation_dir = Path(conversation_dir)
+        self.database = MemoryDatabase.of(database)
         self.project_id = project_id
         self.project_name = project_name
         self.snapshot_every_n_turns = snapshot_every_n_turns
 
         self.full_conversation = FullConversation(
-            full_conversation_dir=self.conversation_dir,
+            database=self.database,
             project_id=project_id,
             project_name=project_name,
             conversation_id=conversation_id,
         )
         self.summariser = ConversationSummary(
-            full_conversation_dir=self.conversation_dir,
+            database=self.database,
             project_id=project_id,
             project_name=project_name,
             main_model_context_window_length=main_model_context_window_length,

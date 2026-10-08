@@ -22,6 +22,7 @@ from storage.sqlite_setup import (
 
 PROJECT_ID = "unit_test_project"
 CONVERSATION_ID = "conv_abc"
+DB = "memory.db"
 
 _MOCK_VECTOR_REPO = (
     "memory.topic_pool.project_pool.conversation_pool"
@@ -29,9 +30,17 @@ _MOCK_VECTOR_REPO = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _projects_registered(tmp_path, seed_projects):
+    """Snapshot rows reference their project, so the ones used here are registered."""
+    seed_projects(tmp_path / DB, "topic", PROJECT_ID, "proj123", "proj_schema",
+                  "proj_a", "proj_b", "other_project", "my_project", "p")
+
+
 @pytest.fixture
 def repo(tmp_path):
-    r = ConversationVectorMetaDataRepository(        conversation_path=tmp_path, project_id=PROJECT_ID, conversation_id="conv_abc"
+    r = ConversationVectorMetaDataRepository(
+        project_id=PROJECT_ID, conversation_id="conv_abc", database=tmp_path / DB
     )
     yield r
     r.close()
@@ -63,7 +72,7 @@ def _row_count(db_path: Path, table: str) -> int:
 
 class TestSchema:
     def test_all_four_tables_created(self, repo):
-        with sqlite3.connect(repo.db_path) as conn:
+        with sqlite3.connect(repo.database.path) as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
@@ -97,9 +106,8 @@ class TestSchema:
             repo.insert_map_table(300, 1)
 
     def test_db_file_created_at_expected_path(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, "proj_schema", "conv_abc")
-        expected = tmp_path / "proj_schema_conversation.db"
-        assert expected.exists()
+        repo = ConversationVectorMetaDataRepository("proj_schema", "conv_abc", tmp_path / DB)
+        assert (tmp_path / DB).exists()
         repo.close()
 
     def test_foreign_keys_enforced_on_repo_connection(self, repo):
@@ -116,10 +124,10 @@ class TestSchema:
 
     def test_repeated_init_is_idempotent(self, tmp_path):
         """Creating two repos on the same path must not raise or duplicate tables."""
-        r1 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        r1 = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         r1.close()
-        r2 = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
-        with sqlite3.connect(r2.db_path) as conn:
+        r2 = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
+        with sqlite3.connect(r2.database.path) as conn:
             tables = [r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()]
@@ -137,11 +145,11 @@ class TestSummaryChunks:
             ("ch1", "hello", "2026-08-01", "typeA"),
             ("ch2", "world", "2026-08-02", "typeB"),
         ])
-        assert _row_count(repo.db_path, "summary_chunks") == 2
+        assert _row_count(repo.database.path, "summary_chunks") == 2
 
     def test_empty_batch_is_noop(self, repo):
         repo.batch_insert_summary_chunks([])
-        assert _row_count(repo.db_path, "summary_chunks") == 0
+        assert _row_count(repo.database.path, "summary_chunks") == 0
 
     def test_duplicate_chunk_id_is_ignored(self, repo):
         """
@@ -151,13 +159,13 @@ class TestSummaryChunks:
         """
         repo.batch_insert_summary_chunks([("dup", "text", "2026-01-01", "t")])
         repo.batch_insert_summary_chunks([("dup", "text2", "2026-01-02", "t")])
-        assert _row_count(repo.db_path, "summary_chunks") == 1
+        assert _row_count(repo.database.path, "summary_chunks") == 1
 
     def test_duplicate_insert_preserves_the_original_row(self, repo):
         """IGNORE, not REPLACE — the stored turn is authoritative."""
         repo.batch_insert_summary_chunks([("dup", "original", "2026-01-01", "t")])
         repo.batch_insert_summary_chunks([("dup", "overwritten", "2026-01-02", "t")])
-        with sqlite3.connect(repo.db_path) as conn:
+        with sqlite3.connect(repo.database.path) as conn:
             row = conn.execute(
                 "SELECT chunk, created_at FROM summary_chunks WHERE chunk_id='dup'"
             ).fetchone()
@@ -166,7 +174,7 @@ class TestSummaryChunks:
     def test_unicode_text_roundtrip(self, repo):
         text = "rocket: \U0001f680, earth: \U0001f30d"
         repo.batch_insert_summary_chunks([("u1", text, "2026-08-01", "t")])
-        with sqlite3.connect(repo.db_path) as conn:
+        with sqlite3.connect(repo.database.path) as conn:
             row = conn.execute(
                 "SELECT chunk FROM summary_chunks WHERE chunk_id='u1'"
             ).fetchone()
@@ -175,7 +183,7 @@ class TestSummaryChunks:
     def test_long_text_insert(self, repo):
         long_text = "x" * 100_000
         repo.batch_insert_summary_chunks([("long1", long_text, "2026-08-01", "t")])
-        with sqlite3.connect(repo.db_path) as conn:
+        with sqlite3.connect(repo.database.path) as conn:
             row = conn.execute(
                 "SELECT chunk FROM summary_chunks WHERE chunk_id='long1'"
             ).fetchone()
@@ -184,11 +192,11 @@ class TestSummaryChunks:
     def test_thousand_record_batch(self, repo):
         records = [(f"b{i}", f"text {i}", "2026-08-01", "typeA") for i in range(1000)]
         repo.batch_insert_summary_chunks(records)
-        assert _row_count(repo.db_path, "summary_chunks") == 1000
+        assert _row_count(repo.database.path, "summary_chunks") == 1000
 
     def test_all_fields_stored_correctly(self, repo):
         repo.batch_insert_summary_chunks([("cX", "hello world", "2026-09-01", "recursive")])
-        with sqlite3.connect(repo.db_path) as conn:
+        with sqlite3.connect(repo.database.path) as conn:
             row = conn.execute(
                 "SELECT chunk_id, chunk, created_at, chunker_type FROM summary_chunks WHERE chunk_id='cX'"
             ).fetchone()
@@ -206,8 +214,8 @@ class TestSummaryChunks:
             ("existing", "t2", "2026-01-02", "x"),  # already stored
             ("new2", "t", "2026-01-01", "x"),
         ])
-        assert _row_count(repo.db_path, "summary_chunks") == 3
-        with sqlite3.connect(repo.db_path) as conn:
+        assert _row_count(repo.database.path, "summary_chunks") == 3
+        with sqlite3.connect(repo.database.path) as conn:
             ids = {
                 r[0] for r in conn.execute("SELECT chunk_id FROM summary_chunks")
             }
@@ -468,7 +476,7 @@ class TestMapTable:
         records = [(10, 1), (10, 2), (20, 1), (20, 2)]
         repo.batch_insert_map_table(records)
 
-        assert _row_count(repo.db_path, "summary_snapshot_map") == len(records)
+        assert _row_count(repo.database.path, "summary_snapshot_map") == len(records)
 
     def test_unique_constraint_on_duplicate_pair_bug_4_16(self, repo):
         """Regression: inserting the same (cum_id, sum_id) pair twice must fail."""
@@ -508,7 +516,7 @@ class TestMapTable:
 
     def test_empty_batch_map_insert_is_noop(self, repo):
         repo.batch_insert_map_table([])
-        assert _row_count(repo.db_path, "summary_snapshot_map") == 0
+        assert _row_count(repo.database.path, "summary_snapshot_map") == 0
 
     def test_get_ids_from_nonexistent_cumulative_returns_empty(self, repo):
         assert repo.get_summary_vector_ids_from_map(99999) == []
@@ -520,7 +528,7 @@ class TestMapTable:
 
 class TestStress:
     def test_five_hundred_snapshot_pipeline(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         chunk_recs = [(f"c{i}", f"text {i}", "2026-08-01", "typeA") for i in range(500)]
         repo.batch_insert_summary_chunks(chunk_recs)
         sv_recs = [(i, f"c{i}", PROJECT_ID) for i in range(500)]
@@ -531,7 +539,7 @@ class TestStress:
         repo.close()
 
     def test_two_hundred_map_records_exact_count(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         repo.batch_insert_summary_chunks(
             [(f"c{i}", "t", "2026-08-01", "t") for i in range(100)]
         )
@@ -542,7 +550,7 @@ class TestStress:
             [(i + 1000, "s", "2026-08-01", PROJECT_ID, 1) for i in range(100)]
         )
         repo.batch_insert_map_table([(i + 1000, i) for i in range(100)])
-        assert _row_count(repo.db_path, "summary_snapshot_map") == 100
+        assert _row_count(repo.database.path, "summary_snapshot_map") == 100
         repo.close()
 
     def test_twenty_concurrent_read_threads(self, tmp_path):
@@ -551,7 +559,7 @@ class TestStress:
         This used to close the repository and open its own sqlite3 connections,
         which tested SQLite rather than anything in this module.
         """
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         repo.batch_insert_cumulative_vector_meta_data(
             [(i, f"s{i}", "2026-08-01", PROJECT_ID, i) for i in range(100)]
         )
@@ -574,7 +582,7 @@ class TestStress:
         repo.close()
 
     def test_full_pipeline_one_hundred_snapshots(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         for i in range(100):
             cid = f"c{i}"
             repo.batch_insert_summary_chunks([(cid, f"text {i}", "2026-08-01", "t")])
@@ -583,7 +591,7 @@ class TestStress:
                 i + 1000, f"sum {i}", "2026-08-01", PROJECT_ID, i
             )
             repo.insert_map_table(i + 1000, i)
-        with sqlite3.connect(repo.db_path) as conn:
+        with sqlite3.connect(repo.database.path) as conn:
             counts = {
                 tbl: conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
                 for tbl in [
@@ -598,7 +606,7 @@ class TestStress:
 
     def test_get_latest_summary_after_five_hundred_inserts(self, tmp_path):
         """get_latest_summary must return the entry with the latest date even at scale."""
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         for i in range(1, 501):
             year = 2025 + (i // 366)
             day = (i % 365) or 1
@@ -631,18 +639,18 @@ class TestJournalMode:
             conn.close()
 
     def test_metadata_repository_opens_in_wal(self, repo):
-        assert repo.journal_mode == "wal"
-        assert self._mode(repo.db_path) == "wal"
+        assert repo.database.journal_mode == "wal"
+        assert self._mode(repo.database.path) == "wal"
 
     def test_full_conversation_repository_opens_in_wal(self, tmp_path):
-        full = FullConversationRepository(tmp_path, PROJECT_ID, "project", CONVERSATION_ID)
-        assert full.journal_mode == "wal"
+        full = FullConversationRepository(PROJECT_ID, "project", CONVERSATION_ID, tmp_path / DB)
+        assert full.database.journal_mode == "wal"
 
     def test_both_repositories_share_the_one_file_and_its_mode(self, tmp_path):
-        full = FullConversationRepository(tmp_path, PROJECT_ID, "project", CONVERSATION_ID)
-        meta = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
-        assert Path(full.db_path) == Path(meta.db_path)
-        assert meta.journal_mode == "wal"
+        full = FullConversationRepository(PROJECT_ID, "project", CONVERSATION_ID, tmp_path / DB)
+        meta = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
+        assert full.database is meta.database
+        assert meta.database.journal_mode == "wal"
         meta.close()
 
     def test_a_write_is_not_blocked_by_an_open_read(self, repo):
@@ -651,7 +659,7 @@ class TestJournalMode:
         Under a rollback journal this raises `database is locked`: a reader
         holding a transaction open blocks every writer until it finishes.
         """
-        reader = sqlite3.connect(repo.db_path, timeout=0.3)
+        reader = sqlite3.connect(repo.database.path, timeout=0.3)
         reader.execute("BEGIN;")
         reader.execute("SELECT count(*) FROM cumulative_vector_meta_data").fetchone()
         try:
@@ -663,27 +671,8 @@ class TestJournalMode:
             reader.close()
         assert len(repo.get_cumulative_vector_meta_data_ids()) == 1
 
-    def test_an_existing_rollback_journal_database_is_converted(self, tmp_path):
-        """Databases written before this change convert on the next open."""
-        db_path = tmp_path / f"{PROJECT_ID}_conversation.db"
-        legacy = sqlite3.connect(db_path)
-        legacy.execute("PRAGMA journal_mode = DELETE;").fetchone()
-        legacy.execute(
-            "CREATE TABLE summary_chunks (chunk_id TEXT PRIMARY KEY, chunk TEXT NOT NULL,"
-            " created_at DATE NOT NULL, chunker_type TEXT NOT NULL)"
-        )
-        legacy.execute("INSERT INTO summary_chunks VALUES ('c', 't', '2026-08-01', 'turn')")
-        legacy.commit()
-        legacy.close()
-        assert self._mode(db_path) == "delete"
-
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
-        assert repo.journal_mode == "wal"
-        assert _row_count(db_path, "summary_chunks") == 1
-        repo.close()
-
     def test_synchronous_is_normal_on_the_repository_connection(self, repo):
-        assert repo.conn.execute("PRAGMA synchronous;").fetchone()[0] == 1
+        assert repo.database.connection.execute("PRAGMA synchronous;").fetchone()[0] == 1
 
     def test_connect_applies_both_per_connection_pragmas(self, tmp_path):
         """Unlike journal_mode, these reset to their defaults on every open."""
@@ -701,30 +690,22 @@ class TestJournalMode:
         finally:
             plain.close()
 
-    def test_every_conversation_connection_goes_through_connect(self):
-        """A raw sqlite3.connect() would silently get FULL and no foreign keys.
+    def test_no_memory_module_opens_its_own_connection(self):
+        """Every table owner goes through MemoryDatabase, so its pragmas and its
+        transaction discipline cannot come apart. The guard used to cover two
+        modules out of four (bugs.md 7.2); it now reads all of memory/."""
+        import pathlib
 
-        FullConversationRepository opens a connection per call, so this is not a
-        one-time setup that can be checked at construction — a new method with a
-        raw connect is the way the pragmas would come apart again.
-        """
-        import inspect
-
-        from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository import (
-            fullconversation_repository as full_module,
-        )
-        from memory.topic_pool.project_pool.conversation_pool.conversation_data_management import (
-            conversationVectorMetaManager as meta_module,
-        )
-
-        for module in (full_module, meta_module):
-            source = inspect.getsource(module)
-            offenders = [
-                line.strip()
-                for line in source.splitlines()
-                if "sqlite3.connect(" in line and not line.strip().startswith("#")
-            ]
-            assert offenders == [], f"{module.__name__}: {offenders}"
+        allowed = {"memory_database.py"}
+        offenders = []
+        for path in pathlib.Path("memory").rglob("*.py"):
+            if path.name in allowed:
+                continue
+            for number, line in enumerate(path.read_text().splitlines(), start=1):
+                code = line.split("#", 1)[0]
+                if "connect(" in code:
+                    offenders.append(f"{path}:{number}: {line.strip()}")
+        assert offenders == []
 
     def test_enable_wal_reports_the_mode_rather_than_raising(self, tmp_path):
         """A database it cannot convert is not an error — it stays as it is."""
@@ -813,13 +794,13 @@ class TestThreadSafety:
                 summary_vector_rows=[(1, "orphan", PROJECT_ID)],
                 map_rows=[(7, 1)],
             )
-        assert _row_count(repo.db_path, "summary_chunks") == 0
-        assert _row_count(repo.db_path, "summary_vector_meta_data") == 0
+        assert _row_count(repo.database.path, "summary_chunks") == 0
+        assert _row_count(repo.database.path, "summary_vector_meta_data") == 0
 
     def test_close_waits_for_a_write_in_flight(self, tmp_path):
         """close() takes the same lock, so it cannot pull the connection out
         from under a writer that is mid-transaction on another thread."""
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         inside = threading.Event()
         release = threading.Event()
         error: list = []
@@ -847,10 +828,10 @@ class TestThreadSafety:
         closer.join(timeout=5)
 
         assert error == []
-        assert _row_count(repo.db_path, "summary_chunks") == 2
+        assert _row_count(repo.database.path, "summary_chunks") == 2
 
     def test_close_is_idempotent(self, tmp_path):
-        repo = ConversationVectorMetaDataRepository(tmp_path, PROJECT_ID, "conv_abc")
+        repo = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_abc", tmp_path / DB)
         repo.close()
         repo.close()
 
@@ -929,3 +910,111 @@ class TestConversationVectorManager:
         vecs = np.zeros((3, 4), dtype=np.float32)
         result = manager.batch_insert(vids, vecs)
         assert result == vids
+
+
+# ---------------------------------------------------------------------------
+# seq in one shared database
+# ---------------------------------------------------------------------------
+
+
+class TestSeqIsPerProject:
+    """seq is the project snapshot's watermark. Unique across the whole table
+    it held only while each project had a database file of its own."""
+
+    def test_each_project_counts_from_one(self, tmp_path):
+        a = ConversationVectorMetaDataRepository("proj_a", "conv_1", tmp_path / DB)
+        b = ConversationVectorMetaDataRepository("proj_b", "conv_1", tmp_path / DB)
+        a.insert_cumulative_vector_meta_data(1, "a one", "now", "proj_a", 1)
+        b.insert_cumulative_vector_meta_data(2, "b one", "now", "proj_b", 1)
+        assert a.get_highest_snapshot_seq() == 1
+        assert b.get_highest_snapshot_seq() == 1
+
+    def test_a_projects_conversations_share_one_sequence(self, tmp_path):
+        """The project snapshot reads across every conversation of a project,
+        so their seqs must interleave in one order, not restart per conversation."""
+        first = ConversationVectorMetaDataRepository("proj_a", "conv_1", tmp_path / DB)
+        second = ConversationVectorMetaDataRepository("proj_a", "conv_2", tmp_path / DB)
+        first.insert_cumulative_vector_meta_data(1, "one", "now", "proj_a", 1)
+        second.insert_cumulative_vector_meta_data(2, "two", "now", "proj_a", 1)
+        first.insert_cumulative_vector_meta_data(3, "three", "now", "proj_a", 1)
+        assert [r[0] for r in first.get_project_snapshots_since(0)] == [1, 2, 3]
+
+    def test_another_projects_snapshots_never_count(self, tmp_path):
+        a = ConversationVectorMetaDataRepository("proj_a", "conv_1", tmp_path / DB)
+        b = ConversationVectorMetaDataRepository("proj_b", "conv_1", tmp_path / DB)
+        b.insert_cumulative_vector_meta_data(9, "elsewhere", "now", "proj_b", 1)
+        assert a.get_project_snapshots_since(0) == []
+
+    def test_a_batch_gives_each_row_its_own_projects_next_seq(self, tmp_path):
+        repo = ConversationVectorMetaDataRepository("proj_a", "conv_1", tmp_path / DB)
+        repo.insert_cumulative_vector_meta_data(1, "earlier", "now", "proj_a", 1)
+        repo.batch_insert_cumulative_vector_meta_data([
+            (2, "a two", "now", "proj_a", 1),
+            (3, "b one", "now", "proj_b", 1),
+            (4, "a three", "now", "proj_a", 1),
+        ])
+        seqs = dict(repo.database.connection.execute(
+            "select cumulative_vector_id, seq from cumulative_vector_meta_data").fetchall())
+        assert seqs == {1: 1, 2: 2, 3: 1, 4: 3}
+
+
+class TestTheDatabaseKeepsTheRelationships:
+    def test_a_snapshot_for_an_unregistered_project_is_refused(self, tmp_path):
+        from memory.memory_pool_exceptions import ProjectNotFound
+
+        repo = ConversationVectorMetaDataRepository("never_registered", "c", tmp_path / DB)
+        with pytest.raises(ProjectNotFound, match="never_registered"):
+            repo.insert_cumulative_vector_meta_data(1, "s", "now", "never_registered", 1)
+
+    def test_a_whole_snapshot_is_refused_together(self, tmp_path):
+        """insert_snapshot is one transaction: a refusal leaves no chunk behind."""
+        from memory.memory_pool_exceptions import ProjectNotFound
+
+        repo = ConversationVectorMetaDataRepository("never_registered", "c", tmp_path / DB)
+        with pytest.raises(ProjectNotFound):
+            repo.insert_snapshot(
+                chunks=[("c1", "text", "now", "turn")],
+                cumulative_row=(1, "summary", "now", "never_registered", 7),
+                summary_vector_rows=[(11, "c1", "never_registered")],
+                map_rows=[(1, 11)],
+            )
+        assert _row_count(tmp_path / DB, "summary_chunks") == 0
+
+
+class TestTheWatermarkIsPerConversation:
+    """get_highest_summarised_sequence filtered on the project alone, so a
+    conversation with no snapshot read a sibling's progress as its own: 10
+    unsummarised turns reported a watermark of 50, and the snapshot trigger
+    stayed silent until the new conversation overtook the old one."""
+
+    def turns(self, tmp_path, conversation_id, n):
+        repo = FullConversationRepository(PROJECT_ID, "n", conversation_id, tmp_path / DB)
+        repo.append_turns([("user", f"{conversation_id} {i}") for i in range(1, n + 1)])
+        return repo
+
+    def summarise(self, tmp_path, conversation_id, turns, upto, base):
+        """`base` keeps each snapshot's ids apart; the values mean nothing."""
+        meta = ConversationVectorMetaDataRepository(PROJECT_ID, conversation_id, tmp_path / DB)
+        rows = turns.get_ranged_rows(1, upto)
+        meta.insert_snapshot(
+            chunks=[tuple(r) for r in rows],
+            cumulative_row=(base, "s", "now", PROJECT_ID, 1),
+            summary_vector_rows=[(base + i, r[0], PROJECT_ID) for i, r in enumerate(rows, 1)],
+            map_rows=[],
+        )
+        return meta
+
+    def test_a_new_conversation_does_not_inherit_a_siblings_progress(self, tmp_path):
+        older = self.turns(tmp_path, "conv_old", 50)
+        self.summarise(tmp_path, "conv_old", older, 50, base=1000)
+        self.turns(tmp_path, "conv_new", 10)
+        fresh = ConversationVectorMetaDataRepository(PROJECT_ID, "conv_new", tmp_path / DB)
+        assert fresh.get_highest_summarised_sequence() is None
+
+    def test_each_conversation_reports_its_own(self, tmp_path):
+        a = self.turns(tmp_path, "conv_a", 30)
+        b = self.turns(tmp_path, "conv_b", 30)
+        meta_a = self.summarise(tmp_path, "conv_a", a, 25, base=1000)
+        meta_b = self.summarise(tmp_path, "conv_b", b, 10, base=2000)
+        assert meta_a.get_highest_summarised_sequence() == 25
+        assert meta_b.get_highest_summarised_sequence() == 10

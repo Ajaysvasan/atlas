@@ -10,10 +10,12 @@ logger = get_logger(__name__)
 
 
 class Chunker:
-    def __init__(self, chunk_size=256, overlap=20, db_path=Config.DB_PATH):
+    def __init__(self, chunk_size=256, overlap=20, db_path=None):
         self.chunk_size = chunk_size
         self.overlap = overlap
-        self.db_path = db_path
+        # Read when called, not at import: a default bound at import time is the
+        # real chunk store whatever Config says by then (bugs.md 7.5).
+        self.db_path = db_path if db_path is not None else Config.DB_PATH
 
     def _call_hierarchical_chunker(
         self, hierarchical_chunker_list: List[NormalizedContent]

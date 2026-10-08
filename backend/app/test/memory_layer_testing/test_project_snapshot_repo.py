@@ -6,10 +6,12 @@ one. The watermark on each row is the conversation-snapshot `seq` it folded in,
 which is what makes the next snapshot incremental.
 """
 
+import sqlite3
+
 import pytest
 
 from config import Config
-from memory.memory_pool_exceptions import InvalidIdentifier
+from memory.memory_pool_exceptions import InvalidIdentifier, ProjectNotFound
 from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo import (
     ProjectSnapshotRepository,
     project_snapshot_id,
@@ -17,8 +19,15 @@ from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo impo
 
 
 @pytest.fixture
-def repo(tmp_path):
-    r = ProjectSnapshotRepository("proj_1", db_path=tmp_path / "project.sql")
+def db(tmp_path, seed_projects):
+    path = tmp_path / "project.sql"
+    seed_projects(path, "topic", "proj_1", "proj_2")
+    return path
+
+
+@pytest.fixture
+def repo(db):
+    r = ProjectSnapshotRepository("proj_1", database=db)
     yield r
     r.close()
 
@@ -102,10 +111,9 @@ class TestStoringSnapshots:
 
 
 class TestProjectsAreIsolated:
-    def test_one_project_does_not_see_another(self, tmp_path):
-        db = tmp_path / "project.sql"
-        one = ProjectSnapshotRepository("proj_1", db_path=db)
-        two = ProjectSnapshotRepository("proj_2", db_path=db)
+    def test_one_project_does_not_see_another(self, db):
+        one = ProjectSnapshotRepository("proj_1", database=db)
+        two = ProjectSnapshotRepository("proj_2", database=db)
         one.add_snapshot("about one", last_seq_included=5)
         two.add_snapshot("about two", last_seq_included=9)
 
@@ -116,11 +124,10 @@ class TestProjectsAreIsolated:
         one.close()
         two.close()
 
-    def test_they_share_the_one_registry_file(self, tmp_path):
-        db = tmp_path / "project.sql"
-        one = ProjectSnapshotRepository("proj_1", db_path=db)
-        two = ProjectSnapshotRepository("proj_2", db_path=db)
-        assert one.db_path == two.db_path
+    def test_they_share_the_one_database(self, db):
+        one = ProjectSnapshotRepository("proj_1", database=db)
+        two = ProjectSnapshotRepository("proj_2", database=db)
+        assert one.database is two.database
         one.close()
         two.close()
 
@@ -129,4 +136,32 @@ class TestItRefusesABadProjectId:
     @pytest.mark.parametrize("value", ["", "   ", None])
     def test_it_raises(self, tmp_path, value):
         with pytest.raises(InvalidIdentifier):
-            ProjectSnapshotRepository(value, db_path=tmp_path / "project.sql")
+            ProjectSnapshotRepository(value, database=tmp_path / "project.sql")
+
+
+class TestTheDatabaseKeepsTheRelationships:
+    """While snapshots and projects shared a file the snapshot still had no
+    foreign key to its project; now it has."""
+
+    def test_a_snapshot_for_an_unregistered_project_is_refused(self, db):
+        stranger = ProjectSnapshotRepository("never_registered", database=db)
+        with pytest.raises(ProjectNotFound):
+            stranger.add_snapshot("about nothing", last_seq_included=1)
+        assert stranger.history() == []
+
+    def test_the_refusal_keeps_the_database_error_as_its_cause(self, db):
+        stranger = ProjectSnapshotRepository("never_registered", database=db)
+        with pytest.raises(ProjectNotFound) as caught:
+            stranger.add_snapshot("about nothing", last_seq_included=1)
+        assert isinstance(caught.value.__cause__, sqlite3.IntegrityError)
+
+    def test_the_chain_cannot_point_at_another_projects_snapshot(self, repo):
+        """The mapping and its snapshot must agree on the project."""
+        snapshot_id = repo.add_snapshot("about one", last_seq_included=1)
+        with pytest.raises(sqlite3.IntegrityError):
+            with repo.database.writing() as cursor:
+                cursor.execute(
+                    "insert into project_snapshot_mapping values ('proj_2', ?, 'now')",
+                    (snapshot_id,),
+                )
+

@@ -1,20 +1,14 @@
 import sqlite3
-import threading
-from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
-from typing import Iterator, List, NamedTuple
+from typing import List, NamedTuple
 
-from config import Config, get_logger
+from config import get_logger
+from memory.memory_database import MemoryDatabase, Schema
 from memory.memory_pool_exceptions import TopicAlreadyExists, TopicNotFound
-from storage.timestamps import utc_now, as_timestamp
-from storage.sqlite_setup import connect, enable_wal
+from storage.timestamps import as_timestamp
 
 logger = get_logger(__name__)
-
-
-
-
 
 
 class Topic(NamedTuple):
@@ -25,63 +19,31 @@ class Topic(NamedTuple):
     created_at: str
 
 
+def _create_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute("""
+        create table if not exists topics_mapping_table(
+            topic_id text primary key not null,
+            topic_name text not null,
+            created_at text not null,
+            is_active text not null default 't' check (is_active in ('t', 'f'))
+        )
+    """)
+    cursor.execute(
+        "create unique index if not exists idx_active_topic_name "
+        "on topics_mapping_table(topic_name) where is_active = 't'"
+    )
+
+
+SCHEMA = Schema("topics", _create_tables)
+
+
 class TopicPoolMetaHandler:
-    def __init__(self, topic_pool_path: str | None | Path):
-        self._lock = threading.RLock()
-        self.__connection: sqlite3.Connection | None = None
-        self.topic_db_path = (
-            Path(topic_pool_path)
-            if topic_pool_path is not None
-            else Config.DATA_DIR / Path("topic_db/topic.sql")
-        )
-        self.topic_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.__connection = connect(self.topic_db_path, check_same_thread=False)
-        self.journal_mode = enable_wal(self.__connection, self.topic_db_path)
-        self.__db_init()
-
-    @contextmanager
-    def __writing(self) -> Iterator[sqlite3.Cursor]:
-        with self._lock:
-            assert self.__connection is not None
-            cursor = self.__connection.cursor()
-            try:
-                yield cursor
-                self.__connection.commit()
-            except BaseException:
-                self.__connection.rollback()
-                logger.debug("Rolled back a write on %s", self.topic_db_path)
-                raise
-
-    @contextmanager
-    def __reading(self) -> Iterator[sqlite3.Cursor]:
-        with self._lock:
-            assert self.__connection is not None
-            yield self.__connection.cursor()
-
-    def __db_init(self):
-        with self.__writing() as curr:
-            curr.execute("""
-                create table if not exists topics_mapping_table(
-                    topic_id text primary key not null,
-                    topic_name text not null,
-                    created_at DATE NOT NULL,
-                    is_active CHAR(2)
-                    );
-                    """)
-            curr.execute(
-                """
-                create unique index if not exists idx_active_topic_name
-                on topics_mapping_table(topic_name) where is_active = 't';
-                """
-            )
-        logger.debug(
-            "Topic registry ready at %s (journal=%s)",
-            self.topic_db_path,
-            self.journal_mode,
-        )
+    def __init__(self, database: MemoryDatabase | str | Path | None = None):
+        self.database = MemoryDatabase.of(database)
+        self.database.ensure(SCHEMA)
 
     def __is_topic_exists(self, topic_name: str):
-        with self.__reading() as curr:
+        with self.database.reading() as curr:
             curr.execute(
                 """
                 select 1 from topics_mapping_table
@@ -93,7 +55,7 @@ class TopicPoolMetaHandler:
             return row[0] if row is not None else None
 
     def __get_topic_id(self, topic_name: str):
-        with self.__reading() as curr:
+        with self.database.reading() as curr:
             curr.execute(
                 """
                 select topic_id from topics_mapping_table
@@ -108,7 +70,7 @@ class TopicPoolMetaHandler:
         self, topic_name: str, topic_id: str, created_at: str
     ) -> None:
         try:
-            with self.__writing() as curr:
+            with self.database.writing() as curr:
                 curr.execute(
                     """
                 insert into topics_mapping_table(topic_id , topic_name , created_at , is_active)
@@ -123,7 +85,7 @@ class TopicPoolMetaHandler:
         logger.debug("Stored topic %s as %s", topic_name, topic_id)
 
     def __soft_delete_by_name(self, topic_name: str) -> str:
-        with self.__writing() as curr:
+        with self.database.writing() as curr:
             row = curr.execute(
                 """
                 update topics_mapping_table set is_active = 'f'
@@ -138,7 +100,7 @@ class TopicPoolMetaHandler:
         return row[0]
 
     def __get_all_topics(self) -> List[Topic]:
-        with self.__reading() as curr:
+        with self.database.reading() as curr:
             curr.execute(
                 """
                 select topic_id, topic_name, created_at from topics_mapping_table
@@ -149,7 +111,7 @@ class TopicPoolMetaHandler:
             return [Topic(*row) for row in curr.fetchall()]
 
     def __soft_delete(self , topic_id):
-        with self.__writing() as curr:
+        with self.database.writing() as curr:
             curr.execute(
                 """
                 update topics_mapping_table set is_active = ? where topic_id = ?;
@@ -160,6 +122,14 @@ class TopicPoolMetaHandler:
             if curr.rowcount == 0:
                 raise ValueError(f"No topic with id {topic_id!r}")
         logger.debug("Marked topic %s inactive", topic_id)
+
+    def has_topic_id(self, topic_id: str) -> bool:
+        """Whether any row, active or soft-deleted, carries this id."""
+        with self.database.reading() as curr:
+            return curr.execute(
+                "select 1 from topics_mapping_table where topic_id = ? limit 1",
+                (topic_id,),
+            ).fetchone() is not None
 
     def is_topic_exists(self, topic: str):
         return True if self.__is_topic_exists(topic) is not None else False
@@ -183,13 +153,5 @@ class TopicPoolMetaHandler:
         """Every active topic, oldest first."""
         return self.__get_all_topics()
 
-    def close(self):
-        with self._lock:
-            if self.__connection is not None:
-                logger.debug("Closing the topic registry at %s", self.topic_db_path)
-                self.__connection.close()
-                self.__connection = None
-
-    def __del__(self):
-        self.close()
-
+    def close(self) -> None:
+        """Releases nothing: the database is shared and outlives its owners."""

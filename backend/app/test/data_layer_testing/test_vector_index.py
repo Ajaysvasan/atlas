@@ -187,6 +187,7 @@ class TestThePipelineStoresWhatItIndexes:
         pipeline = IngestionPipeline.__new__(IngestionPipeline)
         pipeline.vector_meta = VectorMetaDataRepository(str(tmp_path / "chunks"))
         pipeline.vector_db = index()
+        pipeline._indexed_labels = set()
         data = points(4)
         embedded = [EmbeddedChunk(v, 0, EmbeddedChunkMetaData(f"c{i}", "t", "m"))
                     for i, v in enumerate(data)]
@@ -208,8 +209,81 @@ class TestThePipelineStoresWhatItIndexes:
         pipeline = IngestionPipeline.__new__(IngestionPipeline)
         pipeline.vector_meta = VectorMetaDataRepository(str(tmp_path / "chunks"))
         pipeline.vector_db = index()
+        pipeline._indexed_labels = set()
         vector = points(1)[0]
         pipeline.ingest_vector(EmbeddedChunk(vector, 0, EmbeddedChunkMetaData("c", "t", "m")))
         (_, stored), = list(pipeline.vector_meta.vectors())
         pipeline.vector_meta.close()
         np.testing.assert_array_equal(stored[0], vector)
+
+
+class TestReIngestingKeepsOneLabelPerChunk:
+    """Bug 5.21: every re-ingest gave each chunk a new label, and since 5.20
+    stores the vectors, every copy was rebuilt into the index."""
+
+    def pipeline(self, tmp_path):
+        from data_layer.ingestion.ingestion_pipeline import IngestionPipeline
+        from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
+            VectorMetaDataRepository,
+        )
+
+        built = IngestionPipeline.__new__(IngestionPipeline)
+        built.vector_meta = VectorMetaDataRepository(str(tmp_path / "chunks"))
+        built.vector_db = index()
+        built._indexed_labels = set()
+        return built
+
+    def embedded(self, data, prefix="c"):
+        from data_layer.ingestion.metadata.metadata import EmbeddedChunkMetaData
+        from data_layer.ingestion.nodes.nodes import EmbeddedChunk
+
+        return [EmbeddedChunk(v, 0, EmbeddedChunkMetaData(f"{prefix}{i}", "t", "m"))
+                for i, v in enumerate(data)]
+
+    def test_the_same_chunks_twice_in_one_session(self, real_diskann, tmp_path):
+        """DiskANN refuses a label it already holds, so a reused label must
+        not be inserted again."""
+        pipeline = self.pipeline(tmp_path)
+        chunks = self.embedded(points(4))
+        first = pipeline.batch_insert_vectors(chunks)
+        second = pipeline.batch_insert_vectors(chunks)
+        assert second == first
+        assert pipeline.vector_meta.count() == 4
+        assert pipeline.vector_db.count() == 4
+
+    def test_one_chunk_twice_in_one_batch_is_indexed_once(self, real_diskann, tmp_path):
+        pipeline = self.pipeline(tmp_path)
+        chunk = self.embedded(points(1))[0]
+        labels = pipeline.batch_insert_vectors([chunk, chunk])
+        assert labels[0] == labels[1]
+        assert pipeline.vector_db.count() == 1
+
+    def test_a_single_insert_repeated(self, real_diskann, tmp_path):
+        pipeline = self.pipeline(tmp_path)
+        chunk = self.embedded(points(1))[0]
+        pipeline.ingest_vector(chunk)
+        pipeline.ingest_vector(chunk)
+        assert pipeline.vector_meta.count() == 1
+        assert pipeline.vector_db.count() == 1
+
+    def test_a_restart_after_re_ingesting_rebuilds_one_vector_per_chunk(self, real_diskann, tmp_path):
+        first_session = self.pipeline(tmp_path)
+        chunks = self.embedded(points(5))
+        first_session.batch_insert_vectors(chunks)
+        second_session = self.pipeline(tmp_path)
+        second_session.batch_insert_vectors(chunks)
+
+        rebuilt = index()
+        rebuilt.restore(second_session.vector_meta)
+        assert rebuilt.count() == 5
+
+    def test_new_chunks_beside_old_ones_get_new_labels(self, real_diskann, tmp_path):
+        pipeline = self.pipeline(tmp_path)
+        data = points(6)
+        old = pipeline.batch_insert_vectors(self.embedded(data[:3]))
+        mixed = pipeline.batch_insert_vectors(
+            self.embedded(data[:3]) + self.embedded(data[3:], prefix="n"))
+        assert mixed[:3] == old
+        assert len(set(mixed[3:])) == 3 and not set(mixed[3:]) & set(old)
+        assert pipeline.vector_db.count() == 6
+

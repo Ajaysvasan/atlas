@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 
 from config import Config, get_logger
 from data_layer.ingestion.nodes.nodes import EmbeddedChunk
+from memory.memory_database import MemoryDatabase
 from memory.memory_pool_exceptions import EmptyQueryException
 
 from .project_data_repo.project_meta_data import (
@@ -59,7 +60,7 @@ class ProjectManager:
         self,
         topic_id: str,
         query: str,
-        db_path: str | Path | None = None,
+        database: MemoryDatabase | str | Path | None = None,
         embedder=None,
         vector_handler: ProjectVectorHandler | None = None,
         similarity_floor: float = SIMILARITY_FLOOR,
@@ -72,7 +73,7 @@ class ProjectManager:
 
         self.topic_id = topic_id
         self.query = query
-        self.db_path = db_path
+        self.database = MemoryDatabase.of(database)
         self.similarity_floor = similarity_floor
         self.ambiguity_margin = ambiguity_margin
 
@@ -113,17 +114,17 @@ class ProjectManager:
         return ProjectMetaData(
             project_id,
             self.topic_id,
-            db_path=self.db_path,
+            database=self.database,
             vector_repository=self.vector_handler.repository_for(project_id),
         )
 
     def projects(self) -> List[TopicProject]:
         """The project list this layer decides against."""
-        return list_topic_projects(self.topic_id, self.db_path)
+        return list_topic_projects(self.topic_id, self.database)
 
     def __vector_ids_by_project(self) -> List[Tuple[str, List[int]]]:
         grouped: dict[str, List[int]] = {}
-        for project_id, vector_id in list_topic_vector_ids(self.topic_id, self.db_path):
+        for project_id, vector_id in list_topic_vector_ids(self.topic_id, self.database):
             grouped.setdefault(project_id, []).append(vector_id)
         return list(grouped.items())
 

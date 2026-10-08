@@ -21,15 +21,20 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
     DuplicateVectorException,
     VectorNotFoundEror,
 )
-from memory.memory_pool_exceptions import InvalidVectorId, MisMatchCount
+from memory.memory_pool_exceptions import (
+    InvalidVectorId,
+    MisMatchCount,
+    ProjectInAnotherTopic,
+    ProjectNotFound,
+    TopicNotFound,
+)
 from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
     ProjectMetaData,
     ProjectRow,
     list_topic_projects,
     list_topic_vector_ids,
-    as_timestamp,
-    utc_now,
 )
+from storage.timestamps import as_timestamp, utc_now
 
 PROJECT_ID = "unit_test_project"
 TOPIC_ID = "unit_test_topic"
@@ -94,16 +99,18 @@ def fake_vectors():
 
 
 @pytest.fixture
-def db_path(tmp_path):
+def db_path(tmp_path, seed_topics):
     # Deliberately nested: the real default path lives under a directory that
     # does not exist on a fresh checkout.
-    return tmp_path / "project_db" / "project.sql"
+    path = tmp_path / "project_db" / "project.sql"
+    seed_topics(path, TOPIC_ID, "topic_a", "topic_b", "topic")
+    return path
 
 
 @pytest.fixture
 def meta(db_path, fake_vectors):
     m = ProjectMetaData(
-        PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+        PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
     )
     yield m
     m.close()
@@ -124,16 +131,16 @@ def _raise_boom(*args, **kwargs):
 
 
 class TestSchema:
-    def test_creates_missing_parent_directory(self, db_path, fake_vectors):
-        assert not db_path.parent.exists()
+    def test_creates_missing_parent_directory(self, tmp_path, fake_vectors):
+        path = tmp_path / "fresh" / "memory.db"
         m = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=path, vector_repository=fake_vectors
         )
-        assert db_path.exists()
+        assert path.exists()
         m.close()
 
     def test_both_tables_created(self, meta):
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             tables = {
                 r[0]
                 for r in conn.execute(
@@ -148,7 +155,7 @@ class TestSchema:
 
     def test_description_table_primary_key_is_composite(self, meta):
         """Several descriptions per project, told apart by a caller-supplied id."""
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             key = [
                 row[1]
                 for row in conn.execute("PRAGMA table_info(project_description_table)")
@@ -157,7 +164,7 @@ class TestSchema:
         assert set(key) == {"project_id", "project_description_id"}
 
     def test_orphan_description_rejected(self, meta):
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             conn.execute("PRAGMA foreign_keys = ON")
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
@@ -168,14 +175,14 @@ class TestSchema:
                 )
 
     def test_project_summary_is_not_null(self, meta):
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             not_null = {
                 row[1] for row in conn.execute("PRAGMA table_info(project_table)") if row[3]
             }
         assert "project_summary" in not_null
 
     def test_mapping_table_primary_key_is_composite(self, meta):
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             key = [
                 row[1]
                 for row in conn.execute("PRAGMA table_info(project_mapping_table)")
@@ -185,7 +192,7 @@ class TestSchema:
 
     def test_orphan_mapping_row_rejected(self, meta):
         """The FK must be enforced, not merely declared."""
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             conn.execute("PRAGMA foreign_keys = ON")
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
@@ -196,12 +203,12 @@ class TestSchema:
 
     def test_init_is_idempotent(self, db_path, fake_vectors):
         first = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         )
         first.add_project_vector(vec(1), 1, "Alpha", "Alpha summary")
         first.close()
         second = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         )
         assert second.get_all_summary_vector_id() == [1]
         second.close()
@@ -248,7 +255,7 @@ class TestAddProjectVector:
     def test_second_vector_reuses_the_project_row(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         meta.add_project_vector(vec(2), 12, "Alpha", "Alpha summary")
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             count = conn.execute("SELECT COUNT(*) FROM project_table").fetchone()[0]
         assert count == 1
         assert meta.get_all_summary_vector_id() == [11, 12]
@@ -497,7 +504,7 @@ class TestCompensation:
     def test_sqlite_failure_leaves_neither_table_half_written(self, meta):
         """Both metadata tables are one transaction, not two commits."""
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
-        meta._ProjectMetaData__connection.execute(
+        meta.database.connection.execute(
             "DROP TABLE project_mapping_table"
         )
         with pytest.raises(sqlite3.Error):
@@ -514,10 +521,10 @@ class TestIsolation:
     def test_two_projects_may_share_a_vector_id(self, db_path):
         """Content-derived ids collide across projects; the PK is composite."""
         first = ProjectMetaData(
-            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         second.add_project_vector(vec(2), 11, "Beta", "Beta summary")
@@ -529,10 +536,10 @@ class TestIsolation:
 
     def test_one_project_does_not_see_another_s_vectors(self, db_path):
         first = ProjectMetaData(
-            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "Alpha summary")
         assert second.get_all_summary_vector_id() == []
@@ -542,13 +549,13 @@ class TestIsolation:
 
     def test_state_survives_reopen(self, db_path, fake_vectors):
         first = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         )
         first.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "Alpha summary", user_id="u1")
         first.close()
 
         second = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         )
         assert second.get_all_summary_vector_id() == [11, 12]
         assert second.get_project()[1] == "Alpha"
@@ -572,34 +579,37 @@ class TestLifecycle:
 
     def test_close_does_not_build_a_vector_repository(self, db_path):
         """Constructing one opens PostgreSQL — closing must not require it."""
-        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=db_path)
+        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, database=db_path)
         m.close()
 
     def test_construction_does_not_build_a_vector_repository(self, db_path):
-        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=db_path)
+        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, database=db_path)
         assert m._ProjectMetaData__project_vector_handler is None
         m.close()
 
     def test_reads_work_without_a_vector_repository(self, db_path):
-        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=db_path)
+        m = ProjectMetaData(PROJECT_ID, TOPIC_ID, database=db_path)
         assert m.get_all_summary_vector_id() == []
         assert m.get_project() is None
         assert m._ProjectMetaData__project_vector_handler is None
         m.close()
 
-    def test_context_manager_closes(self, db_path, fake_vectors):
+    def test_context_manager_leaves_the_shared_database_open(self, db_path, fake_vectors):
+        """Other owners are still using it; closing a registry releases only
+        the vector store it opened itself."""
         with ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         ) as m:
             m.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
-        assert m._ProjectMetaData__connection is None
+        assert m.database.connection is not None
+        assert m.get_project().project_name == "Alpha"
 
     def test_del_on_a_half_built_object_does_not_raise(self, tmp_path):
         """A failure in __init__ must surface as itself, not AttributeError."""
         broken = tmp_path / "a_file"
         broken.write_text("not a directory")
         with pytest.raises(OSError):
-            ProjectMetaData(PROJECT_ID, TOPIC_ID, db_path=broken / "nested" / "project.sql")
+            ProjectMetaData(PROJECT_ID, TOPIC_ID, database=broken / "nested" / "project.sql")
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +770,7 @@ class TestDescriptions:
 
     def test_a_description_needs_its_project_row(self, meta):
         """The foreign key is enforced, not merely declared."""
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(ProjectNotFound):
             meta.add_description("goal", "No project row exists yet.")
 
     @pytest.mark.parametrize("bad", [None, "", "   ", 7])
@@ -799,10 +809,10 @@ class TestDescriptions:
 
     def test_one_project_does_not_see_another_s_descriptions(self, db_path):
         first = ProjectMetaData(
-            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         second.add_project_vector(vec(2), 12, "Beta", "Beta summary")
@@ -816,10 +826,10 @@ class TestDescriptions:
 
     def test_two_projects_may_share_a_description_id(self, db_path):
         first = ProjectMetaData(
-            "project_a", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_a")
+            "project_a", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_a")
         )
         second = ProjectMetaData(
-            "project_b", TOPIC_ID, db_path=db_path, vector_repository=FakeVectorRepository("project_b")
+            "project_b", TOPIC_ID, database=db_path, vector_repository=FakeVectorRepository("project_b")
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         second.add_project_vector(vec(2), 12, "Beta", "Beta summary")
@@ -833,14 +843,14 @@ class TestDescriptions:
 
     def test_descriptions_survive_a_reopen(self, db_path, fake_vectors):
         first = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         )
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         first.add_description("goal", "Persisted.")
         first.close()
 
         second = ProjectMetaData(
-            PROJECT_ID, TOPIC_ID, db_path=db_path, vector_repository=fake_vectors
+            PROJECT_ID, TOPIC_ID, database=db_path, vector_repository=fake_vectors
         )
         assert second.get_description("goal") == "Persisted."
         second.close()
@@ -858,7 +868,7 @@ class TestTopicId:
 
     def test_mapping_rows_carry_the_topic(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             rows = conn.execute(
                 "select topic_id from project_mapping_table where project_id = ?",
                 (PROJECT_ID,),
@@ -868,7 +878,7 @@ class TestTopicId:
     def test_description_rows_carry_the_topic(self, meta):
         meta.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         meta.add_description("goal", "Answer questions.")
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             rows = conn.execute(
                 "select topic_id from project_description_table where project_id = ?",
                 (PROJECT_ID,),
@@ -877,7 +887,7 @@ class TestTopicId:
 
     def test_batch_writes_carry_the_topic(self, meta):
         meta.add_batch_project_vector([vec(1), vec(2)], [11, 12], "Alpha", "Alpha summary")
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             topics = {
                 row[0]
                 for row in conn.execute("select topic_id from project_mapping_table")
@@ -888,12 +898,12 @@ class TestTopicId:
         """The child tables hold their own copy of topic_id so a topic's vectors
         can be read without a join. Left unsynchronised, those rows keep
         answering for the topic the project has left."""
-        first = ProjectMetaData(PROJECT_ID, "topic_a", db_path=db_path, vector_repository=fake_vectors)
+        first = ProjectMetaData(PROJECT_ID, "topic_a", database=db_path, vector_repository=fake_vectors)
         first.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         first.add_description("goal", "Answer questions.")
         first.close()
 
-        moved = ProjectMetaData(PROJECT_ID, "topic_b", db_path=db_path, vector_repository=fake_vectors)
+        moved = ProjectMetaData(PROJECT_ID, "topic_b", database=db_path, vector_repository=fake_vectors)
         moved.add_project_vector(vec(2), 12, "Alpha", "Alpha summary")
 
         assert moved.get_project().topic_id == "topic_b"
@@ -908,7 +918,7 @@ class TestTopicId:
     @pytest.mark.parametrize("bad", [None, "", "   ", 7])
     def test_an_unusable_topic_id_is_refused(self, db_path, fake_vectors, bad):
         with pytest.raises(ValueError):
-            ProjectMetaData(PROJECT_ID, bad, db_path=db_path, vector_repository=fake_vectors)
+            ProjectMetaData(PROJECT_ID, bad, database=db_path, vector_repository=fake_vectors)
 
 
 class TestTopicWideReads:
@@ -921,7 +931,7 @@ class TestTopicWideReads:
 
         def build(project_id, topic_id):
             m = ProjectMetaData(
-                project_id, topic_id, db_path=db_path,
+                project_id, topic_id, database=db_path,
                 vector_repository=FakeVectorRepository(project_id),
             )
             made.append(m)
@@ -996,7 +1006,7 @@ class TestProjectRow:
 class TestTopicRegistryFunctions:
     def test_list_projects_is_scoped_to_the_topic(self, db_path, fake_vectors):
         for project_id, topic in (("p1", "topic_a"), ("p2", "topic_a"), ("p3", "topic_b")):
-            m = ProjectMetaData(project_id, topic, db_path=db_path,
+            m = ProjectMetaData(project_id, topic, database=db_path,
                                 vector_repository=FakeVectorRepository(project_id))
             m.add_project_vector(vec(1), hash(project_id) % 10_000, project_id.upper(), "s")
             m.close()
@@ -1004,21 +1014,20 @@ class TestTopicRegistryFunctions:
         assert [p.project_id for p in list_topic_projects("topic_b", db_path)] == ["p3"]
 
     def test_list_projects_carries_name_and_summary(self, db_path, fake_vectors):
-        m = ProjectMetaData("p1", "topic_a", db_path=db_path, vector_repository=fake_vectors)
+        m = ProjectMetaData("p1", "topic_a", database=db_path, vector_repository=fake_vectors)
         m.add_project_vector(vec(1), 11, "Alpha", "Alpha summary")
         m.close()
         assert list_topic_projects("topic_a", db_path)[0] == ("p1", "Alpha", "Alpha summary")
 
-    def test_reading_before_anything_is_written_is_empty(self, db_path):
+    def test_reading_before_anything_is_written_is_empty(self, tmp_path):
         """The router asks what a topic holds on the first query, before any
-        writer has created the file. That is an empty answer, not an error."""
-        assert not db_path.exists()
-        assert list_topic_projects("topic_a", db_path) == []
-        assert list_topic_vector_ids("topic_a", db_path) == []
-        assert not db_path.exists(), "a read must not create the registry"
+        project exists. That is an empty answer, not an error."""
+        fresh = tmp_path / "fresh.db"
+        assert list_topic_projects("topic_a", fresh) == []
+        assert list_topic_vector_ids("topic_a", fresh) == []
 
     def test_vector_ids_are_scoped_to_the_topic(self, db_path, fake_vectors):
-        m = ProjectMetaData("p1", "topic_a", db_path=db_path, vector_repository=fake_vectors)
+        m = ProjectMetaData("p1", "topic_a", database=db_path, vector_repository=fake_vectors)
         m.add_project_vector(vec(1), 11, "Alpha", "s")
         m.close()
         assert list_topic_vector_ids("topic_a", db_path) == [("p1", 11)]
@@ -1071,7 +1080,7 @@ class TestSetProjectSummary:
 
 class TestConcurrency:
     def test_the_registry_is_in_wal_mode(self, meta):
-        with sqlite3.connect(meta.db_path) as conn:
+        with sqlite3.connect(meta.database.path) as conn:
             assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
 
     def test_foreign_keys_are_on_the_repositorys_own_connection(self, meta):
@@ -1079,7 +1088,7 @@ class TestConcurrency:
         would silently get foreign keys off."""
         meta.add_project_vector(vec(1), 11, "Alpha", "s")
         with pytest.raises(sqlite3.IntegrityError):
-            with meta._writing() as cursor:
+            with meta.database.writing() as cursor:
                 cursor.execute(
                     "INSERT INTO project_mapping_table "
                     "(project_id, topic_id, project_summary_vector_id, created_at) "
@@ -1151,3 +1160,89 @@ class TestConcurrency:
         for thread in threads:
             thread.join()
         assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# The relationships the database now enforces. While topics and projects lived
+# in separate files, these held only as long as the code kept them by hand.
+# ---------------------------------------------------------------------------
+
+
+class TestTheDatabaseKeepsTheRelationships:
+    def test_a_project_under_an_unknown_topic_is_refused(self, db_path, fake_vectors):
+        m = ProjectMetaData(PROJECT_ID, "never_created", database=db_path,
+                            vector_repository=fake_vectors)
+        with pytest.raises(TopicNotFound):
+            m.add_project_vector(vec(1), 11, "Alpha", "summary")
+        assert m.get_project() is None
+
+    def test_a_refused_project_leaves_no_vector_behind(self, db_path, fake_vectors):
+        """The vector is written first, so the refusal has to undo it."""
+        m = ProjectMetaData(PROJECT_ID, "never_created", database=db_path,
+                            vector_repository=fake_vectors)
+        with pytest.raises(TopicNotFound):
+            m.add_project_vector(vec(1), 11, "Alpha", "summary")
+        assert fake_vectors.store == {}
+
+    def test_the_refusal_keeps_the_database_error_as_its_cause(self, db_path, fake_vectors):
+        m = ProjectMetaData(PROJECT_ID, "never_created", database=db_path,
+                            vector_repository=fake_vectors)
+        with pytest.raises(TopicNotFound) as caught:
+            m.add_project_vector(vec(1), 11, "Alpha", "summary")
+        assert isinstance(caught.value.__cause__, sqlite3.IntegrityError)
+
+    def test_a_description_cannot_name_a_topic_its_project_is_not_in(self, db_path, fake_vectors):
+        """A child row whose topic disagrees with its project's: the pair is the
+        foreign key, so the database refuses it rather than storing a lie the
+        router would then read."""
+        ProjectMetaData(PROJECT_ID, "topic_a", database=db_path,
+                        vector_repository=fake_vectors).add_project_vector(
+            vec(1), 11, "Alpha", "summary")
+        stale = ProjectMetaData(PROJECT_ID, "topic_b", database=db_path,
+                                vector_repository=fake_vectors)
+        with pytest.raises(ProjectInAnotherTopic) as caught:
+            stale.add_description("d1", "a description")
+        assert caught.value.actual_topic_id == "topic_a"
+        assert stale.get_descriptions() == []
+
+    def test_moving_a_project_needs_no_code_to_move_its_children(self, db_path, fake_vectors):
+        """ON UPDATE CASCADE, not an UPDATE loop: a row written straight into a
+        child table follows its project too."""
+        m = ProjectMetaData(PROJECT_ID, "topic_a", database=db_path,
+                            vector_repository=fake_vectors)
+        m.add_project_vector(vec(1), 11, "Alpha", "summary")
+        with m.database.writing() as cursor:
+            cursor.execute(
+                "insert into project_description_table values (?, ?, ?, ?, ?)",
+                ("topic_a", PROJECT_ID, "raw", "written directly", "now"),
+            )
+            cursor.execute(
+                "update project_table set topic_id = 'topic_b' where project_id = ?",
+                (PROJECT_ID,),
+            )
+        with m.database.reading() as cursor:
+            topics = {r[0] for r in cursor.execute(
+                "select topic_id from project_description_table where project_id = ?",
+                (PROJECT_ID,))}
+        assert topics == {"topic_b"}
+
+    def test_a_soft_deleted_topic_keeps_its_projects(self, db_path, fake_vectors):
+        """Soft deletion keeps the row, so the reference still holds."""
+        from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
+            TopicPoolMetaHandler,
+        )
+
+        m = ProjectMetaData(PROJECT_ID, "topic_a", database=db_path,
+                            vector_repository=fake_vectors)
+        m.add_project_vector(vec(1), 11, "Alpha", "summary")
+        TopicPoolMetaHandler(db_path).soft_delete("topic_a")
+        assert m.get_project().topic_id == "topic_a"
+
+    def test_a_topic_with_projects_cannot_be_removed_outright(self, db_path, fake_vectors):
+        m = ProjectMetaData(PROJECT_ID, "topic_a", database=db_path,
+                            vector_repository=fake_vectors)
+        m.add_project_vector(vec(1), 11, "Alpha", "summary")
+        with pytest.raises(sqlite3.IntegrityError):
+            with m.database.writing() as cursor:
+                cursor.execute("delete from topics_mapping_table where topic_id = 'topic_a'")
+

@@ -109,6 +109,26 @@ def synthetic_corpus(sectioned: int, flat: int) -> dict:
     return corpus
 
 
+def register_project(path, project_id, topic_id="stress_topic"):
+    """A memory database with this project registered, as its rows require."""
+    from memory.memory_database import MemoryDatabase
+    from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
+        ProjectMetaData,
+    )
+    from memory.topic_pool.topic_pool_repo.topic_pool_meta_handler import (
+        TopicPoolMetaHandler,
+    )
+
+    database = MemoryDatabase.of(path)
+    topics = TopicPoolMetaHandler(database)
+    if not topics.has_topic_id(topic_id):
+        topics.create_new_topic(topic_id, topic_id, None)
+    ProjectMetaData(project_id, topic_id, database, mock.MagicMock()).add_project_vector(
+        np.zeros(128, dtype=np.float32), 1, project_id, f"{project_id} summary"
+    )
+    return database
+
+
 def table_counts(db_path: str) -> dict:
     connection = sqlite3.connect(db_path)
     try:
@@ -380,6 +400,10 @@ class TestIngestionUnderLoad(StressTestCase):
 class TestConversationStoreUnderConcurrency(StressTestCase):
 
     PROJECT_ID = "stress_project"
+
+    def setUp(self):
+        super().setUp()
+        self.memory_db = register_project(self.tmp_dir / "memory.db", self.PROJECT_ID)
     PROJECT_NAME = "StressProject"
     APPEND_WORKERS = 10
     TURNS_PER_WORKER = 20
@@ -398,9 +422,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         the same sequence_number, which is a primary key — one turn is lost and
         the conversation silently develops a hole.
         """
-        repository = FullConversationRepository(
-            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME, "conv_abc"
-        )
+        repository = FullConversationRepository(self.PROJECT_ID, self.PROJECT_NAME, "conv_abc", self.memory_db)
 
         def worker(worker_id):
             return repository.append_turns(
@@ -436,8 +458,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         errors = []
 
         def worker(worker_id):
-            repository = ConversationVectorMetaDataRepository(                self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
-            )
+            repository = ConversationVectorMetaDataRepository(self.PROJECT_ID, "conv_abc", self.memory_db)
             try:
                 for row in range(self.ROWS_PER_WORKER):
                     repository.insert_cumulative_vector_meta_data(
@@ -463,7 +484,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         elapsed = time.time() - started
 
         expected = self.META_WORKERS * self.ROWS_PER_WORKER
-        reader = ConversationVectorMetaDataRepository(self.tmp_dir, self.PROJECT_ID, "conv_abc")
+        reader = ConversationVectorMetaDataRepository(self.PROJECT_ID, "conv_abc", self.memory_db)
         try:
             stored = reader.get_cumulative_vector_meta_data_ids()
         finally:
@@ -483,8 +504,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         lifetime and hands the same instance to ConversationSummary — so it has
         to survive being driven from more than one thread at a time.
         """
-        repository = ConversationVectorMetaDataRepository(            self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
-        )
+        repository = ConversationVectorMetaDataRepository(self.PROJECT_ID, "conv_abc", self.memory_db)
         self.addCleanup(repository.close)
         errors = []
 
@@ -532,8 +552,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         check_same_thread off on its own would be worse than the ProgrammingError
         it silences.
         """
-        repository = ConversationVectorMetaDataRepository(            self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
-        )
+        repository = ConversationVectorMetaDataRepository(self.PROJECT_ID, "conv_abc", self.memory_db)
         self.addCleanup(repository.close)
         taken_id = 999999
         repository.insert_cumulative_vector_meta_data(
@@ -595,7 +614,7 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         committed = self.META_WORKERS * (
             self.SNAPSHOTS_PER_WORKER - doomed_per_worker
         )
-        connection = sqlite3.connect(repository.db_path)
+        connection = sqlite3.connect(repository.database.path)
         try:
             chunk_rows = connection.execute(
                 "SELECT count(*) FROM summary_chunks"
@@ -627,12 +646,10 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
         every writer fail with `database is locked`. WAL is what removes that;
         this asserts the whole workload runs clean.
         """
-        conversation = FullConversationRepository(
-            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME, "conv_abc"
-        )
-        metadata = ConversationVectorMetaDataRepository(self.tmp_dir, self.PROJECT_ID, "conv_abc")
+        conversation = FullConversationRepository(self.PROJECT_ID, self.PROJECT_NAME, "conv_abc", self.memory_db)
+        metadata = ConversationVectorMetaDataRepository(self.PROJECT_ID, "conv_abc", self.memory_db)
         self.addCleanup(metadata.close)
-        self.assertEqual(metadata.journal_mode, "wal")
+        self.assertEqual(metadata.database.journal_mode, "wal")
 
         metadata.batch_insert_cumulative_vector_meta_data(
             [
@@ -684,13 +701,16 @@ class TestConversationStoreUnderConcurrency(StressTestCase):
 class TestSnapshotNavigationUnderLoad(StressTestCase):
 
     PROJECT_ID = "stress_project"
+
+    def setUp(self):
+        super().setUp()
+        self.memory_db = register_project(self.tmp_dir / "memory.db", self.PROJECT_ID)
     PROJECT_NAME = "StressProject"
     SNAPSHOTS = 120
     SEARCHES = 100
 
     def build_history(self):
-        repository = ConversationVectorMetaDataRepository(            self.tmp_dir, self.PROJECT_ID, conversation_id="conv_abc"
-        )
+        repository = ConversationVectorMetaDataRepository(self.PROJECT_ID, "conv_abc", self.memory_db)
         self.addCleanup(repository.close)
         repository.batch_insert_cumulative_vector_meta_data(
             [
@@ -708,7 +728,7 @@ class TestSnapshotNavigationUnderLoad(StressTestCase):
 
     def make_snapshot(self, repository, vectors):
         snapshot = SnapShot(
-            self.tmp_dir, self.PROJECT_ID, self.PROJECT_NAME,
+            self.PROJECT_ID, self.PROJECT_NAME, database=self.memory_db,
             conversation_id="conv_abc", meta_repo=repository
         )
         vector_manager = mock.MagicMock()
