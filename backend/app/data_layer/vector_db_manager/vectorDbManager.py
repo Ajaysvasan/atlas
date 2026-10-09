@@ -1,12 +1,11 @@
+"""The vector index: a built generation, plus what was ingested since it was built."""
+
 import threading
 from typing import List, Type, Union
 
 import numpy
 
-from config import Config, get_logger
-from data_layer.datalayer_exceptions.datalayer_exceptions import (
-    IndexDirectoryDoesNotExists,
-)
+from config import get_logger
 from data_layer.ingestion.nodes.nodes import EmbeddedChunk
 from data_layer.vector_db_manager.vectorDB_diskann import VectorDb_diskann as vdap
 
@@ -35,7 +34,7 @@ class VectorDbManager:
         self.num_threads = num_threads
         self.k_neighbors = k_neighbors
         logger.info(
-            "Initializing VectorDbManager (distance=%s, dims=%s, max_vectors=%s, threads=%s)",
+            "Initializing VectorDbManager (distance=%s, dims=%s, recent capacity=%s, threads=%s)",
             distance_metrics,
             dimensions,
             max_vectors,
@@ -50,7 +49,17 @@ class VectorDbManager:
             self.graph_degree,
             self.num_threads,
         )
+        self.base = None
         self.lock = threading.Lock()
+
+    def use_base(self, base) -> None:
+        """Search a built generation alongside the recent vectors."""
+        self.base = base
+
+    @property
+    def through(self) -> int:
+        """The highest label the built generation holds; 0 without one."""
+        return self.base.through if self.base is not None else 0
 
     def __insert_vector(self, vector, vector_id) -> None:
         with self.lock:
@@ -81,50 +90,81 @@ class VectorDbManager:
         )
 
     def count(self) -> int:
+        built = self.base.count if self.base is not None else 0
+        return built + self.recent_count()
+
+    def recent_count(self) -> int:
         return self.vector_db.count()
 
-    def restore(self, store, after: int = 0) -> int:
-        """Index the store's vectors labelled above `after`; returns the highest label now indexed.
+    def restore(self, source, after: int = 0) -> int:
+        """Index the source's vectors labelled above `after`, up to capacity; returns the last label taken.
 
         Labels only grow, so passing back what this returned indexes just what
-        was ingested since, rather than rebuilding the whole graph.
+        was ingested since. Whatever does not fit waits for the next build.
         """
         through, restored = int(after), 0
-        for labels, vectors in store.vectors(after=through):
-            with self.lock:
-                self.vector_db.batch_insert(vectors, labels)
-            restored += len(labels)
-            through = int(labels[-1])
+        for page in source.pages(after=through):
+            room = self.max_vectors - self.recent_count()
+            if len(page.labels) > room:
+                if room > 0:
+                    with self.lock:
+                        self.vector_db.batch_insert(page.vectors[:room], page.labels[:room])
+                    restored += room
+                    through = int(page.labels[room - 1])
+                logger.warning(
+                    "The recent index is full: %d vector(s) wait for the next index "
+                    "build and are found by keyword search only until then",
+                    source.pending(through),
+                )
+                break
+            if len(page.labels):
+                with self.lock:
+                    self.vector_db.batch_insert(page.vectors, page.labels)
+                restored += len(page.labels)
+            through = page.through
         if restored:
             logger.info("Indexed %d stored vector(s), through label %d", restored, through)
-        unusable = store.missing_vectors()
-        if unusable:
+        if source.missing:
             logger.warning(
-                "%d label(s) have no usable stored vector and cannot be found "
-                "by meaning until they are re-embedded",
-                unusable,
+                "%d label(s) have no stored vector and cannot be found by meaning "
+                "until their documents are ingested again",
+                source.missing,
             )
         return through
 
-    def __within_count(self, k_neighbors: int | None) -> int:
-        # Never more than the index holds. diskannpy returns k slots regardless
-        # and fills the surplus from uninitialised memory: labels that can be
-        # real ones, at distance 0.0, so they sort ahead of every true result.
-        return min(k_neighbors or self.k_neighbors, self.count())
-
     def search_vector(self, query, k_neighbors: int | None = None):
-        k = self.__within_count(k_neighbors)
+        k = int(k_neighbors or self.k_neighbors)
         if k < 1:
             return numpy.empty(0, numpy.uint32), numpy.empty(0, numpy.float32)
-        return self.vector_db.search_vector(query, k, self.complexity)
+        found = []
+        base = self.base
+        if base is not None:
+            found.append(base.search(query, k, self.complexity))
+        # Never more than the recent index holds. diskannpy returns k slots
+        # regardless and fills the surplus from uninitialised memory: labels
+        # that can be real ones, at distance 0.0, sorted ahead of every true result.
+        recent = min(k, self.recent_count())
+        if recent > 0:
+            labels, distances = self.vector_db.search_vector(query, recent, self.complexity)
+            found.append((numpy.asarray(labels, numpy.uint32),
+                          numpy.asarray(distances, numpy.float32)))
+        return self.__nearest(found, k)
+
+    @staticmethod
+    def __nearest(found, k: int):
+        if not found:
+            return numpy.empty(0, numpy.uint32), numpy.empty(0, numpy.float32)
+        labels = numpy.concatenate([part[0] for part in found]).astype(numpy.uint32)
+        distances = numpy.concatenate([part[1] for part in found]).astype(numpy.float32)
+        order = numpy.argsort(distances, kind="stable")[:k]
+        return labels[order], distances[order]
 
     def batch_search_vectors(self, queries, k_neighbors: int | None = None):
-        k = self.__within_count(k_neighbors)
-        if k < 1:
-            rows = len(queries)
-            return (numpy.empty((rows, 0), numpy.uint32),
-                    numpy.empty((rows, 0), numpy.float32))
-        return self.vector_db.batch_search_vector(queries, k, self.complexity)
+        rows = [self.search_vector(query, k_neighbors) for query in queries]
+        width = min((len(labels) for labels, _ in rows), default=0)
+        labels = numpy.array([r[0][:width] for r in rows], numpy.uint32).reshape(len(rows), width)
+        distances = numpy.array([r[1][:width] for r in rows], numpy.float32).reshape(len(rows), width)
+        return labels, distances
 
     def delete_vector(self, vector_id) -> None:
         with self.lock:
@@ -133,22 +173,3 @@ class VectorDbManager:
     def delete_vectors(self, vector_ids) -> None:
         with self.lock:
             self.vector_db.delete_vectors(vector_ids)
-
-    def save(self, save_path=Config.INDEX_PATH):
-        logger.info("Saving VectorDbManager index to path '%s'...", save_path)
-        with self.lock:
-            self.vector_db.save(save_path)
-        logger.info("VectorDbManager index saved successfully.")
-
-    def load(self, load_path=Config.INDEX_PATH):
-        try:
-            logger.info("Loading VectorDbManager index from path '%s'...", load_path)
-            with self.lock:
-                idx = self.vector_db.load(load_path)
-            logger.info("VectorDbManager index loaded successfully.")
-            return self.vector_db.dynamic_dann
-        except IndexDirectoryDoesNotExists:
-            logger.warning(
-                "Index directory '%s' does not exist. Returning None.", load_path
-            )
-            return None

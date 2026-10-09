@@ -4,7 +4,7 @@ See README.md in this directory.
 """
 
 import os
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import psycopg
@@ -30,6 +30,15 @@ def register_vector_types(conn) -> None:
     from pgvector.psycopg import register_vector
 
     register_vector(conn)
+
+
+def as_array(embedding) -> NDArray[float32]:
+    """A stored embedding as float32, whichever type pgvector handed back."""
+    # pgvector >= 0.4 returns its own Vector, which numpy cannot coerce; older
+    # versions already return an array.
+    if hasattr(embedding, "to_numpy"):
+        embedding = embedding.to_numpy()
+    return np.asarray(embedding, dtype=float32)
 
 
 class VectorRepository:
@@ -169,12 +178,17 @@ class VectorRepository:
         result = self.curr.fetchone()
         if result is None:
             raise VectorNotFoundEror(vector_id)
-        embedding = result[0]
-        # pgvector >= 0.4 hands back its own Vector, which numpy cannot coerce;
-        # older versions already return an array. Accept either.
-        if hasattr(embedding, "to_numpy"):
-            embedding = embedding.to_numpy()
-        return np.asarray(embedding, dtype=float32)
+        return as_array(result[0])
+
+    def __get_vectors_by_id(self, vector_ids: List[int]) -> Dict[int, NDArray[float32]]:
+        # The cast matters: psycopg sends a list of large ints as numeric[], and
+        # bigint = numeric cannot use the primary key's index.
+        query = """
+        select vector_id, embedding from vectors
+        where project_id = %s and vector_id = any(%s::bigint[]);
+        """
+        self.curr.execute(query, (self.project_id, [int(v) for v in vector_ids]))
+        return {int(row[0]): as_array(row[1]) for row in self.curr.fetchall()}
 
     def __get_vectors(self, vector_ids: List[uint32]) -> NDArray[float32]:
         vectors = []
@@ -221,6 +235,12 @@ class VectorRepository:
 
     def batch_search(self, vector_ids: List[uint32]) -> NDArray[float32]:
         return self.__get_vectors(vector_ids)
+
+    def vectors_for(self, vector_ids: List[int]) -> Dict[int, NDArray[float32]]:
+        """Every stored vector among `vector_ids`, in one query; ids not stored are absent."""
+        if not len(vector_ids):
+            return {}
+        return self.__get_vectors_by_id(list(vector_ids))
 
     def close(self):
         self.curr.close()

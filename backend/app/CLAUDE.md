@@ -45,7 +45,7 @@ uv run pytest test/live_testing/ -v               # Real PostgreSQL; self-skippi
 uv run pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v
 ```
 
-**1657 passed** is the expected result. If 8 of them skip, the live tests could
+**1723 passed** is the expected result. If 8 of them skip, the live tests could
 not reach a server; `-rs` prints which precondition failed, and
 `scripts/smoke.py` checks the whole setup and names what is missing.
 
@@ -58,20 +58,29 @@ code against a real server and skips itself when there is none. The root
 every mock stand down where the real driver exists; without it the live tests
 skip even on a machine that has a server.
 
+The suite reads the real `.env`, so the root `conftest.py` also keeps it off the
+developer's data: per-test `Config.DB_PATH`, `Config.INDEX_PATH` and
+`Config.MEMORY_DB`, and an in-memory chunk vector store (the `chunk_vectors`
+fixture) in place of PostgreSQL. **Never call `monkeypatch.undo()`** — the
+fixture instance is shared with those redirects, so it reverts them and the rest
+of the test reaches the real database (bug 7.7); scope a temporary patch with
+`pytest.MonkeyPatch.context()`. A test enforces this.
+
 ## Architecture
 
 ### Data Ingestion Pipeline
 
-`FileLoader → TextExtractor → TextNormalizer → Chunker → EmbeddingManager → VectorDbManager`
+`FileLoader → TextExtractor → TextNormalizer → Chunker → EmbeddingManager → pgvector + vector_meta_data → IndexGenerations`
 
 All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 
 - **FileLoader** (`TextFileProcessor/file_loader.py`): Recursively scans directories, returns `Dict[extension, List[Path]]`. The policy is a denylist, not an allowlist: anything that is not a known binary format (`NON_DOCUMENT_EXTENSIONS`) is offered to the extractor. Skips VCS/build directories, dotfiles, empty files and files over `max_file_size` (64 MB), and resolves symlinked directories against a visited set so a link to an ancestor cannot loop.
 - **TextExtractor** (`TextFileProcessor/text_extractor.py`): Dedicated readers for `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`/`.xml`, `.json`, `.ipynb`, and the textract-backed binaries (`.doc`, `.odt`, `.rtf`, `.epub`, …); **every other extension falls back to decoded text**, so source code, logs, config, TeX and unknown formats all ingest. Encoding is BOM → utf-8 → chardet → latin-1; content with NUL bytes raises `InvalidFileType`. Word heading styles, HTML `<h1>`–`<h6>` and PowerPoint slide titles are emitted as markdown `#` headings so formats with no heading syntax still produce sections.
 - **TextNormalizer** (`normalizer/normalizer.py`): Cleans text **line by line**, preserving paragraph structure, and returns `NormalizedContent` with a `sections` tuple of `SectionSpan` offsets into the normalized content. Headings are detected on the raw lines — before lowercasing or punctuation stripping — in four shapes: markdown ATX, setext underline, numbered (`1.`, `2.3`), and ALL CAPS (guarded by a letter-ratio test so table rows are not mistaken for headings). Code fences are skipped.
-- **Chunker** (`Chunker/chunker.py`): Routes to `HierarchicalChunker` (documents with sections) or `RecursiveChunker` (flat docs). chunk_size=256, overlap=20. Both chunkers window text through `Chunker/windowing.py::sliding_windows`, which breaks on word boundaries and guarantees `len(chunk) <= chunk_size`. Chunk, context and section ids all bind position as well as content, so repeated text does not collide; all writes are `on conflict do nothing`, so re-ingesting an unchanged folder is a no-op rather than a `UNIQUE` failure — for labels too: `vector_meta_data` is unique on `(chunkId, embeddingModelUsed)` and allocation hands a known chunk its existing label (bug 5.21).
-- **EmbeddingManager** (`embedding/EmbeddingManager.py`): SentenceTransformer `all-MiniLM-L6-v2`, 128-dim float32, batch size 64, MD5-based vector IDs
-- **VectorDbManager** (`vector_db_manager/vectorDbManager.py`): Thread-safe DiskANN wrapper, k_neighbors=9, l2 distance, up to 1M vectors. Held in memory and rebuilt from the vectors stored in `vector_meta_data` (`restore`), because diskannpy 0.7.0 cannot load an index it saved (bug 5.20); `save()`/`load()` exist but nothing may rely on them. `search_vector` never asks for more than `count()` (5.18), and the graph is built with `saturate_graph=True` (5.19)
+- **Chunker** (`Chunker/chunker.py`): Routes to `HierarchicalChunker` (documents with sections) or `RecursiveChunker` (flat docs). chunk_size=256, overlap=20. Both chunkers window text through `Chunker/windowing.py::sliding_windows`, which breaks on word boundaries and guarantees `len(chunk) <= chunk_size`. Chunk, context and section ids all bind position as well as content, so repeated text does not collide; all writes are `on conflict do nothing`, so re-ingesting an unchanged folder is a no-op rather than a `UNIQUE` failure — for labels too: `vector_meta_data` is unique on `chunkId` and on `vectorId`, and inserting a known chunk hands back its existing label (bug 5.21).
+- **EmbeddingManager** (`embedding/EmbeddingManager.py`): SentenceTransformer `all-MiniLM-L6-v2`, 128-dim float32, batch size 64. Vector ids come from `embedding/vector_ids.py::vector_id_for(chunk_id)` — MD5 of the chunk id, 63 bits
+- **Vectors and labels** (`IngestionPipeline.batch_insert_vectors`): the vector goes to pgvector under its vector id (project id `Config.GLOBAL_VECTOR_SCOPE`, `"global"`) **before** `vector_meta_data` allocates its DiskANN label, so a label never exists without a stored vector. The vector id is **required** — `MissingVectorId` / `MalformedVectorId`, and the column is `NOT NULL` with a `CHECK` — and `label` is the only number generated (bug 5.22). `vector_meta_data` holds no vectors
+- **The DiskANN index** (`vector_db_manager/`): a **built generation** on disk (`index_generations.py`) — a static memory index while it fits `VECTOR_INDEX_RAM_MB` (512), a static disk index with a RAM-budgeted node cache past it — opened, not rebuilt, at startup; plus the vectors ingested since, in a dynamic index capped at `RECENT_VECTOR_CAPACITY` (20k). `VectorDbManager` searches both and merges by distance. Ingestion builds a new generation every `INDEX_REBUILD_AT` (10k) vectors, in a separate process, and swaps `CURRENT` atomically. diskannpy 0.7.0 cannot save its dynamic index at all (5.20). **Every allocation is admitted against free memory first** (`memory_guard.py`; Linux overcommits, so a `MemoryError` never comes): short of memory, disk, a usable generation or PostgreSQL, the index degrades — smaller cache, previous generation, built index only, keyword search alone — and never takes the app down; the builder sets its own `oom_score_adj` to 1000. No search asks a part for more than it holds (5.18, 5.24), a disk index is never searched with one thread (it hangs, 5.24), and the recent index is built with `saturate_graph=True` (5.19). See `vector_db_manager/README.md`
 
 ### Memory Layer
 
@@ -95,10 +104,10 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 
 | Store | Path | Purpose |
 |-------|------|---------|
-| DiskANN index | in memory | Approximate nearest neighbor search, rebuilt from `vector_meta_data` on first search. `data/disk_ann_index/` is no longer written (bug 5.20) |
-| SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one; plus `vector_meta_data` — each DiskANN label, its chunk, and the vector itself (`vectorMetaDataRepository.py`) |
+| DiskANN index | `data/disk_ann_index/` | `gen-NNNNNN/` built generations (the current one and the one before, as a fallback) and `CURRENT` naming the one in use; plus an in-memory index of what was ingested since |
+| SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one; plus `vector_meta_data` — each DiskANN label, its vector id and its chunk, no vectors (`vectorMetaDataRepository.py`) |
 | SQLite (memory) | `data/memory/memory_layer/memory_layer.db` | **Every** memory table, one file (`memory_database.py`): topics, the project registry and its snapshot chain, conversation turns and snapshot metadata, the conversation mapping. Foreign keys enforced across all of them. WAL journal (so `.db-wal` and `.db-shm` sit alongside it), `synchronous=NORMAL`. The old `data/topic_db/`, `data/project_db/` and `data/memory_mapping/` files are no longer read |
-| PostgreSQL | localhost:5432, DB `Vectors` | Vector repository via pgvector (`vectorRepository.py`) |
+| PostgreSQL | localhost:5432, DB `Vectors` | Every vector, via pgvector (`vectorRepository.py`): document chunks under project id `"global"`, the memory layer's under theirs |
 
 PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Every one is `DB_`-prefixed on purpose — `load_dotenv()` does not override a variable already in the environment, and the unprefixed names are ones other things set: login shells export `USER`, conda exports `HOST` as its compiler triplet, PaaS platforms set `PORT` (bug 6.2).
 
@@ -148,13 +157,14 @@ Central config class with constants:
 - `EMBEDDING_MODEL`: `sentence-transformers/all-MiniLM-L6-v2`
 - `EMBEDDING_DIMENSIONS`: 128
 - `K_NEIGHBORS`: 9
-- `MAX_VECTORS`: 1,000,000
+- `MAX_VECTORS`: 1,000,000 — the corpus size designed for; no index is sized to it
+- `VECTOR_INDEX_RAM_MB` (512), `RECENT_VECTOR_CAPACITY` (20,000), `INDEX_REBUILD_AT` (10,000), `MEMORY_HEADROOM_MB` (256), `GLOBAL_VECTOR_SCOPE` (`"global"`)
 - `INDEX_PATH`, `DB_PATH`, `CONVERSATION` paths
 - `LOG_FILE`, `DEBUG`: defaults `main.py` hands to `configure_logging()`
 
 ### Exception Hierarchy
 
-- Data layer: `InvalidFileType`, `VectorInsertionError`, `DuplicateVectorException`, `InvalidEmbeddingArgument`, etc. in `data_layer/datalayer_exceptions/`
+- Data layer: `InvalidFileType`, `VectorInsertionError`, `DuplicateVectorException`, `InvalidEmbeddingArgument`, `MissingVectorId`, `MalformedVectorId`, `VectorIdConflict`, `VectorStoreUnavailable`, etc. in `data_layer/datalayer_exceptions/`
 - Memory layer: `InvalidCursorException`, `NullPointerException`, `MisMatchCount` in `memory/memory_pool_exceptions.py`
 
 ## Known Bugs (see `bugs.md` and `production_impact_report.md`)
@@ -167,7 +177,7 @@ Central config class with constants:
 - Bug 4.3: `search()` no longer moves the instance cursors — `__find_best_snapshot` scans with local ones
 - Bug 4.4: a failed similarity search returns `None`, not `[-1]`
 - Vector ids are ints masked into the signed 64-bit range (`Config.VECTOR_ID_MASK`), derived from `chunk_id` rather than chunk text
-- The DiskANN index survives a restart: it is rebuilt from the vectors stored in `vector_meta_data` (bug 5.20, the old P3), and its graph is saturated so it can be searched at all (5.19)
+- The DiskANN index survives a restart: built generations are opened from disk, and only vectors ingested since are loaded (bugs 5.20, 5.23, the old P3); the recent index's graph is saturated so it can be searched at all (5.19)
 
 ## Docs
 

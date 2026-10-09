@@ -1,10 +1,15 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import numpy as np
+
+from data_layer.datalayer_exceptions.datalayer_exceptions import VectorStoreUnavailable
+from data_layer.vector_db_manager import stored_vectors
+from data_layer.vector_db_manager.index_generations import BuildOutcome, IndexGenerations
 from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
     VectorMetaDataRepository,
+    checked_vector_id,
 )
-from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
 from config import Config, get_logger, log_timing
 
@@ -21,32 +26,20 @@ logger = get_logger(__name__)
 
 # I Don't need any more abstraction here since I am not mutating the data rather just providing an simplified interface that I can use
 class IngestionPipeline:
-    def __init__(self):
+    def __init__(self, vector_store=None, index_path: str | Path | None = None):
         logger.info("Building ingestion pipeline")
         self.f_loader = FileLoader()
         self.t_extractor = TextExtractor()
         self.t_normalizer = NormalizationProfiles.rag_ingestion()
         self.chunker = Chunker()
         self.embedder = EmbeddingManager()
-        self.vector_db = VectorDbManager(
-            distance_metrics=Config.DISTANCE_METRIC,
-            vector_dtype=Config.VECTOR_DTYPE,
-            dimensions=Config.EMBEDDING_DIMENSIONS,
-            max_vectors=Config.MAX_VECTORS,
-            complexity=Config.COMPLEXITY,
-            graph_degree=Config.GRAPH_DEGREE,
-            num_threads=Config.NUM_THREADS,
-            k_neighbors=Config.K_NEIGHBORS,
-        )
-        # Without this, a search result is a vector id and nothing else: the id
-        # is a one-way hash of the chunk id, so there is no way back to the text
-        # (bug 5.3). It shares the chunk store's database file so retrieval can
-        # reach the text in one join.
+        # Without this, a search result is a label and nothing else (bug 5.3).
+        # It shares the chunk store's database file so retrieval can reach the
+        # text in one join.
         self.vector_meta = VectorMetaDataRepository(self.chunker.db_path)
-        # Labels this pipeline's own index already holds. Allocation hands a
-        # chunk seen before its old label back (bug 5.21), and DiskANN refuses
-        # a label it already has, so a repeat must not be inserted twice.
-        self._indexed_labels: set = set()
+        self.vector_store = vector_store
+        self._owns_store = vector_store is None
+        self.index_path = index_path
         logger.debug("Ingestion pipeline ready")
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:
@@ -93,40 +86,49 @@ class IngestionPipeline:
         with log_timing(logger, "embedding", chunks=len(arg)):
             return self.embedder.embed(arg)
 
-    def ingest_vector(self, embedded_value: EmbeddedChunk) -> None:
-        label = self.vector_meta.allocate(
-            embedded_value.meta_data.chunk_id, embedded_value.vector
-        )
-        if label in self._indexed_labels:
-            return
-        self.vector_db.insert(embedded_value, vector_id=label)
-        self._indexed_labels.add(label)
+    def ingest_vector(self, embedded_value: EmbeddedChunk) -> int:
+        return self.batch_insert_vectors([embedded_value])[0]
 
     def batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> List[int]:
-        """Index the vectors under labels the mapping table hands out.
+        """Store the vectors under their vector ids, then hand each its DiskANN label.
 
-        The label is allocated rather than taken from the EmbeddedChunk: that id
-        is masked into 63 bits for pgvector, and DiskANN indexes uint32 labels.
-        Allocating also means the mapping row exists before the vector does, so
-        a hit can never arrive for a chunk the table has not heard of. The
-        vector is stored in that same row: it is what rebuilds the index after a
-        restart, since a saved DiskANN index cannot be loaded back (bug 5.20).
+        The vector goes to PostgreSQL first, so a label never exists for a
+        vector that was not stored. Building the index from them is
+        `maintain_index()`'s, which runs once enough have accumulated.
         """
         if not embedded_objs:
             return []
-        labels = self.vector_meta.allocate_many(
-            [e.meta_data.chunk_id for e in embedded_objs],
-            [e.vector for e in embedded_objs],
-        )
-        fresh: dict = {}
-        for embedded, label in zip(embedded_objs, labels):
-            if label not in self._indexed_labels:
-                fresh.setdefault(label, embedded)
-        if fresh:
-            with log_timing(logger, "vector insert", vectors=len(fresh)):
-                self.vector_db.batch_insert(list(fresh.values()), vector_ids=list(fresh))
-            self._indexed_labels.update(fresh)
+        chunk_ids = [e.meta_data.chunk_id for e in embedded_objs]
+        vector_ids = [checked_vector_id(e.vector_id, c) for e, c in zip(embedded_objs, chunk_ids)]
+        vectors = np.stack([np.asarray(e.vector, dtype=np.float32) for e in embedded_objs])
+        with log_timing(logger, "vector store", vectors=len(vector_ids)):
+            self.__store().batch_insert(vector_ids, vectors)
+        labels = self.vector_meta.batch_insert(vector_ids, chunk_ids)
+        self.maintain_index()
         return labels
 
+    def maintain_index(self, force: bool = False) -> BuildOutcome | None:
+        """Rebuild the index once INDEX_REBUILD_AT vectors wait outside it, or now if forced."""
+        generations = IndexGenerations(self.index_path)
+        waiting = self.vector_meta.pending(generations.through())
+        if waiting == 0 or (waiting < Config.INDEX_REBUILD_AT and not force):
+            return None
+        with log_timing(logger, "index build", waiting=waiting):
+            return generations.build(
+                stored_vectors.StoredVectors(self.vector_meta, self.__store())
+            )
+
+    def __store(self):
+        if self.vector_store is None:
+            try:
+                self.vector_store = stored_vectors.chunk_vector_store()
+            except Exception as error:
+                raise VectorStoreUnavailable(error) from error
+        return self.vector_store
+
     def close(self) -> None:
+        """Release what this pipeline opened. A vector store handed in stays open."""
         self.vector_meta.close()
+        if self._owns_store and self.vector_store is not None:
+            self.vector_store.close()
+            self.vector_store = None

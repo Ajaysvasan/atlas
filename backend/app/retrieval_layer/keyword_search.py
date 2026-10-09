@@ -122,7 +122,7 @@ class KeywordSearch:
 
         # bm25 returns a negative number, more negative being a better match,
         # so this ranks the same way a distance does.
-        labels = self.mapping.vector_ids_for([row[0] for row in rows])
+        labels = self.mapping.labels_for([row[0] for row in rows])
         pairs = [
             (labels[chunk_id], score)
             for chunk_id, score in rows

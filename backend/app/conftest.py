@@ -91,9 +91,54 @@ def _chunk_store_per_test(_memory_database_dir, monkeypatch):
 
     from config import Config
 
-    monkeypatch.setattr(
-        Config, "DB_PATH", str(_memory_database_dir / f"chunks-{uuid.uuid4().hex}")
-    )
+    test = uuid.uuid4().hex
+    monkeypatch.setattr(Config, "DB_PATH", str(_memory_database_dir / f"chunks-{test}"))
+    monkeypatch.setattr(Config, "INDEX_PATH", str(_memory_database_dir / f"index-{test}"))
+
+
+class InMemoryVectorStore:
+    """Stands in for pgvector's `vectors` table, as the chunk vector store uses it."""
+
+    def __init__(self) -> None:
+        self.rows = {}
+        self.down = False
+        self.closed = False
+
+    def __reachable(self) -> None:
+        if self.down:
+            raise ConnectionError("the vector store is down")
+
+    def batch_insert(self, vector_ids, vectors) -> None:
+        import numpy as np
+
+        self.__reachable()
+        for vector_id, vector in zip(vector_ids, vectors):
+            self.rows.setdefault(int(vector_id), np.asarray(vector, dtype=np.float32).copy())
+
+    def insert(self, vector_id, vector) -> None:
+        self.batch_insert([vector_id], [vector])
+
+    def vectors_for(self, vector_ids):
+        self.__reachable()
+        return {int(v): self.rows[int(v)] for v in vector_ids if int(v) in self.rows}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def chunk_vectors(monkeypatch):
+    """Document chunk vectors go to memory, never to the real PostgreSQL.
+
+    The suite reads the developer's own .env, so without this the pipeline's
+    end-to-end test would write into their database. The live tests reach
+    PostgreSQL through VectorRepository directly, which this leaves alone.
+    """
+    from data_layer.vector_db_manager import stored_vectors
+
+    store = InMemoryVectorStore()
+    monkeypatch.setattr(stored_vectors, "chunk_vector_store", lambda: store)
+    return store
 
 
 # --------------------------------------------------------------------------- #

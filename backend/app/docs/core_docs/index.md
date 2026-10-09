@@ -30,9 +30,9 @@ Welcome to the official API documentation for the **Final Year Project Backend A
 
 ### 3. Data Layer: Vector Database & Exceptions
 - [Vector Database Management (`VectorDbManager` & `VectorDb_diskann`)](../data_layer_docs/vector_db_manager.md)
-  - The DiskANN document index (`VectorDbManager`, `VectorDb_diskann`), the pgvector conversation store (`VectorRepository`), and the SQLite vector-metadata sidecar (`VectorMetaDataRepository`).
+  - The pgvector store every vector lives in (`VectorRepository`), the label table that maps a DiskANN hit back to its chunk (`VectorMetaDataRepository`), the built index generations (`IndexGenerations`), the hybrid index searched over them (`VectorDbManager`), and the memory guard every allocation passes (`memory_guard`).
 - [Data Layer Exceptions (`datalayer_exceptions.py`)](../data_layer_docs/datalayer_exceptions.md)
-  - All twelve data-layer exceptions, their exact messages, and the known naming problems among them.
+  - All eighteen data-layer exceptions, their exact messages, and the known naming problems among them.
 
 ### 4. Memory & Conversation Pool Layer
 - [The Memory Database (`MemoryDatabase`)](../memory_layer_docs/memory_database.md)
@@ -67,7 +67,8 @@ graph TD
     C --> D[TextNormalizer]
     D --> E[Chunker: Hierarchical / Recursive]
     E --> F[EmbeddingManager]
-    F --> G[VectorDbManager / DiskANN]
+    F --> P[pgvector + vector_meta_data]
+    P --> G[IndexGenerations / DiskANN]
     
     H[Conversation History] --> I[ConversationVectorMetaDataManager]
     I --> J[SnapShot / Cursors]

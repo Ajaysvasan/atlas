@@ -16,10 +16,10 @@ logger = get_logger(__name__)
 _CHUNK_TABLES = (("Chunks", "contextId"), ("RecursiveChunks", "documentId"))
 
 _LEG = """
-    select v.vectorId, v.chunkId, c.chunk, c.startoffset, c.endoffset, c.{parent}
+    select v.label, v.chunkId, c.chunk, c.startoffset, c.endoffset, c.{parent}
     from vector_meta_data v
     join {table} c on c.chunkId = v.chunkId
-    where v.vectorId in ({placeholders})
+    where v.label in ({placeholders})
 """
 
 

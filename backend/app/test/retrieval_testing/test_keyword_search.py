@@ -12,7 +12,7 @@ class FakeMapping:
     def __init__(self, pairs):
         self.pairs = dict(pairs)
 
-    def vector_ids_for(self, chunk_ids):
+    def labels_for(self, chunk_ids):
         return {c: self.pairs[c] for c in chunk_ids if c in self.pairs}
 
 

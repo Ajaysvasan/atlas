@@ -115,7 +115,7 @@ class TestTheRealManagerPassesKThrough:
         from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
         manager = VectorDbManager.__new__(VectorDbManager)
-        manager.k_neighbors, manager.complexity = 9, 100
+        manager.k_neighbors, manager.complexity, manager.base = 9, 100, None
         seen = {}
 
         class Backend:
@@ -134,7 +134,7 @@ class TestTheRealManagerPassesKThrough:
         from data_layer.vector_db_manager.vectorDbManager import VectorDbManager
 
         manager = VectorDbManager.__new__(VectorDbManager)
-        manager.k_neighbors, manager.complexity = 9, 100
+        manager.k_neighbors, manager.complexity, manager.base = 9, 100, None
         seen = {}
 
         class Backend:
@@ -150,14 +150,38 @@ class TestTheRealManagerPassesKThrough:
         assert seen["k"] == 9
 
 
-def store_with(tmp_path, vectors, labels_from=None):
-    from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
-        VectorMetaDataRepository,
-    )
+class Store:
+    """Labels in the chunk store, vectors in the stand-in for pgvector."""
 
-    store = VectorMetaDataRepository(str(tmp_path / "chunks"))
-    store.allocate_many([f"c{i}" for i in range(len(vectors))], list(vectors))
-    return store
+    def __init__(self, tmp_path, vectors):
+        from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
+            VectorMetaDataRepository,
+        )
+        from data_layer.vector_db_manager.stored_vectors import chunk_vector_store
+
+        self.mapping = VectorMetaDataRepository(str(tmp_path / "chunks"))
+        self.vectors = chunk_vector_store()
+        self.add(vectors)
+
+    def add(self, vectors, prefix="c"):
+        from data_layer.ingestion.embedding.vector_ids import vector_id_for
+
+        chunk_ids = [f"{prefix}{i}" for i in range(len(vectors))]
+        ids = [vector_id_for(c) for c in chunk_ids]
+        self.vectors.batch_insert(ids, vectors)
+        return self.mapping.batch_insert(ids, chunk_ids)
+
+    def source(self):
+        from data_layer.vector_db_manager.stored_vectors import StoredVectors
+
+        return StoredVectors(self.mapping, self.vectors)
+
+    def close(self):
+        self.mapping.close()
+
+
+def store_with(tmp_path, vectors):
+    return Store(tmp_path, vectors)
 
 
 class TestBuildingFromTheStore:
@@ -181,7 +205,7 @@ class TestBuildingFromTheStore:
         store = store_with(tmp_path, data[:8])
         search = VectorSearch(chunk_store_path=tmp_path / "chunks")
         search.search(QueryPlan("q", data[0], "q"), 1)
-        store.allocate_many([f"n{i}" for i in range(4)], list(data[8:]))
+        store.add(data[8:], prefix="n")
         store.close()
 
         search.catch_up()
@@ -196,7 +220,7 @@ class TestBuildingFromTheStore:
         store = store_with(tmp_path, data[:8])
         search = VectorSearch(chunk_store_path=tmp_path / "chunks")
         search.search(QueryPlan("q", data[0], "q"), 1)
-        store.allocate_many([f"n{i}" for i in range(4)], list(data[8:]))
+        store.add(data[8:], prefix="n")
         search.catch_up()
         search.catch_up()
         store.close()
@@ -254,7 +278,7 @@ class TestNeverAskingForMoreThanTheIndexHolds:
         assert index.count() == 7
         store = store_with(tmp_path, points(8))
         restored = real_index([])
-        restored.restore(store)
+        restored.restore(store.source())
         store.close()
         assert restored.count() == 8
 
@@ -269,7 +293,7 @@ class TestNeverAskingForMoreThanTheIndexHolds:
         data = points(8)
         store = store_with(tmp_path, data)
         restored = real_index([])
-        restored.restore(store)
+        restored.restore(store.source())
         store.close()
         labels, distances = restored.search_vector(data[2], 32)
         assert sorted(labels.tolist()) == list(range(1, 9))

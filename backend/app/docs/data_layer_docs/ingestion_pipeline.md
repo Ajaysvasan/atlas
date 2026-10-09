@@ -1,7 +1,7 @@
 # Unified Ingestion Pipeline Module (`ingestion_pipeline.py`)
 
 ## Overview & Purpose
-The `ingestion_pipeline.py` module defines the `IngestionPipeline` facade class. It provides a single, simplified, stateless orchestration interface connecting all ingestion submodules: file discovery (`FileLoader`), multi-format text extraction (`TextExtractor`), regex cleaning (`TextNormalizer`), hierarchical/recursive chunking (`Chunker`), vector embedding (`EmbeddingManager`), and DiskANN vector indexing (`VectorDbManager`).
+The `ingestion_pipeline.py` module defines the `IngestionPipeline` facade class. It provides a single, simplified, stateless orchestration interface connecting all ingestion submodules: file discovery (`FileLoader`), multi-format text extraction (`TextExtractor`), regex cleaning (`TextNormalizer`), hierarchical/recursive chunking (`Chunker`), vector embedding (`EmbeddingManager`), vector storage (pgvector, through `VectorRepository`), label allocation (`VectorMetaDataRepository`), and building the DiskANN index generation (`IndexGenerations`).
 
 ---
 
@@ -10,15 +10,18 @@ The `ingestion_pipeline.py` module defines the `IngestionPipeline` facade class.
 ### `class IngestionPipeline`
 A facade wrapping internal component instances to expose clean public methods for step-by-step or pipeline document ingestion.
 
-#### Constructor: `__init__(self) -> None`
+#### Constructor: `__init__(self, vector_store=None, index_path=None) -> None`
 Initializes internal component instances using defaults from `Config`.
 - `self.f_loader = FileLoader()`
 - `self.t_extractor = TextExtractor()`
 - `self.t_normalizer = NormalizationProfiles.rag_ingestion()`
 - `self.chunker = Chunker()`
 - `self.embedder = EmbeddingManager()`
-- `self.vector_db = VectorDbManager(...)` configured with `Config` metric, dimensions, max vectors, complexity, and thread parameters. This index lives only as long as the pipeline; it is not what makes vectors survive a restart.
-- `self.vector_meta = VectorMetaDataRepository(self.chunker.db_path)` — allocates each vector's DiskANN label and **stores the vector itself**, in the chunk store's database file. These rows are what the index is rebuilt from (bug 5.20).
+- `self.vector_meta = VectorMetaDataRepository(self.chunker.db_path)` — allocates each vector's DiskANN label beside its vector id, in the chunk store's database file. It holds no vectors.
+- `self.vector_store` — where the vectors go: `vector_store` if given, else `stored_vectors.chunk_vector_store()` (`VectorRepository("global")`), opened on the first ingest. One handed in is not closed by `close()`.
+- `self.index_path` — where generations are built; `None` means `Config.INDEX_PATH`, read when used.
+
+The pipeline holds no index of its own. It used to build one sized for `MAX_VECTORS`, which reserved 1.2 GB however little it ingested (bug 5.23).
 
 ---
 
@@ -137,36 +140,33 @@ Converts single chunks or chunk lists into dense vector embeddings.
 
 ---
 
-##### `ingest_vector(self, embedded_value: EmbeddedChunk) -> None`
-Allocates a label for the chunk and stores its vector in `vector_meta_data` (one transaction), then inserts the vector into the pipeline's DiskANN index under that label.
-
-###### Parameters
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `embedded_value` | `EmbeddedChunk` | Embedded chunk node containing `vector` and `meta_data.chunk_id`. |
+##### `ingest_vector(self, embedded_value: EmbeddedChunk) -> int`
+`batch_insert_vectors([embedded_value])[0]`: the chunk's label.
 
 ---
 
 ##### `batch_insert_vectors(self, embedded_objs: List[EmbeddedChunk]) -> List[int]`
-Allocates one label per chunk and stores every vector beside it in a single transaction (`VectorMetaDataRepository.allocate_many`), then batch-inserts the vectors into the pipeline's DiskANN index under those labels. An empty list does nothing.
+Stores the vectors, then allocates their labels, then lets `maintain_index()` decide whether to build. An empty list does nothing.
+
+1. Every `EmbeddedChunk.vector_id` is checked by `checked_vector_id` before anything is written: `MissingVectorId` for `None`, `MalformedVectorId` for anything that is not an integer in `0 … 2**63 - 1`.
+2. The vectors go to pgvector under their vector ids, `on conflict do nothing`. A store that cannot be opened raises `VectorStoreUnavailable`; a failed write raises `VectorInsertionError`. Either way no label is written — a label never exists for a vector that was not stored.
+3. `VectorMetaDataRepository.batch_insert(vector_ids, chunk_ids)` allocates the labels in one transaction. A chunk seen before gets its own label back (bug 5.21); `VectorIdConflict` and `EmbeddingModelMismatch` refuse the batch.
 
 ###### Parameters
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
-| `embedded_objs` | `List[EmbeddedChunk]` | List of embedded chunk instances to insert. |
-
-Re-ingesting a chunk returns the label it already has (bug 5.21). The pipeline
-records which labels its own index holds and inserts only new ones — DiskANN
-refuses a label it already has — so the same chunks ingested twice in one
-session, or twice in one batch, are indexed once. `ingest_vector` does the same.
+| `embedded_objs` | `List[EmbeddedChunk]` | `vector`, `vector_id` (from the embedder; required) and `meta_data.chunk_id`. |
 
 ###### Return Value
 - **Type**: `List[int]`
-- **Description**: The labels, in the order of `embedded_objs` — existing ones for chunks seen before. The label, not `EmbeddedChunk.vector_id`, is what DiskANN indexes: that id is 63-bit for pgvector and DiskANN labels are `uint32` (bug 5.16).
+- **Description**: The labels, in the order of `embedded_objs`. The label is what DiskANN returns; the vector id is what pgvector is keyed by (bug 5.16).
 
-> There is no `persist_index()`. It wrote DiskANN's own index files, which diskannpy 0.7.0 cannot load back (bug 5.20); the stored vectors replace it.
+---
+
+##### `maintain_index(self, force: bool = False) -> BuildOutcome | None`
+Builds a new index generation from every stored vector once `Config.INDEX_REBUILD_AT` (`10_000`) labels wait above the current generation's `through`, or whenever any wait if `force`. Returns `None` when nothing was due, else the `BuildOutcome` — which never raises: a build that does not fit in memory or on disk, is already running, fails, is killed or hangs leaves the current generation in use and says why. The one exception is a vector store that cannot be opened to read from, `VectorStoreUnavailable` — which cannot happen when it runs after `batch_insert_vectors`, which opened it. See `vector_db_manager.md`.
 
 ---
 
 ##### `close(self) -> None`
-Closes the label repository's connection.
+Closes the label repository's connection, and the vector store if the pipeline opened it.

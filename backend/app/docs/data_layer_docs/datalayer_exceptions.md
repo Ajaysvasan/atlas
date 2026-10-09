@@ -100,7 +100,7 @@ Raised by `VectorRepository.__init__` when any of `DB_NAME`, `DB_USER`, `DB_PASS
 ---
 
 ### `class InvalidVectorDimension(Exception)`
-Raised by `VectorRepository` when a vector's length differs from `Config.EMBEDDING_DIMENSIONS`, and by `VectorMetaDataRepository.allocate` / `allocate_many` when a vector's shape is not `(dimensions,)`.
+Raised by `VectorRepository` when a vector's length differs from `Config.EMBEDDING_DIMENSIONS`. `vector_meta_data` holds no vectors, so nothing there raises it.
 
 | Constructor | `__init__(self, passed_dimension: int, expected_dimension: int) -> None` |
 | :--- | :--- |
@@ -136,7 +136,7 @@ It is deliberately **not** a `VectorInsertionError`: the vectors-first snapshot 
 ## Vector metadata sidecar
 
 ### `class InvalidColumnNameException(Exception)`
-Raised by `VectorMetaDataRepository.get_meta_data` when `columnName` is not one of `("vectorId", "chunkId", "embeddingModelUsed", "dimensions")`. The column name is interpolated into the SQL string, so this allowlist is what keeps that query safe — the check is a security control, not a convenience.
+Raised by `VectorMetaDataRepository.get_meta_data` when `columnName` is not one of `("label", "vectorId", "chunkId", "embeddingModelUsed", "dimensions")`. The column name is interpolated into the SQL string, so this allowlist is what keeps that query safe — the check is a security control, not a convenience.
 
 | Constructor | `__init__(self, columnName: str)` |
 | :--- | :--- |
@@ -155,6 +155,54 @@ Raised by `VectorMetaDataRepository.get_meta_data` when no metadata row matches 
 **`__str__`** → `No vector meta data found for the vector id : {vectorId}`
 
 > Not to be confused with `memory/memory_pool_exceptions.py::InvalidVectorId`, which is a range check on ids and does have a descriptive message.
+
+---
+
+### `class MissingVectorId(Exception)`
+Raised by `checked_vector_id` — so by `VectorMetaDataRepository.insert` / `batch_insert` and `IngestionPipeline.batch_insert_vectors` — when a chunk arrives with no vector id. The id is derived by the embedder and must be passed; the table never generates one (bug 5.22). Raised before anything is written.
+
+| Constructor | `__init__(self, chunk_id) -> None` |
+| :--- | :--- |
+
+---
+
+### `class MalformedVectorId(Exception)`
+Raised by `checked_vector_id` for a `bool`, a non-integer, or a value outside `0 … 2**63 - 1`. NumPy integers are accepted.
+
+| Constructor | `__init__(self, chunk_id, vector_id) -> None` |
+| :--- | :--- |
+
+---
+
+### `class VectorIdConflict(Exception)`
+Raised by `VectorMetaDataRepository.insert` / `batch_insert` when the chunk is already stored under another vector id, or the vector id under another chunk. A batch containing one is rolled back whole.
+
+| Constructor | `__init__(self, chunk_id, vector_id, stored_chunk_id, stored_vector_id) -> None` |
+| :--- | :--- |
+
+---
+
+### `class EmbeddingModelMismatch(Exception)`
+Raised when a chunk already stored by one embedding model is offered under another. A vector id belongs to the chunk, so one store holds one model's vectors.
+
+| Constructor | `__init__(self, chunk_id, stored_model, model) -> None` |
+| :--- | :--- |
+
+---
+
+### `class VectorStoreUnavailable(Exception)`
+Raised by `IngestionPipeline` when the pgvector store for document chunk vectors cannot be opened. Nothing is ingested: a label is never written for a vector that was not stored. `cause` holds the underlying error.
+
+| Constructor | `__init__(self, cause: BaseException) -> None` |
+| :--- | :--- |
+
+---
+
+### `class IndexGenerationUnusable(Exception)`
+Raised inside `IndexGenerations` when a built generation cannot be searched here — unreadable manifest, another model, a file missing or the wrong size, more memory than the budget or the machine has. **Never escapes:** `open()` logs it and tries the previous generation.
+
+| Constructor | `__init__(self, generation, reason) -> None` |
+| :--- | :--- |
 
 ---
 

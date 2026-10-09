@@ -78,20 +78,6 @@ class TestDataLayerRegression(unittest.TestCase):
         self.assertEqual(text, "Line 1\nLine 2\nLine 3\n")
         os.remove(md_path)
 
-    def test_index_load_updates_internal_state(self):
-        """
-        Verifies that VectorDb_diskann.load() updates self.dynamic_dann.
-        """
-        v_db = VectorDb_diskann("l2", np.float32, 128, 1000, 100, 120, 4)
-        mock_new_index = mock.MagicMock()
-        v_db.dynamic_dann.from_file = mock.MagicMock(return_value=mock_new_index)
-
-        os.makedirs("dummy_index_dir", exist_ok=True)
-        returned_index = v_db.load("dummy_index_dir")
-
-        self.assertEqual(v_db.dynamic_dann, mock_new_index)
-        os.rmdir("dummy_index_dir")
-
     def test_normalizer_handles_path_objects(self):
         """
         Verifies that TextNormalizer handles Path objects without throwing TypeError.
