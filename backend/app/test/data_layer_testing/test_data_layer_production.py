@@ -132,29 +132,6 @@ class TestDataLayerProduction(unittest.TestCase):
         except Exception as e:
             self.fail(f"batch_insert crashed unexpectedly: {e}")
 
-    def test_vector_db_manager_index_load_persistence(self):
-        """
-        Tests that loading an index successfully updates the internal state 
-        so that subsequent inserts go to the loaded index.
-        """
-        v_manager = VectorDbManager("l2", np.float32, 128, 1000, 100, 120, 4, 9)
-        
-        # Create a mock directory
-        os.makedirs("test_index_dir", exist_ok=True)
-        
-        v_manager.load("test_index_dir")
-        
-        # After loading, the internal dynamic_dann should be the one returned from from_file
-        # Our mock from_file returns a new MockDiskANN object. Let's verify type/identity if possible.
-        # A simple check: the object should have changed.
-        original_db = v_manager.vector_db.dynamic_dann
-        v_manager.load("test_index_dir")
-        new_db = v_manager.vector_db.dynamic_dann
-        
-        self.assertNotEqual(original_db, new_db, "The internal DiskANN instance was not updated after load()")
-        
-        os.rmdir("test_index_dir")
-        
     def test_full_ingestion_pipeline_end_to_end(self):
         """
         Tests the entire ingestion pipeline to ensure no fatal exceptions exist 

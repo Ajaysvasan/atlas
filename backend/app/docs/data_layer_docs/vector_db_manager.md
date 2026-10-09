@@ -1,140 +1,197 @@
 # Vector Database Management Layer (`vector_db_manager/`)
 
 ## Overview & Purpose
-The `vector_db_manager` submodule holds the project's two vector stores:
+The `vector_db_manager` submodule holds the document chunk index and the stores behind it:
 
-- **DiskANN** (`vectorDbManager.py` → `vectorDB_diskann.py`) — the data layer's approximate nearest neighbour index over ingested document chunks, built on `diskannpy.DynamicMemoryIndex`. It is held **in memory** and rebuilt from the vectors stored in `vector_meta_data` (`restore`); diskannpy 0.7.0 cannot load a dynamic index it saved (bug 5.20).
-- **PostgreSQL / pgvector** (`repository/vectorRepository.py`) — the memory layer's exact store for conversation snapshot vectors, keyed by `(project_id, vector_id)`.
+- **PostgreSQL / pgvector** (`repository/vectorRepository.py`) — where every vector lives, document chunks under the project id `Config.GLOBAL_VECTOR_SCOPE` (`"global"`), the memory layer's under their own project ids. Keyed by `(project_id, vector_id)`.
+- **`vector_meta_data`** (`repository/vectorMetaDataRepository.py`) — SQLite, in the chunk store: each DiskANN label, the vector id it stands for, and its chunk. No vectors.
+- **The DiskANN index** (`vectorDbManager.py`) — a *built generation* on disk (`index_generations.py`), opened rather than rebuilt at startup, plus an in-memory index of the vectors ingested since (`vectorDB_diskann.py`). Searched together and merged by distance.
+- **`memory_guard.py`** — every allocation the index makes is admitted against free memory first, and degraded rather than made when it does not fit.
 
-`repository/vectorMetaDataRepository.py` holds the SQLite table that allocates DiskANN labels, maps each back to its chunk, and stores each vector — the source of truth the in-memory index is rebuilt from.
-
-The two stores are independent and are not kept in sync with each other; which one a caller wants depends on whether it is searching documents or conversation history.
+Rationale and measurements are in `data_layer/vector_db_manager/README.md`.
 
 ---
 
 ## `class VectorDbManager` (`vectorDbManager.py`)
-Thread-safe wrapper over the DiskANN driver. Every mutating call is taken under a single `threading.Lock` held on the instance (`self.lock`), because `diskannpy`'s dynamic index is not safe for concurrent writes.
+The index retrieval searches: an optional built generation (`base`) and the recent vectors in a `diskannpy.DynamicMemoryIndex`. Mutations of the recent index run under `self.lock`.
 
 #### Constructor: `__init__(self, distance_metrics, vector_dtype, dimensions, max_vectors, complexity, graph_degree, num_threads, k_neighbors) -> None`
 
-**All eight parameters are required** — none has a default. `IngestionPipeline` supplies them from `Config` explicitly.
+All eight parameters are required. `VectorSearch` supplies them from `Config`.
 
-| Parameter | Type | Supplied by `IngestionPipeline` as | Description |
+| Parameter | Type | Supplied as | Description |
 | :--- | :--- | :--- | :--- |
-| `distance_metrics` | `str` | `Config.DISTANCE_METRIC` (`"l2"`) | Passed straight through to `diskannpy` as a string. |
-| `vector_dtype` | `Type[np.float32 \| np.int8 \| np.uint8]` | `Config.VECTOR_DTYPE` (`np.float32`) | Element type of stored vectors. |
+| `distance_metrics` | `str` | `Config.DISTANCE_METRIC` (`"l2"`) | Passed straight through to `diskannpy`. |
+| `vector_dtype` | `Type[np.float32 \| np.int8 \| np.uint8]` | `Config.VECTOR_DTYPE` | Element type of stored vectors. |
 | `dimensions` | `int` | `Config.EMBEDDING_DIMENSIONS` (`128`) | Vector dimensionality. |
-| `max_vectors` | `int` | `Config.MAX_VECTORS` (`1_000_000`) | Capacity of the index graph. |
-| `complexity` | `int` | `Config.COMPLEXITY` (`100`) | Search beam width (`L`), used at build and query time. |
-| `graph_degree` | `int` | `Config.GRAPH_DEGREE` (`120`) | Maximum out-degree (`R`) of Vamana graph nodes. |
-| `num_threads` | `int` | `Config.NUM_THREADS` (`4`) | Worker threads for search. |
-| `k_neighbors` | `int` | `Config.K_NEIGHBORS` (`9`) | Neighbours returned by `search_vector`. Held on the manager only; the driver takes it per call. |
+| `max_vectors` | `int` | `Config.RECENT_VECTOR_CAPACITY` (`20_000`) | Capacity of the **recent** index. diskannpy allocates every slot up front (1.7 KB each), which is why this is not `MAX_VECTORS`: at 1M it reserved 1.2 GB however little it held. |
+| `complexity` | `int` | `Config.COMPLEXITY` (`100`) | Search list size (`L`). |
+| `graph_degree` | `int` | `Config.GRAPH_DEGREE` (`120`) | Maximum out-degree (`R`). |
+| `num_threads` | `int` | `Config.NUM_THREADS` (`4`) | Worker threads. |
+| `k_neighbors` | `int` | `Config.K_NEIGHBORS` (`9`) | Neighbours returned when a search names no `k`. |
 
 #### Methods
 
 | Method | Signature | Behaviour |
 | :--- | :--- | :--- |
-| `insert` | `(embedded_chunk_obj: EmbeddedChunk, vector_id=None) -> None` | Takes the lock and inserts `embedded_chunk_obj.vector` under `vector_id` (the allocated label) as `uint32`, falling back to `embedded_chunk_obj.vector_id`. |
-| `batch_insert` | `(embedded_chunk_objs: List[EmbeddedChunk], vector_ids=None)` | Collects vectors into a single `np.float32` 2-D array and the ids into a `uint32` array — diskannpy requires both as arrays (bug 5.15). |
-| `count` | `() -> int` | Vectors in the index now, read from diskannpy's native `num_points()`: tracks inserts, deletes and restores, and excludes the frozen start point. |
-| `search_vector` | `(query, k_neighbors=None)` | `k_neighbors` defaults to the instance's (`9`) and is **capped at `count()`**: asked for more than it holds, diskannpy fills the surplus from uninitialised memory — labels that can be real ones, at distance `0.0`, sorted ahead of every true result (bug 5.18). An empty index returns two empty arrays without searching. |
-| `batch_search_vectors` | `(queries, k_neighbors=None)` | Batch form of the above; an empty index returns arrays of shape `(len(queries), 0)`. |
-| `restore` | `(store, after: int = 0) -> int` | Inserts every vector `store.vectors(after=after)` yields, a page at a time under the lock, and returns the highest label now indexed (`after` if none). Labels only grow, so passing that back indexes just what was ingested since. Logs a warning naming how many labels have no usable stored vector. |
-| `delete_vector` | `(vector_id) -> None` | Under the lock. |
-| `delete_vectors` | `(vector_ids) -> None` | Under the lock. |
-| `save` | `(save_path=Config.INDEX_PATH)` | Under the lock. **Not used by the project** — see below. |
-| `load` | `(load_path=Config.INDEX_PATH)` | Under the lock. Returns the reloaded `dynamic_dann`, or **`None`** if the directory is absent — `IndexDirectoryDoesNotExists` is caught here and logged as a warning rather than propagated. **Not used by the project** — see below. |
+| `use_base` | `(base: BuiltIndex \| None) -> None` | Searches a built generation alongside the recent vectors. |
+| `through` | property `-> int` | The highest label the built generation holds; `0` without one. The recent index is filled from above it. |
+| `insert` | `(embedded_chunk_obj, vector_id=None) -> None` | Into the recent index, under `vector_id` as `uint32`, falling back to `embedded_chunk_obj.vector_id`. |
+| `batch_insert` | `(embedded_chunk_objs, vector_ids=None)` | The same as one `float32` 2-D array and one `uint32` array — diskannpy requires both as arrays (bug 5.15). |
+| `count` | `() -> int` | Built plus recent. |
+| `recent_count` | `() -> int` | The recent index alone, from diskannpy's native `num_points()`. |
+| `restore` | `(source: StoredVectors, after: int = 0) -> int` | Inserts the source's vectors labelled above `after` into the recent index, a page at a time, **until it is full**; returns the last label taken. What does not fit is logged with its count and waits for the next build, still found by keyword search. Labels without a stored vector are skipped and reported. |
+| `search_vector` | `(query, k_neighbors=None) -> (labels, distances)` | Searches the built generation and the recent index, each for no more than it holds, and merges by distance (both are exact squared L2). The recent search is capped at `recent_count()`: asked for more, diskannpy fills the surplus from uninitialised memory (bug 5.18). |
+| `batch_search_vectors` | `(queries, k_neighbors=None)` | One `search_vector` per query, as 2-D arrays. |
+| `delete_vector` / `delete_vectors` | `(vector_id)` / `(vector_ids)` | The recent index only; a built generation is immutable until the next build. Nothing calls either (bug 5.5). |
 
-> **`save` and `load` cannot persist an index.** diskannpy 0.7.0's `DynamicMemoryIndex.save` writes every label as `0`, and `from_file` returns garbage in a new process even when the labels on disk are correct (bug 5.20). Nothing in the project calls either; the index is rebuilt with `restore` instead.
-
-> **Note.** `insert` keys the vector on `EmbeddedChunk.vector_id`, an `int`, not on `meta_data.chunk_id`. DiskANN tags are unsigned integers; passing the SHA-256 `chunk_id` string was a historical bug.
+> There is no `save` or `load`. diskannpy 0.7.0 writes every label of a dynamic index as `0` and cannot load one back in a new process (bug 5.20); the built generations replace them.
 
 ---
 
 ## `class VectorDb_diskann` (`vectorDB_diskann.py`)
-Thin driver over `diskannpy.DynamicMemoryIndex`, exposed as `self.dynamic_dann`.
+Thin driver over `diskannpy.DynamicMemoryIndex` (`self.dynamic_dann`), constructed with `saturate_graph=SATURATE_GRAPH` (`True`). No parameter validation: an invalid metric surfaces as a `diskannpy` error.
 
-#### Constructor: `__init__(self, distance_metrics, vector_dtype, dimensions, max_vectors, complexity, graph_degree, num_threads) -> None`
-Stores the parameters and constructs `dann.DynamicMemoryIndex(...)` directly, with `saturate_graph=SATURATE_GRAPH` (`True`). It performs **no** metric-string conversion and **no** parameter validation — `distance_metrics` is handed to `diskannpy` as the string it was given, and an invalid value surfaces as a `diskannpy` error.
-
-> **`SATURATE_GRAPH` is not a tuning knob.** diskannpy defaults it to `False`, and the dynamic index then builds a graph too sparse to search: recall@10 of 0.09 on 5,000 vectors against 0.96 with it on, and an inserted vector cannot find itself (bug 5.19).
-
-#### Methods
+> **`SATURATE_GRAPH` is not a tuning knob.** diskannpy defaults it to `False`, and the dynamic index then builds a graph too sparse to search: recall@10 of 0.09 against 0.96 (bug 5.19).
 
 | Method | Signature | Behaviour |
 | :--- | :--- | :--- |
-| `insert` | `(vector, vector_id)` | `ValueError` and `RuntimeError` are re-raised as `VectorInsertionError(vector_id, cause)`, chained with `from`. |
-| `batch_insert` | `(vectors, vector_ids)` | Same wrapping, with the id list as `vector_id`. |
-| `search_vector` | `(query, k_neighbors, complexity)` | `dynamic_dann.search(...)`, returning `(tags, distances)`. |
+| `insert` / `batch_insert` | `(vector, vector_id)` / `(vectors, vector_ids)` | `ValueError` and `RuntimeError` are re-raised as `VectorInsertionError(vector_id, cause)`. |
+| `search_vector` | `(query, k_neighbors, complexity)` | `(tags, distances)`. |
 | `batch_search_vector` | `(queries, k_neighbors, complexity)` | `dynamic_dann.batch_search(..., self.num_threads)`. |
-| `count` | `() -> int` | `dynamic_dann._index.num_points()`. diskannpy exposes the count only on its native object, hence the private attribute; `test_the_count_follows_inserts_deletes_and_restores` pins it. |
-| `delete_vector` | `(id)` | `mark_deleted` then `consolidate_delete`. |
-| `delete_vectors` | `(ids)` | Marks each, then a single `consolidate_delete`. |
-| `save` | `(save_path=Config.INDEX_PATH)` | Creates the directory if absent, then `dynamic_dann.save(save_path)`. The path is used as given — no filename is appended. |
-| `load` | `(load_path=Config.INDEX_PATH)` | Checks the **directory** exists (not the individual index files), calls `DynamicMemoryIndex.from_file(..., saturate_graph=SATURATE_GRAPH)`, and **reassigns `self.dynamic_dann`** to the result so later inserts reach the loaded index. Raises `IndexDirectoryDoesNotExists` when the directory is missing. The loaded index cannot name its neighbours in a new process (bug 5.20). |
+| `count` | `() -> int` | `dynamic_dann._index.num_points()`; the count lives only on the native object. |
+| `delete_vector` / `delete_vectors` | `(id)` / `(ids)` | `mark_deleted`, then one `consolidate_delete`. |
 
-> Both insert paths wrap driver failures identically. `batch_insert` used to wrap nothing, so `except VectorInsertionError` around it caught no failure at all.
+---
+
+## Built generations (`index_generations.py`)
+
+```
+data/disk_ann_index/
+  CURRENT                 the generation in use, replaced atomically
+  .build.lock             held by the one build that may run
+  gen-000007/             the generation before (kept as the fallback)
+  gen-000008/
+    manifest.json         kind, count, through, model, dimensions, metric, degree, previous, files {name: size}
+    labels.npy            uint32, position -> label
+    ann ann.data          a memory index, or
+    ann_disk.index ann_pq_*.bin ann_sample_*.bin    a disk index
+```
+
+#### `class IndexGenerations(root=None)`
+`root` defaults to `Config.INDEX_PATH`, read when called.
+
+| Method | Signature | Behaviour |
+| :--- | :--- | :--- |
+| `current` | `() -> str \| None` | The name in `CURRENT`, if it is a generation name. |
+| `manifest` | `(name) -> dict \| None` | `None` when missing or unreadable. |
+| `through` | `() -> int` | The highest label the current generation was built through; `0` without one. |
+| `open` | `(allowance: int) -> BuiltIndex \| None` | The current generation, else its `previous`, within `allowance` bytes of RAM. A generation is refused — logged with the reason, never raised — when its manifest is unreadable, it was built for another model, dimension or metric, a file is missing or the wrong size, its labels do not match, it needs more than `allowance`, or more than `memory_guard.spare_memory()`. A **disk** generation needs only its compressed vectors; its node cache is sized to whatever the allowance and free memory leave, down to none. |
+| `build` | `(source: StoredVectors) -> BuildOutcome` | Builds a generation from every stored vector and makes it current. **Never raises.** See below. |
+
+**`build`, step by step**, each failure returning a `BuildOutcome` with the reason and leaving the current generation in use:
+
+1. Take `.build.lock` without waiting; another build running → skipped.
+2. Fewer than two vectors → nothing to build (DiskANN cannot make a graph of one).
+3. Plan: a **memory** index when it fits the budget (`VECTOR_INDEX_RAM_MB` less the recent index) *and* building it fits free memory; else a **disk** index, its compressed vectors given a quarter of that allowance and its build bounded by `memory_guard.disk_build_budget()`; neither → skipped.
+4. Free disk below `memory_guard.index_disk_bytes()` → skipped.
+5. Sweep `*.building` leftovers and generations older than the previous one.
+6. Write `vectors.bin` (DiskANN's format) and `labels.npy` a page at a time into `gen-N.building/`.
+7. Run `builder_command(spec)` — `python -m data_layer.vector_db_manager.index_build SPEC` — with its output in `build.log`, stopped after `max(900 s, 5 ms × vectors)`. Killed by a signal, exited non-zero, timed out → skipped, with the signal or the log's tail.
+8. Delete what search does not need (`vectors.bin`, `ann_mem.index.data`, `build.log`), write the manifest, fsync every file, rename to `gen-N`, replace `CURRENT` atomically, sweep.
+
+#### `class BuildOutcome(NamedTuple)`
+`built: bool`, `reason: str`, `generation: str | None`, `kind: "memory" | "disk" | None`, `count: int`.
+
+#### `class BuiltIndex`
+`name`, `kind`, `labels`, `through`, `count`. `search(query, k, complexity) -> (labels, distances)` asks for no more than `count` — a disk index pads a short answer with position `0`, a real vector — and maps positions to labels. A disk index is searched with beam width 4 and at least two threads: with one, it never returns.
+
+#### `builder_command(spec) -> List[str]` · `search_threads() -> int`
+The build process's command line, swapped by tests to kill or fail one; `max(2, Config.NUM_THREADS)`.
+
+---
+
+## `index_build.py`
+Run as `python -m data_layer.vector_db_manager.index_build SPEC`, never imported by the application. It sets its own `oom_score_adj` to `1000` and lowers its priority, then calls `diskannpy.build_memory_index` or `build_disk_index` on the vector file. A separate interpreter rather than `multiprocessing`: spawn re-imports the caller's main script, re-running any entry point without a `__main__` guard.
+
+---
+
+## `memory_guard.py`
+
+| Function | Returns |
+| :--- | :--- |
+| `available_memory()` | The lower of `/proc/meminfo`'s `MemAvailable` and the room under the tightest cgroup v2 `memory.max` above this process; `None` when neither can be read. |
+| `spare_memory()` | `available_memory()` less `Config.MEMORY_HEADROOM_MB`; `None` if unknown. |
+| `can_hold(size)` | Whether `size` bytes fit in `spare_memory()`. Unknown memory admits it, on the budget alone. |
+| `free_disk(path)` | Free bytes where `path` is or would be created. |
+| `budget()` | `Config.VECTOR_INDEX_RAM_MB` in bytes. |
+| `recent_index_bytes(capacity, dims, degree)` · `memory_index_bytes(count, dims, degree)` · `cache_node_bytes(dims, degree)` · `memory_build_bytes(count, dims, degree)` · `index_disk_bytes(count, dims, degree)` | Estimates, with measured margins. |
+| `disk_build_budget()` | Up to 4 GB of what is spare less 128 MB; `None` below 256 MB. |
+
+---
+
+## `stored_vectors.py`
+
+| Name | Behaviour |
+| :--- | :--- |
+| `chunk_vector_store()` | `VectorRepository(Config.GLOBAL_VECTOR_SCOPE)`. Looked up as a module attribute, which is how the test suite replaces it with an in-memory store. |
+| `class StoredVectors(mapping, store)` | `pages(after=0, batch_size=50_000)` yields `Page(labels, vectors, through)` in label order: one page of labels from SQLite, their vectors from PostgreSQL in one query. Labels with no stored vector are left out and counted in `missing`; `through` is the last label looked at, so they are not looked for again. `pending(after)` counts this model's labels above `after`. |
 
 ---
 
 ## `class VectorRepository` (`repository/vectorRepository.py`)
-The memory layer's pgvector store. One row per `(project_id, vector_id)` in a `vectors` table; `psycopg` 3 connection held for the object's lifetime.
+The pgvector store. One row per `(project_id, vector_id)` in `vectors`; a `psycopg` 3 connection for the object's lifetime.
 
-Connection settings come from `.env` via `python-dotenv`: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Any missing key raises `MissingDatabaseConfiguration` at construction, naming the absent keys. The `DB_` prefix is load-bearing: `load_dotenv()` will not override a variable the environment already has, and `USER`, `HOST` and `PORT` are all set by something (bug 6.2).
-
-`register_vector_types(self.conn)` runs in the constructor, after `CREATE EXTENSION` and before any statement touches a vector column. Without it psycopg cannot adapt a numpy array at all, and a `vector` column reads back as text (bug 5.1).
-
-> **On `DB_USER`.** The key is deliberately not `USER`. Every login shell exports `USER`, and `load_dotenv()` does not override a variable already in the environment, so the `.env` value was ignored and the connection was made as whoever ran the process.
+Connection settings come from `.env`: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Any missing key raises `MissingDatabaseConfiguration`, naming it. The `DB_` prefix is load-bearing: `load_dotenv()` does not override a variable the environment already has (bug 6.2). `register_vector_types(self.conn)` runs before any statement touches a vector column (bug 5.1).
 
 | Method | Signature | Raises |
 | :--- | :--- | :--- |
-| `insert` | `(vector_id, vector) -> None` | `InvalidVectorDimension`; `DuplicateVectorException` when the id is already stored; `VectorInsertionError` for any other failure |
-| `batch_insert` | `(vector_ids, vectors) -> None` | `InvalidBatchSize`, `InvalidVectorDimension`, `VectorInsertionError`. Uses `on conflict … do nothing`. |
-| `update` | `(vector_id, vector) -> None` | `VectorNotFoundEror` when no row matches, `InvalidVectorDimension`, `VectorInsertionError`. A single `UPDATE` rather than delete-then-insert, which is two commits and loses the vector if the second fails. |
-| `delete` | `(vector_id) -> None` | `VectorInsertionError` |
-| `batch_delete` | `(vector_ids) -> None` | As above; a no-op on an empty list. Used to undo vectors whose metadata write failed. |
-| `search` | `(vector_id) -> NDArray[float32]` | `VectorNotFoundEror` |
-| `batch_search` | `(vector_ids) -> NDArray[float32]` | `VectorNotFoundEror` |
+| `insert` | `(vector_id, vector) -> None` | `InvalidVectorDimension`; `DuplicateVectorException`; `VectorInsertionError` |
+| `batch_insert` | `(vector_ids, vectors) -> None` | `InvalidBatchSize`, `InvalidVectorDimension`, `VectorInsertionError`. `on conflict … do nothing`, so re-ingesting is a no-op. |
+| `update` | `(vector_id, vector) -> None` | `VectorNotFoundEror`, `InvalidVectorDimension`, `VectorInsertionError` |
+| `delete` · `batch_delete` | `(vector_id)` · `(vector_ids)` | `VectorInsertionError` |
+| `search` · `batch_search` | `(vector_id)` · `(vector_ids)` | `VectorNotFoundEror`. `batch_search` is one query per id. |
+| `vectors_for` | `(vector_ids) -> Dict[int, NDArray[float32]]` | One query, `vector_id = any(%s::bigint[])`; ids not stored are absent. The cast keeps 63-bit ids `bigint`, which psycopg would otherwise send as `numeric`. |
 | `close` | `()` | — |
+
+`as_array(embedding)` converts what pgvector returns — its own `Vector` from 0.4 on — to `float32`.
 
 ---
 
 ## `class VectorMetaDataRepository` (`repository/vectorMetaDataRepository.py`)
 
 #### Constructor: `__init__(self, db_path: str | None = None) -> None`
-Opens `db_path` (default `Config.DB_PATH`, the chunk store) through `storage.sqlite_setup.connect` with `check_same_thread=False`, enables WAL, and creates the table. Every statement runs under an `RLock`.
+Opens `db_path` (default `Config.DB_PATH`, the chunk store) with `check_same_thread=False`, enables WAL, and creates the table. Every statement runs under an `RLock`.
 
 #### Schema
 ```sql
 vector_meta_data(
-    vectorId           INTEGER PRIMARY KEY AUTOINCREMENT,  -- the DiskANN label
-    chunkId            TEXT NOT NULL,
+    label              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (label <= 4294967295),  -- the DiskANN label
+    vectorId           INTEGER NOT NULL UNIQUE
+                       CHECK (typeof(vectorId) = 'integer' AND vectorId >= 0),          -- passed in, never generated
+    chunkId            TEXT NOT NULL UNIQUE,
     embeddingModelUsed TEXT NOT NULL,
-    dimensions         INTEGER NOT NULL,
-    vector             BLOB                                -- float32 bytes, dimensions × 4
+    dimensions         INTEGER NOT NULL
 )
--- idx_vector_meta_chunk_model: UNIQUE (chunkId, embeddingModelUsed)
 ```
 
-**One label per chunk and model.** The unique index is what makes re-ingesting a
-chunk return its existing label instead of minting another (bug 5.21). A store
-written before it is collapsed on open — one row per chunk and model, preferring
-the row that has a vector — with a warning naming how many were removed. The
-index is rebuilt from this table, so nothing else refers to the rows dropped.
-No foreign key: a chunk id lives in `Chunks` or `RecursiveChunks`, and SQLite cannot reference whichever of two tables holds it (bug 5.2). A table created before the `vector` column existed gains it on open, with its rows kept; those rows have no vector and are reported by `missing_vectors()`.
+The vector id is required by the database as well as the code: a write that omits it, or passes `NULL`, text or a negative number, is refused. `label` is the only number the table generates, never reused, and a label past `uint32` is refused rather than wrapped. No foreign key on `chunkId`: a chunk lives in `Chunks` or `RecursiveChunks` (bug 5.2).
+
+A table from before the vector id was required — `vectorId` holding the label, possibly a `vector` blob — is rebuilt on open (bug 5.22): labels kept, vector ids derived from the chunk ids, one row per chunk preferring the configured model's oldest, labels that do not fit `uint32` dropped, blobs dropped, and the sequence kept above every old label. A warning gives the counts.
+
+#### `checked_vector_id(vector_id, chunk_id) -> int`
+The id as an `int`. `MissingVectorId` for `None`; `MalformedVectorId` for a `bool`, a non-integer, or a value outside `0 … 2**63 - 1`. NumPy integers are accepted.
 
 #### Methods
 
 | Method | Signature | Notes |
 | :--- | :--- | :--- |
-| `allocate` | `(chunkId, vector=None, embeddingModelUsed=Config.EMBEDDING_MODEL, dimensions=Config.EMBEDDING_DIMENSIONS) -> int` | The chunk's label: the one it already has for this model, or the next one. One `insert … on conflict … returning` statement, so two writers cannot both decide the chunk is new. Stores `vector` (cast to `float32`) on a new row, or on an existing row that had none; never replaces one. Raises `InvalidVectorDimension` when its shape is not `(dimensions,)`. |
-| `allocate_many` | `(chunkIds, vectors=None, embeddingModelUsed=..., dimensions=...) -> List[int]` | The same per chunk, in the order given, in one transaction; a chunk repeated in the batch gets one label. `InvalidBatchSize` when `vectors` and `chunkIds` differ in length; `InvalidVectorDimension` on any wrong-shaped vector — both before anything is written. |
-| `vectors` | `(batch_size=RESTORE_BATCH, after=0, embeddingModelUsed=..., dimensions=...) -> Iterator[Tuple[ndarray, ndarray]]` | Stored `(labels: uint32[n], vectors: float32[n, dimensions])` with labels above `after`, in label order, `batch_size` (`50_000`) rows a page. Keyset-paginated. Only rows from this model at this width, with a vector of the right length: another model's vectors are in a different space. Each page is read under the lock and yielded outside it. |
-| `missing_vectors` | `(embeddingModelUsed=..., dimensions=...) -> int` | Rows `vectors()` skips: no vector, another model, or the wrong width. |
-| `chunk_ids_for` | `(vectorIds) -> Dict[int, str]` | Every label's chunk in one query; unknown labels are absent rather than raising. |
-| `vector_ids_for` | `(chunkIds) -> Dict[str, int]` | The reverse, in one query. |
+| `insert` | `(vectorId, chunkId, embeddingModelUsed=Config.EMBEDDING_MODEL, dimensions=Config.EMBEDDING_DIMENSIONS) -> int` | The chunk's label: the one it has, or the next. `VectorIdConflict` when the chunk is stored under another vector id or the vector id under another chunk; `EmbeddingModelMismatch` when the chunk was stored by another model. |
+| `batch_insert` | `(vectorIds, chunkIds, embeddingModelUsed=..., dimensions=...) -> List[int]` | The same per row, in order, in one transaction — every id is checked before anything is written, and a refused row rolls the batch back. `InvalidBatchSize` when the lists differ in length. |
+| `labels` | `(after=0, batch_size=50_000, embeddingModelUsed=..., dimensions=...) -> Iterator[(uint32[n], int64[n])]` | `(labels, vector ids)` above `after`, in label order, keyset-paginated; this model and width only. |
+| `pending` | `(after=0, embeddingModelUsed=..., dimensions=...) -> int` | This model's labels above `after`. |
+| `chunk_ids_for` | `(labels) -> Dict[int, str]` | One query; unknown labels are absent. |
+| `labels_for` | `(chunkIds) -> Dict[str, int]` | The reverse, for keyword hits. |
+| `get_meta_data` | `(vectorId, columnName) -> str \| int` | Keyed by the vector id. `columnName` is checked against `("label", "vectorId", "chunkId", "embeddingModelUsed", "dimensions")` — it is interpolated into the SQL. `InvalidVectorID` when no row matches. |
 | `count` | `() -> int` | Rows in the table. |
-| `insert` | `(vectorId, chunkId, embeddingModelUsed, dimensions=Config.EMBEDDING_DIMENSIONS)` | Explicit label, no vector. `on conflict do nothing` — on the label or on the chunk already having one. |
-| `batch_insert` | `(vectorIds, chunkIds, embeddingModelUsed, dimensions)` | Raises `InvalidBatchSize` when the id lists differ in length. |
-| `get_meta_data` | `(vectorId, columnName) -> str \| int` | `columnName` is checked against `("vectorId", "chunkId", "embeddingModelUsed", "dimensions")` and raises `InvalidColumnNameException` otherwise — the column is interpolated into the SQL, so this allowlist is what keeps the query safe. Raises `InvalidVectorID` when no row matches. |
 | `close` | `()` | Waits for a write in flight; safe if construction failed. |

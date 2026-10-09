@@ -588,6 +588,7 @@ unusable and so the path was never exercised.
 - **Explanation:** `EmbeddingManager` derives `vector_id` masked into the signed 64-bit range (`Config.VECTOR_ID_MASK`, max 9.2e18), which is right for pgvector's `bigint` and impossible for DiskANN: diskannpy labels are `uint32`, max 4.29e9. Verified — `uint32` labels are accepted and `uint64` raises `TypeError: Cannot cast array data from dtype('uint64') to dtype('uint32')`. So no vector could ever be indexed, whatever 5.15 did.
   Masking to 32 bits instead would not work either. At `MAX_VECTORS = 1,000,000` the birthday bound puts expected collisions at **about 116**, and a collision means two chunks sharing a label — a hit resolving to the wrong text.
 - **Status:** **Fixed** by letting `vector_meta_data` allocate the label instead of deriving it. Sequential ids cannot collide and use 0.02% of the `uint32` space at `MAX_VECTORS`. This is what the table was for: the id DiskANN returns is a label, and the table is what translates it back. `EmbeddingManager.vector_id` is unchanged and still correct for pgvector, which is where the memory layer uses it.
+- **Since 5.22:** the allocated label has its own column, `label`. `vectorId` holds the vector id again — passed in, required, never generated — so the column's name says what it holds.
 
 ## Section 5c: The DiskANN Read Path (found while building the retrieval layer)
 
@@ -636,6 +637,7 @@ Like 5b, invisible until something read the index back: every earlier test of th
   - Only one model's vectors at one width are restored: another model's are in a different space.
 - **Cost:** a graph build on the first search, growing faster than linearly — 0.9 s for 10k vectors, 6.3 s for 50k, 16.6 s for 100k at `Config`'s settings (complexity 100, degree 120, 4 threads). Reading the vectors from SQLite is under 0.1 s per 100k. A static-index snapshot (`build_memory_index`, row-position ids mapped to labels) would remove it at the price of a full rebuild per ingest; not done.
 - **Tests:** `test_vector_index.py::TestSurvivingARestart::test_in_a_new_process` rebuilds in a separate interpreter and requires the exact labels back — every in-process reload had looked correct. Also storage and migration (`test_vector_chunk_mapping.py`), restore and catch-up against the real library, and the pipeline storing what it indexes. The two `xfail(strict=True)` markers became passing tests of the store-backed path. 18 mutations, all caught.
+- **Superseded (5.22, 5.23).** The vectors moved to pgvector, where they belong, and the startup rebuild is gone. Ingestion builds a static index *generation* on disk (`index_generations.py`) once `INDEX_REBUILD_AT` vectors wait outside the current one; startup opens it and loads only the vectors added since. diskannpy's static indexes save and load correctly — only the dynamic one is broken. Measured at 100k vectors plus 5k recent, end to end through `VectorSearch`: 0.25 s to start and +130 MB as a memory index, 2.48 s and +81 MB as a disk index, against 5.89 s and 1,236 MB for the rebuild it replaces.
 
 ### Bug 5.21: Re-ingesting a Chunk Allocates a New Label Every Time, and Since 5.20 the Copies Persist (`vectorMetaDataRepository.py`, `ingestion_pipeline.py`) — FIXED
 
@@ -643,6 +645,51 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Priority:** P1
 - **Explanation:** `allocate` / `allocate_many` always insert a new row; nothing checks whether the chunk already has a label. Chunk writes are `on conflict do nothing`, so re-ingesting an unchanged folder adds no chunks — but every chunk still gets a fresh label. Measured in the real `data/hierarchical_db`: **one chunk, 45 labels, 25 of them with a stored vector**, accumulated by test runs (7.5). Before 5.20 the duplicate vectors died with the process; now they are stored, so every rebuild indexes all 25 copies, and a search can fill retrieval's 32-candidate pool with one chunk. Assembly drops repeats, so results stay correct, but recall falls with every re-ingest. **Made permanent by the 5.20 fix**, which is why it is logged with it.
 - **Status:** **Fixed.** `unique (chunkId, embeddingModelUsed)` on `vector_meta_data`; `allocate` / `allocate_many` are one `insert … on conflict … do update … returning vectorId`, so a chunk seen before gets its own label back and a label with no vector gains one, atomically. A store written before the constraint is collapsed on open — one row per chunk and model, preferring the row with a stored vector, with a warning naming the count. The pipeline records the labels its own index holds and skips repeats, since DiskANN refuses a label twice (`RuntimeError: … unable to be inserted`). Tests in `test_vector_chunk_mapping.py` and `test_vector_index.py`; 9 mutations, all caught. **The real store was collapsed by a test run:** a mutation that removed 7.5's redirect let the pipeline test open `data/hierarchical_db`, taking it from 55 labels to 1 for its one chunk — the duplicates this bug produced, so nothing distinct was lost.
+- **Since 5.22:** the uniqueness is on `chunkId` and on `vectorId` — a vector id belongs to the chunk, so one store holds one model's vectors, and a chunk offered under another model raises `EmbeddingModelMismatch`. `allocate` / `allocate_many` became `insert` / `batch_insert`, which require the vector id. The pipeline no longer holds an index, so it no longer tracks labels.
+
+---
+
+## Section 5d: Where Vectors Live, and an Index That Survives a Restart (found reviewing the retrieval layer)
+
+### Bug 5.22: `vector_meta_data` Stored the Vectors, and Its `vectorId` Was a Generated Label (`vectorMetaDataRepository.py`, `ingestion_pipeline.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** Found in review. The table exists to short-circuit a DiskANN hit to its chunk; vectors live in pgvector. Three things had drifted:
+  - **It held every vector.** The 5.20 fix added a `float32` blob per row, because the index had to be rebuilt from somewhere and the document vectors were stored nowhere else: ingestion had never written them to PostgreSQL. `VectorRepository` was used only by the memory layer.
+  - **`vectorId` was not the vector id.** The 5.16 fix made it `integer primary key autoincrement`, so the column named for the vector id held the DiskANN label, and a write that omitted it was given one silently.
+  - **The original column was nullable.** `vectorId int primary key` accepts `NULL`: SQLite allows it in any primary key not spelled exactly `INTEGER PRIMARY KEY`.
+  Verified with SQLite 3.50.4: the original schema stores `NULL` for an omitted or explicit-null id; `integer primary key autoincrement` assigns 1, then 2; adding `not null` to it still assigns. Only an ordinary column refuses a missing value.
+- **Status:** **Fixed.**
+  - Schema: `label integer primary key autoincrement check (label <= 4294967295)`, `vectorId integer not null unique check (typeof(vectorId) = 'integer' and vectorId >= 0)`, `chunkId text not null unique`, no vector. The label is the only number generated; a label past `uint32` is refused rather than wrapped.
+  - `checked_vector_id` refuses `None` (`MissingVectorId`) and a bool, non-integer or out-of-range value (`MalformedVectorId`) before any write, and the database refuses them too. A chunk under another vector id, or a vector id under another chunk, raises `VectorIdConflict`.
+  - Ingestion writes the vectors to pgvector under the project id `Config.GLOBAL_VECTOR_SCOPE` (`"global"`; real project ids are uuid4 hex) **before** allocating labels, so a label never exists for a vector that was not stored. A store that cannot be opened raises `VectorStoreUnavailable`.
+  - An old table is rebuilt on open: labels kept, vector ids derived from the chunk ids by the embedder's own function (`vector_ids.py`), duplicates collapsed, blobs dropped, the sequence kept above every old label. The one row in the real store was removed rather than migrated, as asked.
+  - **Tests:** `test_vector_chunk_mapping.py`, the pipeline tests in `test_vector_index.py`, and `test_vector_repository_live.py::TestTheBulkRead` against a real server. 11 mutations, all caught.
+
+### Bug 5.23: The In-Memory Index Reserved 1.2 GB However Little It Held, and Was Rebuilt at Every Start (`vectorDbManager.py`, `ingestion_pipeline.py`, `vector_search.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `DynamicMemoryIndex` allocates every slot at construction, and both `IngestionPipeline` and `VectorSearch` sized theirs to `MAX_VECTORS`. Measured: **1,214 MB held with 5,000 vectors**, 1,236 MB with 100,000; with room for 20,000 it holds 34 MB. On top of that every startup rebuilt the graph from every stored vector (5.20's cost): 5.89 s at 100k, and superlinear.
+- **Status:** **Fixed** with a hybrid index under one RAM budget, `VECTOR_INDEX_RAM_MB` (512):
+  - Ingestion builds a **generation** on disk — a static memory index while it fits the budget, a static disk index with a RAM-budgeted node cache past it — in a separate process, and swaps `CURRENT` atomically. Startup opens it; only vectors added since are loaded, into a recent index capped at `RECENT_VECTOR_CAPACITY` (20k). Search merges both by distance.
+  - Measured at 100k on the NVMe drive (the earlier tmpfs numbers understated the disk index fourfold): memory index 0.50 ms per search in 90 MB; disk index 4.33 ms uncached in 17 MB, 1.33 ms with half its nodes cached in 77 MB. A fully cached disk index uses more RAM than the memory index and is still slower, which is why the budget chooses rather than always caching.
+  - **Every allocation is admitted before it is made**, against `MemAvailable` and the tightest cgroup v2 limit, less `MEMORY_HEADROOM_MB`. Linux overcommits, so a native allocation that cannot be backed does not fail — the OOM killer acts later, on whichever process it picks. Fallbacks: a disk index opens with a smaller cache, down to none; a generation that does not fit, is corrupt or was built for another model is skipped for the previous one; with no index the dense half returns nothing and keyword search carries on; refresh tries again. A build that does not fit is planned for disk or skipped; the builder sets its own `oom_score_adj` to 1000 so the kernel kills it, not the application; a killed, failed or hung build (stopped after `max(900 s, 5 ms × vectors)`) leaves the current generation in use. PostgreSQL down at startup costs only the recent vectors.
+  - **Tests:** `test_vector_index.py` and `test_index_fallbacks.py` — each worst case made real: a builder killed by SIGKILL, a hung builder, memory and cgroup limits, a full disk, corrupt and foreign generations, PostgreSQL down, a build already running. 21 mutations, all caught.
+
+### Bug 5.24: diskannpy 0.7.0 Traps Met While Persisting the Index (`index_generations.py`, `index_build.py`) — GUARDED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** Each verified in a fresh process; none is fixable without rebuilding diskannpy, whose last release this is.
+  - **The dynamic index cannot be saved, re-confirmed.** All 2,001 tags written as zero; recall 0.0 in a new process under three loader settings.
+  - **A tagged static build loads with recall 0.156.** `build_memory_index(tags=…)` then `DynamicMemoryIndex.from_file` is the documented way to persist a mutable index, but the compiled builder hard-codes `saturate_graph(false)` — 5.19 again, out of reach.
+  - **A disk index searched with `num_threads=1` never returns.** Two threads or more never hang; with four, sixteen concurrent callers got answers identical to serial ones.
+  - **A disk index asked for more neighbours than it holds pads with position 0** — a real vector, so the padding becomes a wrong but valid label.
+  - **A memory index of one vector cannot be built** ("r = 0 is zero").
+  - **`RLIMIT_AS` cannot bound a builder:** importing diskannpy reserves 1.4 GB of address space while using 62 MB, so any limit low enough to matter kills it at import.
+- **Status:** **Guarded.** Static indexes only; searches use at least two threads (`search_threads()`); `BuiltIndex.search` asks for no more than it holds and drops positions out of range; builds need two vectors; the builder is bounded by admission and the OOM score instead of a limit. The builder is `python -m data_layer.vector_db_manager.index_build`, not `multiprocessing`: spawn re-imports the caller's main script, and a script without a `__main__` guard re-ran itself inside the builder — found when one did.
 
 ---
 
@@ -738,4 +785,12 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Priority:** P2
 - **Explanation:** The end-to-end pipeline test builds a real `IngestionPipeline`, whose chunker and label repository open `Config.DB_PATH` — the developer's own `data/hierarchical_db` — and the test's own comment says so ("It will write to DB_PATH"). Verified: running that file alone moves the real store from 44 labels to 45. Every full-suite run adds rows, and since 5.20 a stored vector with each, so the suite's results and the developer's data are entangled: the real store carries test chunks, and it migrated to the new schema the first time the suite ran rather than when the app did. The fix is to point the pipeline's paths at `tmp_path` for that test.
 - **Status:** **Fixed** for every test, not just that one. `Chunker` and the retrieval constructors bound `Config.DB_PATH` as a default argument, which Python evaluates at import, so no redirect could reach them; they now read it when called. The root `conftest.py` points `Config.DB_PATH` at a per-test path, as it does `Config.MEMORY_DB`. Verified: a full run leaves the real store's label count and modification time unchanged. `TestTheSuiteNeverTouchesTheRealChunkStore` guards both halves.
+- **Extended with 5.22:** `Config.INDEX_PATH` is redirected per test as well, and the chunk vector store is replaced by an in-memory one (the `chunk_vectors` fixture), because ingestion now writes vectors to PostgreSQL and the suite reads the developer's `.env`. Only `test/live_testing/` reaches the real server, under throwaway project ids it deletes. `TestTheSuiteNeverTouchesTheRealStores` guards it.
+
+### Bug 7.7: A Test's `monkeypatch.undo()` Reverted conftest's Redirects and Reached the Real PostgreSQL — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** Introduced and caught while fixing 5.23. A fallback test ended a temporary patch with `monkeypatch.undo()`. The `monkeypatch` fixture is one instance per test, shared with the root `conftest.py`'s autouse fixtures, so `undo()` also reverted the chunk vector store and the path redirects, and the rest of the test opened `VectorRepository("global")` against the developer's PostgreSQL. What it did there: `create extension if not exists` and `create table if not exists`, both no-ops on a database that has them, then a read that found nothing. Nothing was written. Verified afterwards: the real chunk store unchanged at 0 labels, no index directory created.
+- **Status:** **Fixed.** Temporary patches use `pytest.MonkeyPatch.context()`, which reverts only its own. `test_no_test_undoes_every_patch` fails the suite if any test calls `monkeypatch.undo()`.
 

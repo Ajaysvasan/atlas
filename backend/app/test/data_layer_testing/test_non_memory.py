@@ -147,10 +147,12 @@ class TestNonMemoryBugs(unittest.TestCase):
         embedded = embedder.embed(chunks)
         self.assertEqual(len(embedded), 100)
 
-    def test_bug_4_2_ingestion_pipeline(self):
+    def test_the_ingestion_pipeline_reserves_no_index_memory(self):
+        """It used to hold its own index sized for MAX_VECTORS: 1.2 GB however
+        little it ingested. It stores vectors and builds generations instead."""
         pipeline = IngestionPipeline()
-        self.assertEqual(pipeline.vector_db.graph_degree, Config.GRAPH_DEGREE)
-        self.assertEqual(pipeline.vector_db.k_neighbors, Config.K_NEIGHBORS)
+        self.assertFalse(hasattr(pipeline, "vector_db"))
+        pipeline.close()
 
     def test_bug_5_1_vector_db_manager_lock(self):
         v = VectorDbManager("l2", np.float32, 128, 1000, 100, 120, 4, 9)

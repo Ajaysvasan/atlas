@@ -140,3 +140,90 @@ class MissingDatabaseConfiguration(Exception):
             "defaults for anything left unset — including the OS username — and "
             "the connection then silently goes somewhere unintended."
         )
+
+
+class MissingVectorId(Exception):
+    """A chunk reached `vector_meta_data` without the vector id it is stored under."""
+
+    def __init__(self, chunk_id) -> None:
+        self.chunk_id = chunk_id
+        super().__init__(self.chunk_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Chunk {self.chunk_id!r} has no vector id. The id is derived from the "
+            "chunk id by the embedder and must be passed; the table never makes one up."
+        )
+
+
+class MalformedVectorId(Exception):
+    def __init__(self, chunk_id, vector_id) -> None:
+        self.chunk_id = chunk_id
+        self.vector_id = vector_id
+        super().__init__(self.chunk_id, self.vector_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Chunk {self.chunk_id!r} has vector id {self.vector_id!r}; a vector id "
+            "is an integer between 0 and 2**63 - 1."
+        )
+
+
+class VectorIdConflict(Exception):
+    """The chunk, or the vector id, is already mapped to something else."""
+
+    def __init__(self, chunk_id, vector_id, stored_chunk_id, stored_vector_id) -> None:
+        self.chunk_id = chunk_id
+        self.vector_id = vector_id
+        self.stored_chunk_id = stored_chunk_id
+        self.stored_vector_id = stored_vector_id
+        super().__init__(chunk_id, vector_id, stored_chunk_id, stored_vector_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Chunk {self.chunk_id!r} with vector id {self.vector_id} conflicts with "
+            f"the stored mapping of chunk {self.stored_chunk_id!r} to vector id "
+            f"{self.stored_vector_id}."
+        )
+
+
+class EmbeddingModelMismatch(Exception):
+    def __init__(self, chunk_id, stored_model, model) -> None:
+        self.chunk_id = chunk_id
+        self.stored_model = stored_model
+        self.model = model
+        super().__init__(chunk_id, stored_model, model)
+
+    def __str__(self) -> str:
+        return (
+            f"Chunk {self.chunk_id!r} is stored as embedded by {self.stored_model!r}, "
+            f"not {self.model!r}. One store holds one model's vectors; re-ingest "
+            "into a fresh store to change models."
+        )
+
+
+class VectorStoreUnavailable(Exception):
+    """The PostgreSQL store for document chunk vectors could not be reached."""
+
+    def __init__(self, cause: BaseException) -> None:
+        self.cause = cause
+        super().__init__(cause)
+
+    def __str__(self) -> str:
+        return (
+            f"The chunk vector store is unavailable ({type(self.cause).__name__}: "
+            f"{self.cause}). Nothing was ingested: a label is never written for a "
+            "vector that was not stored."
+        )
+
+
+class IndexGenerationUnusable(Exception):
+    """A built index on disk that cannot be searched here, for the reason given."""
+
+    def __init__(self, generation, reason) -> None:
+        self.generation = generation
+        self.reason = reason
+        super().__init__(self.generation, self.reason)
+
+    def __str__(self) -> str:
+        return f"Index generation {self.generation!r} is unusable: {self.reason}"

@@ -80,3 +80,67 @@ class TestTheRoundTrip:
 
         with pytest.raises(VectorNotFoundEror):
             repository.search(11)
+
+
+class TestTheBulkRead:
+    """What the index is built from: every stored vector among a page of ids,
+    in one query. Vector ids use all 63 bits, which psycopg sends as numeric
+    unless the query casts them."""
+
+    def test_ids_past_32_bits_come_back_exactly(self, repository):
+        from data_layer.ingestion.embedding.vector_ids import vector_id_for
+
+        ids = [vector_id_for(f"chunk-{i}") for i in range(3)]
+        assert max(ids) > 2**32
+        written = [a_vector(20 + i) for i in range(3)]
+        repository.batch_insert(ids, written)
+
+        found = repository.vectors_for(ids)
+
+        assert set(found) == set(ids)
+        for vector_id, vector in zip(ids, written):
+            assert found[vector_id].dtype == np.float32
+            assert np.array_equal(found[vector_id], vector)
+
+    def test_ids_not_stored_are_absent(self, repository):
+        repository.insert(30, a_vector(30))
+        assert set(repository.vectors_for([30, 31])) == {30}
+
+    def test_another_projects_vectors_are_not_returned(self, repository):
+        from data_layer.vector_db_manager.repository.vectorRepository import (
+            VectorRepository,
+        )
+
+        other = VectorRepository(repository.project_id + "_other")
+        try:
+            other.insert(40, a_vector(40))
+            assert repository.vectors_for([40]) == {}
+        finally:
+            other.curr.execute("delete from vectors where project_id = %s", (other.project_id,))
+            other.conn.commit()
+            other.close()
+
+    def test_nothing_asked_for_is_not_a_query(self, repository):
+        assert repository.vectors_for([]) == {}
+
+    def test_stored_vectors_pair_labels_with_what_postgresql_holds(self, repository, tmp_path):
+        from data_layer.ingestion.embedding.vector_ids import vector_id_for
+        from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
+            VectorMetaDataRepository,
+        )
+        from data_layer.vector_db_manager.stored_vectors import StoredVectors
+
+        mapping = VectorMetaDataRepository(str(tmp_path / "chunks"))
+        chunk_ids = [f"chunk-{i}" for i in range(4)]
+        ids = [vector_id_for(c) for c in chunk_ids]
+        written = np.stack([a_vector(50 + i) for i in range(4)])
+        repository.batch_insert(ids[:3], written[:3])
+        labels = mapping.batch_insert(ids, chunk_ids)
+        source = StoredVectors(mapping, repository)
+
+        page, = list(source.pages())
+        mapping.close()
+
+        assert page.labels.tolist() == labels[:3]
+        assert np.array_equal(page.vectors, written[:3])
+        assert page.through == labels[3] and source.missing == 1

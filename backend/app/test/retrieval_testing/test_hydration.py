@@ -4,6 +4,8 @@ import sqlite3
 
 import pytest
 
+from data_layer.ingestion.embedding.vector_ids import vector_id_for
+from data_layer.vector_db_manager.repository.vectorMetaDataRepository import CREATE
 from retrieval_layer.hydration import Hydration
 from retrieval_layer.models import ScoredId, VECTOR
 
@@ -12,8 +14,7 @@ def store_with(tmp_path, hierarchical=(), recursive=(), mapped=()):
     """A chunk store holding whichever chunk kinds the test needs."""
     path = tmp_path / "chunks.db"
     conn = sqlite3.connect(path)
-    conn.execute("create table vector_meta_data(vectorId integer primary key "
-                 "autoincrement, chunkId text, embeddingModelUsed text, dimensions int)")
+    conn.execute(CREATE)
     if hierarchical:
         conn.execute("create table Chunks(chunkId text primary key, contextId text, "
                      "chunk text, startoffset int, endoffset int)")
@@ -24,8 +25,8 @@ def store_with(tmp_path, hierarchical=(), recursive=(), mapped=()):
         conn.executemany("insert into RecursiveChunks values (?, 'doc', ?, 0, 10)",
                          recursive)
     for label, chunk_id in mapped:
-        conn.execute("insert into vector_meta_data values (?, ?, 'm', 128)",
-                     (label, chunk_id))
+        conn.execute("insert into vector_meta_data values (?, ?, ?, 'm', 128)",
+                     (label, vector_id_for(chunk_id), chunk_id))
     conn.commit()
     conn.close()
     return str(path)

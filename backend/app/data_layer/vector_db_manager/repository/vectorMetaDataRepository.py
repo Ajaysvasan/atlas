@@ -1,47 +1,64 @@
 """The only way back from a DiskANN hit to the chunk it came from."""
 
+import operator
 import sqlite3
 import threading
 from contextlib import contextmanager
 from typing import Dict, Iterator, List, Sequence, Tuple
 
 import numpy as np
-from numpy import float32, ndarray, uint32
+from numpy import ndarray, uint32
 
 from config import Config, get_logger
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
+    EmbeddingModelMismatch,
     InvalidBatchSize,
     InvalidColumnNameException,
-    InvalidVectorDimension,
     InvalidVectorID,
+    MalformedVectorId,
+    MissingVectorId,
+    VectorIdConflict,
 )
+from data_layer.ingestion.embedding.vector_ids import vector_id_for
 from storage.sqlite_setup import connect, enable_wal
 
 logger = get_logger(__name__)
 
-VALID_COLUMNS = ("vectorId", "chunkId", "embeddingModelUsed", "dimensions")
+VALID_COLUMNS = ("label", "vectorId", "chunkId", "embeddingModelUsed", "dimensions")
 
-RESTORE_BATCH = 50_000
+PAGE = 50_000
+
+UINT32_MAX = int(np.iinfo(uint32).max)
+
+CREATE = """
+    create table if not exists vector_meta_data(
+        label integer primary key autoincrement check (label <= 4294967295),
+        vectorId integer not null unique
+            check (typeof(vectorId) = 'integer' and vectorId >= 0),
+        chunkId text not null unique,
+        embeddingModelUsed text not null,
+        dimensions integer not null
+    );
+"""
+
+
+def checked_vector_id(vector_id, chunk_id: str) -> int:
+    """The vector id as an int, or the reason it cannot be stored."""
+    if vector_id is None:
+        raise MissingVectorId(chunk_id)
+    if isinstance(vector_id, (bool, np.bool_)):
+        raise MalformedVectorId(chunk_id, vector_id)
+    try:
+        value = operator.index(vector_id)
+    except TypeError:
+        raise MalformedVectorId(chunk_id, vector_id) from None
+    if not 0 <= value <= Config.VECTOR_ID_MASK:
+        raise MalformedVectorId(chunk_id, vector_id)
+    return value
 
 
 class VectorMetaDataRepository:
-    """`vector_id -> chunk_id`, and the allocator of those vector ids.
-
-    It allocates them because DiskANN labels are `uint32` while this project's
-    derived ids are masked into 63 bits, which do not fit; and hashing chunk ids
-    down into 32 bits would collide about 116 times at MAX_VECTORS. A sequential
-    id from this table cannot collide, and the table is what translates it back
-    — which is the whole reason the table exists.
-
-    It lives in the chunk store's own database file, so a search result becomes
-    text through a single join against `Chunks` rather than a second connection
-    and a second round trip.
-
-    It also holds each vector, written in the transaction that allocates its
-    label. diskannpy 0.7.0 cannot reload a dynamic index it saved (bug 5.20), so
-    the index is rebuilt from here at startup and this table, not DiskANN's
-    files, is what survives a restart.
-    """
+    """`label -> vector id -> chunk id`, and the allocator of DiskANN labels."""
 
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or Config.DB_PATH
@@ -72,291 +89,210 @@ class VectorMetaDataRepository:
 
     def __create_meta_data_table(self) -> None:
         with self._writing() as cursor:
-            # No foreign key on chunkId. A chunk id lives in `Chunks` when the
-            # document had sections and in `RecursiveChunks` when it did not,
-            # and SQLite cannot reference whichever of two tables holds it. The
-            # previous declaration named `Chunks` in a database that did not
-            # contain it, so every insert failed (bug 5.2).
-            cursor.execute("""
-                create table if not exists vector_meta_data(
-                    vectorId integer primary key autoincrement,
-                    chunkId text not null,
-                    embeddingModelUsed text not null,
-                    dimensions integer not null,
-                    vector blob
-                );
-            """)
             columns = {
-                row[1] for row in cursor.execute(
-                    "pragma table_info(vector_meta_data)"
-                )
+                row[1] for row in cursor.execute("pragma table_info(vector_meta_data)")
             }
-            if "vector" not in columns:
-                cursor.execute("alter table vector_meta_data add column vector blob;")
-            self.__one_label_per_chunk(cursor)
+            if columns and "label" not in columns:
+                self.__rebuild_without_vectors(cursor)
+            # No foreign key on chunkId: a chunk id lives in `Chunks` or in
+            # `RecursiveChunks`, and SQLite cannot reference whichever holds it.
+            cursor.execute(CREATE)
 
-    def __one_label_per_chunk(self, cursor: sqlite3.Cursor) -> None:
-        """One label per chunk and model, enforced by the database (bug 5.21).
-
-        Allocation used to insert unconditionally, so every re-ingest gave each
-        chunk another label — and since the vectors are stored (5.20) every one
-        of them was rebuilt into the index. A store written before the
-        constraint is collapsed first, keeping the row that has a vector; the
-        index is derived from this table, so the copies dropped are not
-        referenced anywhere else.
-        """
-        present = cursor.execute(
-            "select 1 from sqlite_master where type = 'index' "
-            "and name = 'idx_vector_meta_chunk_model'"
-        ).fetchone()
-        if present is not None:
-            return
-        cursor.execute("""
-            delete from vector_meta_data where vectorId not in (
-                select coalesce(min(case when vector is not null then vectorId end),
-                                min(vectorId))
-                from vector_meta_data group by chunkId, embeddingModelUsed
-            )
-        """)
-        if cursor.rowcount:
-            logger.warning(
-                "Removed %d duplicate label(s) left by earlier re-ingests",
-                cursor.rowcount,
-            )
-        # Its columns lead the unique index, which serves the same lookups.
-        cursor.execute("drop index if exists idx_vector_meta_chunk")
-        cursor.execute(
-            "create unique index idx_vector_meta_chunk_model "
-            "on vector_meta_data(chunkId, embeddingModelUsed)"
+    def __rebuild_without_vectors(self, cursor: sqlite3.Cursor) -> None:
+        """Carry a table from before vector ids were required (bug 5.22) into the new one."""
+        rows = cursor.execute(
+            "select vectorId, chunkId, embeddingModelUsed, dimensions "
+            "from vector_meta_data where vectorId is not null and chunkId is not null"
+        ).fetchall()
+        highest = max((row[0] for row in rows), default=0)
+        cursor.execute("alter table vector_meta_data rename to vector_meta_data_old")
+        cursor.execute(CREATE)
+        # The old vectorId was the label. A chunk keeps one: its oldest under
+        # the configured model, else its oldest.
+        rows.sort(key=lambda r: (r[2] != Config.EMBEDDING_MODEL, r[0]))
+        kept, seen = [], set()
+        for label, chunk_id, model, dimensions in rows:
+            if chunk_id in seen or not 1 <= label <= UINT32_MAX:
+                continue
+            seen.add(chunk_id)
+            kept.append((label, vector_id_for(chunk_id), chunk_id, model, dimensions))
+        cursor.executemany(
+            "insert into vector_meta_data"
+            "(label, vectorId, chunkId, embeddingModelUsed, dimensions) "
+            "values (?, ?, ?, ?, ?)",
+            kept,
+        )
+        cursor.execute("drop table vector_meta_data_old")
+        # Labels the dropped rows held are not handed out again.
+        if 1 <= highest <= UINT32_MAX:
+            raised = cursor.execute(
+                "update sqlite_sequence set seq = max(seq, ?) "
+                "where name = 'vector_meta_data'",
+                (highest,),
+            ).rowcount
+            if not raised:
+                cursor.execute(
+                    "insert into sqlite_sequence(name, seq) "
+                    "values ('vector_meta_data', ?)",
+                    (highest,),
+                )
+        logger.warning(
+            "Rebuilt vector_meta_data for required vector ids: kept %d row(s), "
+            "dropped %d. Kept rows have no stored vector until their documents "
+            "are ingested again",
+            len(kept),
+            len(rows) - len(kept),
         )
 
-    def __insert_meta(
-        self,
-        vectorId: uint32,
-        chunkId: str,
-        embeddingModelUsed: str,
-        dimensions: int = Config.EMBEDDING_DIMENSIONS,
-    ) -> None:
-        with self._writing() as cursor:
-            cursor.execute(
-                "insert into vector_meta_data"
-                "(vectorId, chunkId, embeddingModelUsed, dimensions) "
-                "values (?, ?, ?, ?) on conflict do nothing;",
-                (int(vectorId), chunkId, embeddingModelUsed, int(dimensions)),
-            )
-
-    def __insert_batch_meta_data(
-        self,
-        vectorIds: Sequence[uint32],
-        chunkIds: Sequence[str],
-        embeddingModelUsed: str,
-        dimensions: int,
-    ) -> None:
-        if len(vectorIds) != len(chunkIds):
-            raise InvalidBatchSize(
-                "The number of vectorIds and number of chunk ids don't match"
-            )
-        rows = [
-            (int(vectorId), chunkId, embeddingModelUsed, int(dimensions))
-            for vectorId, chunkId in zip(vectorIds, chunkIds)
-        ]
-        with self._writing() as cursor:
-            cursor.executemany(
-                "insert into vector_meta_data"
-                "(vectorId, chunkId, embeddingModelUsed, dimensions) "
-                "values (?, ?, ?, ?) on conflict do nothing;",
-                rows,
-            )
-        logger.debug("Mapped %d vector(s) to their chunks", len(rows))
-
-    def __get_meta_data(self, vectorId: uint32, columnName: str) -> str | int:
-        if columnName not in VALID_COLUMNS:
-            raise InvalidColumnNameException(columnName)
-        with self._reading() as cursor:
-            cursor.execute(
-                f"select {columnName} from vector_meta_data where vectorId = ?",
-                (int(vectorId),),
-            )
-            result = cursor.fetchone()
-        if result is None:
-            raise InvalidVectorID(vectorId)
-        return result[0]
+    @staticmethod
+    def __label(cursor, vectorId, chunkId, embeddingModelUsed, dimensions) -> int:
+        inserted = cursor.execute(
+            "insert into vector_meta_data"
+            "(vectorId, chunkId, embeddingModelUsed, dimensions) "
+            "values (?, ?, ?, ?) on conflict do nothing returning label;",
+            (vectorId, chunkId, embeddingModelUsed, dimensions),
+        ).fetchone()
+        if inserted is not None:
+            return inserted[0]
+        stored = cursor.execute(
+            "select label, vectorId, chunkId, embeddingModelUsed "
+            "from vector_meta_data where chunkId = ? or vectorId = ?",
+            (chunkId, vectorId),
+        ).fetchall()
+        for label, stored_id, stored_chunk, stored_model in stored:
+            if stored_chunk == chunkId and stored_id == vectorId:
+                if stored_model != embeddingModelUsed:
+                    raise EmbeddingModelMismatch(chunkId, stored_model, embeddingModelUsed)
+                return label
+        _, stored_id, stored_chunk, _ = stored[0]
+        raise VectorIdConflict(chunkId, vectorId, stored_chunk, stored_id)
 
     # Public APIs
 
     def insert(
         self,
-        vectorId: uint32,
+        vectorId: int,
         chunkId: str,
-        embeddingModelUsed: str,
-        dimensions: int = Config.EMBEDDING_DIMENSIONS,
-    ) -> None:
-        self.__insert_meta(vectorId, chunkId, embeddingModelUsed, dimensions)
-
-    def batch_insert(
-        self,
-        vectorIds: Sequence[uint32],
-        chunkIds: Sequence[str],
-        embeddingModelUsed: str,
-        dimensions: int = Config.EMBEDDING_DIMENSIONS,
-    ) -> None:
-        self.__insert_batch_meta_data(
-            vectorIds, chunkIds, embeddingModelUsed, dimensions
-        )
-
-    def get_meta_data(self, vectorId: uint32, columnName: str) -> str | int:
-        return self.__get_meta_data(vectorId, columnName)
-
-    @staticmethod
-    def __as_blob(vector: ndarray | None, dimensions: int) -> bytes | None:
-        if vector is None:
-            return None
-        values = np.asarray(vector, dtype=float32)
-        if values.shape != (int(dimensions),):
-            raise InvalidVectorDimension(values.shape, (int(dimensions),))
-        return values.tobytes()
-
-    def allocate(
-        self,
-        chunkId: str,
-        vector: ndarray | None = None,
         embeddingModelUsed: str = Config.EMBEDDING_MODEL,
         dimensions: int = Config.EMBEDDING_DIMENSIONS,
     ) -> int:
         """This chunk's DiskANN label: the one it already has, or the next one."""
-        blob = self.__as_blob(vector, dimensions)
+        vector_id = checked_vector_id(vectorId, chunkId)
         with self._writing() as cursor:
-            return self.__label(cursor, chunkId, embeddingModelUsed, dimensions, blob)
+            return self.__label(
+                cursor, vector_id, chunkId, embeddingModelUsed, int(dimensions)
+            )
 
-    @staticmethod
-    def __label(cursor, chunkId, embeddingModelUsed, dimensions, blob) -> int:
-        # One statement, so two writers cannot both decide the chunk is new. A
-        # chunk seen before keeps its label, and gains a vector if it had none.
-        return cursor.execute(
-            "insert into vector_meta_data"
-            "(chunkId, embeddingModelUsed, dimensions, vector) values (?, ?, ?, ?) "
-            "on conflict (chunkId, embeddingModelUsed) do update set "
-            "vector = coalesce(vector_meta_data.vector, excluded.vector) "
-            "returning vectorId;",
-            (chunkId, embeddingModelUsed, int(dimensions), blob),
-        ).fetchone()[0]
-
-    def allocate_many(
+    def batch_insert(
         self,
+        vectorIds: Sequence[int],
         chunkIds: Sequence[str],
-        vectors: Sequence[ndarray] | None = None,
         embeddingModelUsed: str = Config.EMBEDDING_MODEL,
         dimensions: int = Config.EMBEDDING_DIMENSIONS,
     ) -> List[int]:
-        """Labels for a batch, in the order given, in one transaction; a chunk seen before keeps its own."""
-        if not chunkIds:
-            return []
-        if vectors is not None and len(vectors) != len(chunkIds):
+        """Labels for a batch, in the order given, in one transaction."""
+        if len(vectorIds) != len(chunkIds):
             raise InvalidBatchSize(
-                f"{len(vectors)} vector(s) for {len(chunkIds)} chunk id(s)"
+                "The number of vectorIds and number of chunk ids don't match"
             )
-        blobs = (
-            [None] * len(chunkIds) if vectors is None
-            else [self.__as_blob(v, dimensions) for v in vectors]
-        )
+        rows = [
+            (checked_vector_id(vector_id, chunk_id), chunk_id)
+            for vector_id, chunk_id in zip(vectorIds, chunkIds)
+        ]
         # One statement per row: executemany cannot return each row's label.
         with self._writing() as cursor:
-            allocated = [
-                self.__label(cursor, chunkId, embeddingModelUsed, dimensions, blob)
-                for chunkId, blob in zip(chunkIds, blobs)
+            labels = [
+                self.__label(cursor, vector_id, chunk_id, embeddingModelUsed, int(dimensions))
+                for vector_id, chunk_id in rows
             ]
-        logger.debug("Allocated %d vector label(s)", len(allocated))
-        return allocated
+        logger.debug("Mapped %d vector(s) to their labels", len(labels))
+        return labels
 
-    def vectors(
+    def get_meta_data(self, vectorId: int, columnName: str) -> str | int:
+        if columnName not in VALID_COLUMNS:
+            raise InvalidColumnNameException(columnName)
+        with self._reading() as cursor:
+            result = cursor.execute(
+                f"select {columnName} from vector_meta_data where vectorId = ?",
+                (int(vectorId),),
+            ).fetchone()
+        if result is None:
+            raise InvalidVectorID(vectorId)
+        return result[0]
+
+    def labels(
         self,
-        batch_size: int = RESTORE_BATCH,
         after: int = 0,
+        batch_size: int = PAGE,
         embeddingModelUsed: str = Config.EMBEDDING_MODEL,
         dimensions: int = Config.EMBEDDING_DIMENSIONS,
     ) -> Iterator[Tuple[ndarray, ndarray]]:
-        """Stored `(labels, vectors)` with labels above `after`, a page at a time.
+        """`(labels, vector ids)` above `after`, in label order, a page at a time.
 
-        Only vectors from this model at this width: another model's vectors are
-        in a different space and would answer queries with nonsense. Each page
-        is read under the lock and yielded outside it, so a caller building an
-        index from it does not hold every other reader up while it does.
+        Only this model's at this width: another model's vectors are in a
+        different space. Each page is read under the lock and yielded outside it.
         """
-        width = int(dimensions) * float32().itemsize
         last = int(after)
         while True:
             with self._reading() as cursor:
                 rows = cursor.execute(
-                    "select vectorId, vector from vector_meta_data "
-                    "where vectorId > ? and vector is not null "
-                    "and length(vector) = ? and embeddingModelUsed = ? "
-                    "and dimensions = ? order by vectorId limit ?",
-                    (last, width, embeddingModelUsed, int(dimensions),
-                     int(batch_size)),
+                    "select label, vectorId from vector_meta_data "
+                    "where label > ? and embeddingModelUsed = ? and dimensions = ? "
+                    "order by label limit ?",
+                    (last, embeddingModelUsed, int(dimensions), int(batch_size)),
                 ).fetchall()
             if not rows:
                 return
             labels = np.fromiter((r[0] for r in rows), dtype=uint32, count=len(rows))
-            matrix = np.frombuffer(
-                b"".join(r[1] for r in rows), dtype=float32
-            ).reshape(len(rows), int(dimensions))
+            vector_ids = np.fromiter((r[1] for r in rows), dtype=np.int64, count=len(rows))
             last = int(labels[-1])
-            yield labels, matrix
+            yield labels, vector_ids
 
-    def missing_vectors(
+    def pending(
         self,
+        after: int = 0,
         embeddingModelUsed: str = Config.EMBEDDING_MODEL,
         dimensions: int = Config.EMBEDDING_DIMENSIONS,
     ) -> int:
-        """Rows `vectors()` skips: no vector stored, or not this model's."""
-        width = int(dimensions) * float32().itemsize
+        """How many of this model's labels lie above `after`."""
         with self._reading() as cursor:
             return cursor.execute(
-                "select count(*) from vector_meta_data where vector is null "
-                "or length(vector) != ? or embeddingModelUsed != ? "
-                "or dimensions != ?",
-                (width, embeddingModelUsed, int(dimensions)),
+                "select count(*) from vector_meta_data where label > ? "
+                "and embeddingModelUsed = ? and dimensions = ?",
+                (int(after), embeddingModelUsed, int(dimensions)),
             ).fetchone()[0]
 
-    def chunk_ids_for(self, vectorIds: Sequence[uint32]) -> Dict[int, str]:
-        """Every id's chunk in one query, keyed by vector id.
-
-        One statement rather than one per hit: a search returns k ids at once,
-        and asking for them individually is the N+1 that makes retrieval slow.
-        Ids with no mapping are absent rather than raising — a stale index can
-        return a vector whose chunk has since been removed.
-        """
-        ids = [int(v) for v in vectorIds]
+    def chunk_ids_for(self, labels: Sequence[int]) -> Dict[int, str]:
+        """Every label's chunk in one query; a label with no row is absent, not an error."""
+        ids = [int(label) for label in labels]
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
         with self._reading() as cursor:
-            cursor.execute(
-                f"select vectorId, chunkId from vector_meta_data "
-                f"where vectorId in ({placeholders})",
+            rows = cursor.execute(
+                f"select label, chunkId from vector_meta_data "
+                f"where label in ({placeholders})",
                 tuple(ids),
-            )
-            return {row[0]: row[1] for row in cursor.fetchall()}
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
 
-    def vector_ids_for(self, chunkIds: Sequence[str]) -> Dict[str, int]:
-        """The reverse, for re-embedding or deleting a known chunk."""
+    def labels_for(self, chunkIds: Sequence[str]) -> Dict[str, int]:
+        """The reverse, for a keyword hit or a known chunk."""
         ids = list(chunkIds)
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
         with self._reading() as cursor:
-            cursor.execute(
-                f"select chunkId, vectorId from vector_meta_data "
+            rows = cursor.execute(
+                f"select chunkId, label from vector_meta_data "
                 f"where chunkId in ({placeholders})",
                 tuple(ids),
-            )
-            return {row[0]: row[1] for row in cursor.fetchall()}
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
 
     def count(self) -> int:
         with self._reading() as cursor:
-            return cursor.execute(
-                "select count(*) from vector_meta_data"
-            ).fetchone()[0]
+            return cursor.execute("select count(*) from vector_meta_data").fetchone()[0]
 
     def close(self) -> None:
         # getattr, not attribute access: if connect() failed in __init__ the

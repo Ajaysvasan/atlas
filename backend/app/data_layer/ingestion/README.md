@@ -13,11 +13,15 @@ folder
   -> TextNormalizer      NormalizedContent (+ SectionSpan offsets)
   -> Chunker             HChunk / RChunk  (+ rows in SQLite)
   -> EmbeddingManager    EmbeddedChunk (vector + vector_id)
-  -> VectorDbManager     DiskANN index
+  -> pgvector            the vector, under its vector id
+  -> vector_meta_data    a DiskANN label for it
+  -> IndexGenerations    a new index generation, every INDEX_REBUILD_AT vectors
 ```
 
-`ingestion_pipeline.py` is a facade over those six, and deliberately adds no
-logic of its own — it is an interface, not a stage. It wraps the five expensive
+`ingestion_pipeline.py` is a facade over those stages, and deliberately adds no
+logic of its own — it is an interface, not a stage. The last three are
+`vector_db_manager/`'s; why the vector is stored before its label, and why the
+index is built in generations, is in its README. It wraps the five expensive
 stages in `log_timing`, which is the only place the cost of a whole run is
 visible in one log.
 

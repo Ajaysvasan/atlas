@@ -14,7 +14,7 @@ ingestion/            files -> text -> chunks -> vectors
   Chunker/              split into chunks, store them in SQLite
   embedding/            text -> 128-dim float32 vectors
   nodes/, metadata/     the dataclasses passed between stages
-vector_db_manager/    the DiskANN index and the pgvector store
+vector_db_manager/    pgvector, the label table, and the DiskANN index built from them
 datalayer_exceptions/ every exception this layer raises
 ```
 
@@ -32,10 +32,6 @@ checked by a property test rather than assumed.
 
 ## Known gaps
 
-- Nothing maps a DiskANN vector id back to its chunk, so a search returns ids
-  that cannot be resolved to text (**bug 5.3**).
-- The pgvector paths cannot work against a real server — no adapter is
-  registered (**bug 5.1**).
 - Re-ingesting an edited document leaves the old version's rows and vectors
   behind (**bug 5.5**).
 

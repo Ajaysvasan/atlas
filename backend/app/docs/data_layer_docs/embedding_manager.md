@@ -23,7 +23,7 @@ Initializes the sentence transformer model in memory.
 
 ## Vector Identifiers
 
-`__generate_vector_id(chunk_id)` derives the id stored in DiskANN and pgvector:
+`vector_id_for(chunk_id)` (`embedding/vector_ids.py`) derives the id pgvector and `vector_meta_data` are keyed by. `__generate_vector_id` calls it; so does the `vector_meta_data` migration, which is why it lives in a module that imports no model. DiskANN does not hold it — its labels are `uint32` and allocated (bug 5.16):
 
 ```
 md5(chunk_id)[:8]  ->  little-endian uint64  ->  & Config.VECTOR_ID_MASK

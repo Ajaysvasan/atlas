@@ -459,16 +459,20 @@ class Corpus:
         )
 
     def add(self, entries):
+        from data_layer.ingestion.embedding.vector_ids import vector_id_for
         from data_layer.ingestion.metadata.metadata import (
             ChunkMetaData, EmbeddedChunkMetaData,
         )
         from data_layer.ingestion.nodes.nodes import EmbeddedChunk, RChunk
+        from data_layer.vector_db_manager.stored_vectors import chunk_vector_store
 
         chunks = [RChunk(text, ChunkMetaData("notes.md", "d1", "recursive"),
                          chunk_id, 0, len(text)) for chunk_id, text in entries]
         self.store.insert_recursive_chunks(chunks)
         vectors = bag_of_words([c.chunk for c in chunks])
-        labels = self.labels.allocate_many([c.chunk_id for c in chunks], list(vectors))
+        vector_ids = [vector_id_for(c.chunk_id) for c in chunks]
+        chunk_vector_store().batch_insert(vector_ids, vectors)
+        labels = self.labels.batch_insert(vector_ids, [c.chunk_id for c in chunks])
         embedded = [EmbeddedChunk(v, label, EmbeddedChunkMetaData(c.chunk_id, c.chunk, "bow"))
                     for c, v, label in zip(chunks, vectors, labels)]
         self.index.batch_insert(embedded, vector_ids=labels)

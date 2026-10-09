@@ -8,6 +8,7 @@ from config import Config, get_logger, log_timing
 from data_layer.datalayer_exceptions.datalayer_exceptions import (
     InvalidEmbeddingArgument,
 )
+from data_layer.ingestion.embedding.vector_ids import vector_id_for
 from data_layer.ingestion.metadata.metadata import EmbeddedChunkMetaData
 from data_layer.ingestion.nodes.nodes import EmbeddedChunk, HChunk, RChunk
 
@@ -29,11 +30,7 @@ class EmbeddingManager:
         self.embedding_dimension = embeddding_dimension
 
     def __generate_vector_id(self, chunk_id: str) -> int:
-        """Derive the vector id from the chunk id, never from the chunk text."""
-        hash_bytes = hashlib.md5(chunk_id.encode("utf-8")).digest()
-        uint64_id = int.from_bytes(hash_bytes[:8], byteorder="little", signed=False)
-        # Without the mask ~49% of ids overflow a signed 64-bit column.
-        return uint64_id & VECTOR_ID_MASK
+        return vector_id_for(chunk_id)
 
     def __create_meta_data(self, chunk_id: str, chunk: str) -> EmbeddedChunkMetaData:
         return EmbeddedChunkMetaData(chunk_id, chunk, self.model_name)

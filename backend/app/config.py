@@ -38,6 +38,21 @@ class Config:
     NUM_THREADS = 4
     K_NEIGHBORS = 9
 
+    # Document chunk vectors live in pgvector's `vectors` table under this
+    # project id. Real project ids are uuid4 hex, so none can be this.
+    GLOBAL_VECTOR_SCOPE = "global"
+
+    # The vector index never plans to hold more than this in RAM, however large
+    # the corpus grows; past it the built index moves to disk.
+    VECTOR_INDEX_RAM_MB = 512
+    # Vectors ingested since the last index build, held in memory until the next.
+    RECENT_VECTOR_CAPACITY = 20_000
+    # Ingestion rebuilds once this many vectors wait outside the built index:
+    # half the capacity, so one failed build still leaves room.
+    INDEX_REBUILD_AT = 10_000
+    # Memory no index allocation may plan away from the rest of the system.
+    MEMORY_HEADROOM_MB = 256
+
     # How many conversation turns the summariser feeds the draft model in one
     # window. Measured in turns, not tokens: the window is addressed by
     # sequence_number, and _WINDOW_OVERLAP_CHUNKS extends it further back.
