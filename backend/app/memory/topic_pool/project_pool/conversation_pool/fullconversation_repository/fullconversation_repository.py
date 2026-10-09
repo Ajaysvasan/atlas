@@ -1,7 +1,7 @@
 import hashlib
 import sqlite3
 from pathlib import Path
-from typing import List, NamedTuple, Tuple
+from typing import List, NamedTuple, Sequence, Tuple
 
 from config import get_logger
 from memory.identifiers import require_identifier
@@ -73,6 +73,74 @@ def _create_tables(cursor: sqlite3.Cursor) -> None:
 
 
 SCHEMA = Schema("conversation_turns", _create_tables, requires=(PROJECT_SCHEMA,))
+
+
+class ScopedTurn(NamedTuple):
+    """A turn with the conversation it belongs to, for reads that span conversations."""
+
+    conversation_id: str
+    sequence_number: int
+    role: str
+    text: str
+    chunk_id: str
+
+
+_SCOPED_TURN_QUERY = """
+    SELECT f.conversation_id, f.sequence_number, f.role, s.chunk, f.chunk_id
+    FROM full_conversation AS f
+    JOIN summary_chunks AS s
+      ON s.chunk_id = f.chunk_id AND s.conversation_id = f.conversation_id
+"""
+
+
+def _turn_store(database: MemoryDatabase | str | Path | None) -> MemoryDatabase:
+    store = MemoryDatabase.of(database)
+    store.ensure(SCHEMA)
+    return store
+
+
+def conversation_ids(
+    project_id: str, database: MemoryDatabase | str | Path | None = None
+) -> List[str]:
+    """Every conversation in a project that has at least one turn."""
+    with _turn_store(database).reading() as cursor:
+        rows = cursor.execute(
+            "SELECT DISTINCT conversation_id FROM full_conversation WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def turns_after_sequence(
+    project_id: str,
+    conversation_id: str,
+    sequence_number: int,
+    database: MemoryDatabase | str | Path | None = None,
+) -> List[ScopedTurn]:
+    """One conversation's turns after `sequence_number`, in order."""
+    with _turn_store(database).reading() as cursor:
+        rows = cursor.execute(
+            _SCOPED_TURN_QUERY
+            + "WHERE f.project_id = ? AND f.conversation_id = ? "
+            "AND f.sequence_number > ? ORDER BY f.sequence_number",
+            (project_id, conversation_id, int(sequence_number)),
+        ).fetchall()
+    return [ScopedTurn(*row) for row in rows]
+
+
+def turns_for_chunks(
+    chunk_ids: Sequence[str], database: MemoryDatabase | str | Path | None = None
+) -> List[ScopedTurn]:
+    """The turns behind `chunk_ids`, in no particular order; an id with no turn is absent."""
+    if not chunk_ids:
+        return []
+    placeholders = ",".join("?" * len(chunk_ids))
+    with _turn_store(database).reading() as cursor:
+        rows = cursor.execute(
+            _SCOPED_TURN_QUERY + f"WHERE f.chunk_id IN ({placeholders})",
+            tuple(chunk_ids),
+        ).fetchall()
+    return [ScopedTurn(*row) for row in rows]
 
 
 class FullConversationRepository:
