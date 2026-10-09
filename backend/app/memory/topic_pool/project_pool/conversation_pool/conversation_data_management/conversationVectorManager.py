@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 from numpy import uint32
@@ -41,6 +41,10 @@ class ConversationVectorManager:
     def get_vectors(self, vector_ids: List[uint32]) -> np.ndarray:
         """Retrieves a batch of vectors from the repository by vector_ids."""
         return self.repository.batch_search(vector_ids)
+
+    def vectors_for(self, vector_ids: List[int]) -> Dict[int, np.ndarray]:
+        """The stored vectors among `vector_ids`, in one query; ids not stored are absent."""
+        return self.repository.vectors_for(vector_ids)
 
     def close(self) -> None:
         """Release the PostgreSQL connection this manager opened."""

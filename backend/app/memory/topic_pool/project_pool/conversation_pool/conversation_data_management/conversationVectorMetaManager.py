@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, NamedTuple, Tuple
 
 from config import get_logger
 from memory.identifiers import require_identifier
@@ -59,6 +59,37 @@ def _create_tables(cursor: sqlite3.Cursor) -> None:
 SCHEMA = Schema(
     "conversation_snapshots", _create_tables, requires=(PROJECT_SCHEMA, TURN_SCHEMA)
 )
+
+
+class TurnVectorId(NamedTuple):
+    """A summarised turn's vector id, and where the turn sits."""
+
+    vector_id: int
+    conversation_id: str
+    sequence_number: int
+
+
+def turn_vector_ids(
+    project_id: str,
+    conversation_id: str | None = None,
+    database: MemoryDatabase | str | Path | None = None,
+) -> List[TurnVectorId]:
+    """Every turn vector in a project, or in one of its conversations when one is named."""
+    store = MemoryDatabase.of(database)
+    store.ensure(SCHEMA)
+    query = """
+        SELECT s.summary_vector_id, f.conversation_id, f.sequence_number
+        FROM full_conversation AS f
+        JOIN summary_vector_meta_data AS s ON s.chunk_id = f.chunk_id
+        WHERE f.project_id = ?
+    """
+    params: Tuple = (project_id,)
+    if conversation_id is not None:
+        query += " AND f.conversation_id = ?"
+        params += (conversation_id,)
+    with store.reading() as cursor:
+        rows = cursor.execute(query, params).fetchall()
+    return [TurnVectorId(*row) for row in rows]
 
 
 class ConversationVectorMetaDataRepository:

@@ -56,6 +56,7 @@ class Passage(NamedTuple):
     start_offset: int | None = None
     end_offset: int | None = None
     embedding: ndarray | None = None
+    role: str | None = None
 
     def tokens(self, chars_per_token: int) -> int:
         return len(self.text) // chars_per_token
