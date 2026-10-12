@@ -272,7 +272,7 @@ class TestTheRaceIsClosed:
         managers = [TopicManager("same", None, db_path) for _ in range(2)]
         winners, losers = [], []
 
-        real = TopicManager._TopicManager__is_topic_exists
+        real = TopicManager.is_topic_exists
 
         def slow(self):
             result = real(self)
@@ -285,7 +285,7 @@ class TestTheRaceIsClosed:
             except TopicAlreadyExists:
                 losers.append(True)
 
-        with patch.object(TopicManager, "_TopicManager__is_topic_exists", slow):
+        with patch.object(TopicManager, "is_topic_exists", slow):
             threads = [threading.Thread(target=go, args=(m,)) for m in managers]
             for thread in threads:
                 thread.start()

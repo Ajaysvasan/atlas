@@ -16,6 +16,9 @@ import pytest
 from memory.topic_pool.project_pool.conversation_pool.conversation_pool_manager import (
     ConversationPoolManager,
 )
+from memory.topic_pool.project_pool.conversation_pool.fullconversation_repository.fullconversation_repository import (
+    Turn,
+)
 
 _MOD = "memory.topic_pool.project_pool.conversation_pool.conversation_pool_manager"
 _FULL_CONV = f"{_MOD}.FullConversation"
@@ -29,10 +32,6 @@ _PID = "proj_pool"
 _PNAME = "PoolProject"
 _CID = "conv_abc"
 
-
-# ---------------------------------------------------------------------------
-# Unit level
-# ---------------------------------------------------------------------------
 
 DB = "memory.db"
 
@@ -230,10 +229,6 @@ class TestSearch:
         manager.snap_shot.prev.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# Integration — real SQLite, stubbed LLM and pgvector
-# ---------------------------------------------------------------------------
-
 class _FakeVectorRepository:
     def __init__(self, project_id):
         self.project_id = project_id
@@ -394,10 +389,7 @@ class TestIntegration:
             fired = [manager.record_turn(role, text)[1] for role, text in dialogue]
 
         assert fired[-1] == "A rolled-up summary."
-        # Two calls: the conversation summary, then the project snapshot that
-        # every conversation snapshot rolls forward. This asserted one call and
-        # passed only because an earlier run had left this project's snapshots
-        # in the real registry, so the roll-forward found nothing pending.
+        # Two calls: the conversation summary, then the project snapshot.
         conversation_call, project_call = model.create_chat_completion.call_args_list
         prompt = conversation_call.kwargs["messages"][1]["content"]
         assert (
@@ -486,3 +478,52 @@ class TestConnectionsAreReleased:
             manager.snap_shot.vector_manager  # opens the connection
             manager.close()
             manager.close()
+
+
+def _turn(sequence, text):
+    return Turn(sequence, "user", text, "2026-10-12T00:00:00+00:00", f"chunk_{sequence}")
+
+
+class TestTheContextWindowTrigger:
+    def test_the_context_is_the_summary_plus_every_unsummarised_turn(self, mgr):
+        manager, mock_fc, mock_cs = mgr
+        mock_cs.get_current_summary.return_value = "s" * 40
+        mock_cs.summary_repo.get_highest_summarised_sequence.return_value = 7
+        mock_fc.get_turns_since.return_value = [_turn(8, "a" * 20), _turn(9, "b" * 40)]
+        assert manager.context_tokens() == 25
+        mock_fc.get_turns_since.assert_called_once_with(7)
+
+    @pytest.mark.parametrize("window, expected", [(25, True), (26, False)])
+    def test_a_full_context_snapshots_before_the_turn_count_does(self, mgr, window, expected):
+        manager, mock_fc, mock_cs = mgr
+        manager.context_window_tokens = window
+        mock_fc.next_sequence_number.return_value = 3  # 2 turns, threshold 5
+        mock_cs.summary_repo.get_highest_summarised_sequence.return_value = 0
+        mock_cs.get_current_summary.return_value = None
+        mock_fc.get_turns_since.return_value = [_turn(1, "a" * 60), _turn(2, "b" * 40)]
+        assert manager.should_snapshot() is expected
+
+    def test_an_empty_window_is_refused(self, tmp_path):
+        with pytest.raises(ValueError):
+            ConversationPoolManager(
+                _PID, _PNAME, _CID, database=tmp_path / DB, context_window_tokens=0
+            )
+
+    def test_a_long_turn_in_a_real_conversation_trips_it(self, tmp_path):
+        manager = ConversationPoolManager(
+            _PID, _PNAME, _CID, database=tmp_path / DB, context_window_tokens=10
+        )
+        manager.add_turn("user", "x" * 39)
+        assert manager.should_snapshot() is False
+        manager.add_turn("assistant", "y")
+        assert manager.context_tokens() == 10
+        assert manager.should_snapshot() is True
+
+
+class TestTheEmbedderIsShared:
+    def test_it_reaches_the_summariser(self, tmp_path):
+        embedder = object()
+        manager = ConversationPoolManager(
+            _PID, _PNAME, _CID, database=tmp_path / DB, embedder=embedder
+        )
+        assert manager.summariser.embedder is embedder

@@ -3,6 +3,7 @@
 See README.md in this directory for the architecture and the reasoning.
 """
 
+import operator
 import uuid
 from pathlib import Path
 from typing import List, NamedTuple, Sequence, Tuple
@@ -22,6 +23,7 @@ from .project_data_repo.project_meta_data import (
     list_topic_projects,
     list_topic_vector_ids,
 )
+from .project_data_repo.project_snapshot_repo import list_topic_project_snapshots
 from .project_data_repo.project_vector_handler import (
     ProjectVectorHandler,
     summary_vector_id,
@@ -33,6 +35,9 @@ logger = get_logger(__name__)
 
 SIMILARITY_FLOOR = 0.35
 AMBIGUITY_MARGIN = 0.05
+
+LATEST_SNAPSHOT = "latest_snapshot"
+HISTORICAL_SNAPSHOT = "historical_snapshot"
 
 
 class ScoredProject(NamedTuple):
@@ -53,6 +58,14 @@ class ProjectMatch(NamedTuple):
     candidates: Tuple[ScoredProject, ...]
 
 
+class SnapshotMatch(NamedTuple):
+    """The project a query was routed to by its snapshots, and at which stage."""
+
+    project_id: str
+    project_name: str
+    score: float
+    stage: str
+    latest_project_snapshot_id: int | None
 
 
 class ProjectManager:
@@ -65,6 +78,7 @@ class ProjectManager:
         vector_handler: ProjectVectorHandler | None = None,
         similarity_floor: float = SIMILARITY_FLOOR,
         ambiguity_margin: float = AMBIGUITY_MARGIN,
+        historical_floor: float = SIMILARITY_FLOOR,
     ):
         if not isinstance(topic_id, str) or not topic_id.strip():
             raise ValueError("topic_id must be a non-empty string")
@@ -76,6 +90,7 @@ class ProjectManager:
         self.database = MemoryDatabase.of(database)
         self.similarity_floor = similarity_floor
         self.ambiguity_margin = ambiguity_margin
+        self.historical_floor = historical_floor
 
         self.__embedder = embedder
         self.__vector_handler = vector_handler
@@ -182,12 +197,76 @@ class ProjectManager:
             candidates,
         )
 
+    def __snapshot_ids_by_project(self) -> dict[str, List[int]]:
+        grouped: dict[str, List[int]] = {}
+        for row in list_topic_project_snapshots(self.topic_id, self.database):
+            grouped.setdefault(row.project_id, []).append(row.project_snapshot_id)
+        return grouped
+
+    def route_by_snapshots(self) -> SnapshotMatch | None:
+        """The project whose latest snapshot matches the query, else whose history does, else None."""
+        projects = self.projects()
+        if not projects:
+            logger.info("Topic %s has no projects to route to", self.topic_id)
+            return None
+        snapshots = self.__snapshot_ids_by_project()
+        query = self.query_vector()
+
+        latest_scores: List[Tuple[float, TopicProject, int | None]] = []
+        best_scores: List[Tuple[float, TopicProject, int | None]] = []
+        for project in projects:
+            history = snapshots.get(project.project_id, [])
+            # Until its first snapshot, a project's summary vector stands in, or it
+            # could never be routed to.
+            vector_ids = history or [summary_vector_id(project.project_id)]
+            found = self.vector_handler.repository_for(project.project_id).vectors_for(
+                vector_ids
+            )
+            held = [vector_id for vector_id in vector_ids if vector_id in found]
+            if not held:
+                logger.warning(
+                    "Project %s has none of its %d snapshot vector(s) stored",
+                    project.project_id,
+                    len(vector_ids),
+                )
+                continue
+            scores = cosine_scores(query, np.stack([found[i] for i in held]))
+            latest = history[-1] if history else None
+            if held[-1] == vector_ids[-1]:
+                latest_scores.append((float(scores[-1]), project, latest))
+            best_scores.append((float(scores.max()), project, latest))
+
+        for stage, floor, scored in (
+            (LATEST_SNAPSHOT, self.similarity_floor, latest_scores),
+            (HISTORICAL_SNAPSHOT, self.historical_floor, best_scores),
+        ):
+            if not scored:
+                continue
+            score, project, latest = max(scored, key=operator.itemgetter(0))
+            if score >= floor:
+                logger.info(
+                    "Routed to project %s in topic %s by its %s at %.3f",
+                    project.project_id,
+                    self.topic_id,
+                    stage,
+                    score,
+                )
+                return SnapshotMatch(
+                    project.project_id, project.project_name, score, stage, latest
+                )
+        logger.info(
+            "No project in topic %s matched by its snapshots (floors %.3f, %.3f)",
+            self.topic_id,
+            self.similarity_floor,
+            self.historical_floor,
+        )
+        return None
+
     def route(self) -> str | None:
         """The project this query belongs to, or None if there is no such project."""
         match = self.resolve()
         if match.exists:
             return match.project_id
-        # If No matching project is found , just return None 
         return None
 
     def create_project(

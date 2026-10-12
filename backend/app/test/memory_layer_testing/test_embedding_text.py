@@ -37,13 +37,6 @@ def manager():
         yield EmbeddingManager()
 
 
-# ---------------------------------------------------------------------------
-# Vector id range
-#
-# Vector ids land in SQLite INTEGER and Postgres bigint, both signed 64-bit.
-# The unsigned MD5-derived id overflowed both for ~49% of inputs.
-# ---------------------------------------------------------------------------
-
 class TestVectorIdRange:
     def test_ids_fit_signed_64_bit(self, manager):
         for i in range(2000):
@@ -90,10 +83,6 @@ class TestVectorIdRange:
         )
 
 
-# ---------------------------------------------------------------------------
-# embed_text
-# ---------------------------------------------------------------------------
-
 class TestEmbedText:
     def test_returns_float32_vector(self, manager):
         result = manager.embed_text("hello")
@@ -116,10 +105,6 @@ class TestEmbedText:
         with pytest.raises(InvalidEmbeddingArgument):
             manager.embed_text(bad)
 
-
-# ---------------------------------------------------------------------------
-# embed_texts
-# ---------------------------------------------------------------------------
 
 class TestEmbedTexts:
     def test_returns_one_result_per_text(self, manager):
@@ -152,3 +137,18 @@ class TestEmbedTexts:
         """
         results = manager.embed_texts(["dup", "dup"])
         assert results[0].vector_id == results[1].vector_id
+
+
+class TestClosing:
+    def test_closing_twice_is_safe(self, manager):
+        manager.close()
+        manager.close()
+        assert manager.model is None
+
+    def test_it_closes_as_a_context_manager(self):
+        with patch(_MODEL):
+            from data_layer.ingestion.embedding.EmbeddingManager import EmbeddingManager
+
+            with EmbeddingManager() as manager:
+                assert manager.model is not None
+        assert manager.model is None

@@ -51,24 +51,31 @@ class LocalRetriever:
         self.database = MemoryDatabase.of(database)
         self.__owned: list = []
         if vector_search is None:
-            vector_search = TurnVectorSearch(self.project_id, project_name, self.database)
+            vector_search = TurnVectorSearch(
+                self.project_id, project_name, self.database
+            )
             self.__owned.append(vector_search)
         self.vector_search = vector_search
         self.keyword_search = (
-            TurnKeywordSearch(self.database) if keyword_search is None else keyword_search
+            TurnKeywordSearch(self.database)
+            if keyword_search is None
+            else keyword_search
         )
         self.hydration = (
             TurnHydration(self.keyword_search, self.database)
-            if hydration is None else hydration
+            if hydration is None
+            else hydration
         )
         self.preparation = QueryPreparation() if preparation is None else preparation
         self.reranker = (
             Reranker(self.settings.rerank_model, self.settings.rerank_batch)
-            if reranker is None else reranker
+            if reranker is None
+            else reranker
         )
         self.cache = (
             ResultCache(self.settings.cache_size, self.settings.cache_ttl_seconds)
-            if cache is None else cache
+            if cache is None
+            else cache
         )
         self.snapshots = ConversationVectorMetaDataRepository(
             self.project_id, self.conversation_id, self.database
@@ -89,7 +96,9 @@ class LocalRetriever:
             raise InvalidRetrievalSetting("top_k", request.top_k, "at least 1")
         if not isinstance(request.query, str) or not request.query.strip():
             raise EmptyQuery(request.query)
-        turns = TurnScope.of(self.project_id, self.conversation_id, scope, before_sequence)
+        turns = TurnScope.of(
+            self.project_id, self.conversation_id, scope, before_sequence
+        )
 
         recorder = StageRecorder()
         with log_context(retrieval_id=new_correlation_id()):

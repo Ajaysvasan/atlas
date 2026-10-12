@@ -172,3 +172,30 @@ class ProjectInAnotherTopic(Exception):
             f"not {self.topic_id!r}. Re-register it under {self.topic_id!r} to "
             f"move it; its rows follow."
         )
+
+
+class ConversationNotRouted(Exception):
+    def __init__(self, conversation_id, user_id) -> None:
+        self.conversation_id = conversation_id
+        self.user_id = user_id
+        super().__init__(self.conversation_id, self.user_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Conversation {self.conversation_id!r} (user {self.user_id!r}) belongs "
+            f"to no project, and none matched its query. Store it with "
+            f"store_new_topic or store_new_project instead."
+        )
+
+
+class ConversationAlreadyRouted(Exception):
+    def __init__(self, conversation_id, project_id) -> None:
+        self.conversation_id = conversation_id
+        self.project_id = project_id
+        super().__init__(self.conversation_id, self.project_id)
+
+    def __str__(self) -> str:
+        return (
+            f"Conversation {self.conversation_id!r} already belongs to project "
+            f"{self.project_id!r}; its turns cannot start another. Use update."
+        )
