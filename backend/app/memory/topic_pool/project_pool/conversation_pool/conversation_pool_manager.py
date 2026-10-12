@@ -9,7 +9,10 @@ from typing import Iterable, List, Tuple
 from config import Config, get_logger
 from memory.memory_database import MemoryDatabase
 
-from .conversation_summary_pipeline.conversation_summary import ConversationSummary
+from .conversation_summary_pipeline.conversation_summary import (
+    _CHARS_PER_TOKEN,
+    ConversationSummary,
+)
 from .full_conversation_bucket import FullConversation
 from .fullconversation_repository.fullconversation_repository import Turn
 
@@ -26,14 +29,19 @@ class ConversationPoolManager:
         draft_model_context_window_length: int = Config.DRAFT_MODEL_CONTEXT_WINDOW,
         snapshot_every_n_turns: int = Config.SNAPSHOT_EVERY_N_TURNS,
         database: MemoryDatabase | str | Path | None = None,
+        context_window_tokens: int = Config.MAIN_MODEL_CONTEXT_WINDOW_TOKENS,
+        embedder=None,
     ) -> None:
         if snapshot_every_n_turns < 1:
             raise ValueError("snapshot_every_n_turns must be at least 1")
+        if context_window_tokens < 1:
+            raise ValueError("context_window_tokens must be at least 1")
 
         self.database = MemoryDatabase.of(database)
         self.project_id = project_id
         self.project_name = project_name
         self.snapshot_every_n_turns = snapshot_every_n_turns
+        self.context_window_tokens = context_window_tokens
 
         self.full_conversation = FullConversation(
             database=self.database,
@@ -48,6 +56,7 @@ class ConversationPoolManager:
             main_model_context_window_length=main_model_context_window_length,
             draft_model_context_window_length=draft_model_context_window_length,
             conversation_id=conversation_id,
+            embedder=embedder,
         )
         # Deliberately the summariser's own instances, not new ones. A second
         # SnapShot would carry its own cursors and the two would drift apart.
@@ -103,8 +112,17 @@ class ConversationPoolManager:
     def turns_since_last_snapshot(self) -> int:
         return max(0, self.latest_sequence() - self.summarised_upto())
 
+    def context_tokens(self) -> int:
+        """Estimated tokens the main model reads: the latest summary plus every unsummarised turn."""
+        summary = self.current_summary() or ""
+        pending = self.since(self.summarised_upto())
+        characters = len(summary) + sum(len(turn.text) for turn in pending)
+        return characters // _CHARS_PER_TOKEN
+
     def should_snapshot(self) -> bool:
-        return self.turns_since_last_snapshot() >= self.snapshot_every_n_turns
+        if self.turns_since_last_snapshot() >= self.snapshot_every_n_turns:
+            return True
+        return self.context_tokens() >= self.context_window_tokens
 
     def snapshot_now(self) -> str | None:
         """Snapshot the current window regardless of the trigger threshold."""
@@ -112,9 +130,6 @@ class ConversationPoolManager:
         if latest <= 0:
             logger.debug("Snapshot skipped for project %s: no turns", self.project_id)
             return None
-        # `latest` only. turns_since_last_snapshot() would be the more
-        # informative field but it costs a query, and a log line must not do
-        # work the caller did not ask for.
         logger.info(
             "Snapshotting project %s up to sequence %d", self.project_id, latest
         )

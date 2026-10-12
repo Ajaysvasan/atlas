@@ -61,8 +61,6 @@ def _create_tables(cursor: sqlite3.Cursor) -> None:
                 references project_snapshot(project_snapshot_id, project_id)
         )
     """)
-    # project_snapshot is keyed by its id alone, so its reads by project need
-    # this. The mapping needs none: its primary key already leads with project_id.
     cursor.execute(
         "create index if not exists idx_project_snapshot_project "
         "on project_snapshot(project_id)"
@@ -70,6 +68,35 @@ def _create_tables(cursor: sqlite3.Cursor) -> None:
 
 
 SCHEMA = Schema("project_snapshots", _create_tables, requires=(PROJECT_SCHEMA,))
+
+
+class TopicSnapshot(NamedTuple):
+    """One project snapshot under a topic, as the snapshot router reads them."""
+
+    project_id: str
+    project_snapshot_id: int
+
+
+def list_topic_project_snapshots(
+    topic_id: str, database: MemoryDatabase | str | Path | None = None
+) -> List[TopicSnapshot]:
+    """Every project snapshot under a topic; each project's in history() order, so its last is latest()."""
+    store = MemoryDatabase.of(database)
+    store.ensure(SCHEMA)
+    with store.reading() as cursor:
+        cursor.execute(
+            """
+            select s.project_id, s.project_snapshot_id
+            from project_snapshot_mapping as m
+            join project_snapshot as s
+              on s.project_snapshot_id = m.project_snapshot_id
+            join project_table as p on p.project_id = m.project_id
+            where p.topic_id = ?
+            order by s.project_id, s.last_seq_included, m.created_at
+            """,
+            (topic_id,),
+        )
+        return [TopicSnapshot(*row) for row in cursor.fetchall()]
 
 
 class ProjectSnapshotRepository:

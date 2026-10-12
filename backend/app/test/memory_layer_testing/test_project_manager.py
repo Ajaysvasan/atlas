@@ -15,12 +15,17 @@ from memory.memory_pool_exceptions import EmptyQueryException
 from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
     ProjectMetaData,
 )
+from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo import (
+    ProjectSnapshotRepository,
+)
 from memory.topic_pool.project_pool.project_data_repo.project_vector_handler import (
     ProjectVectorHandler,
     description_vector_id,
     summary_vector_id,
 )
 from memory.topic_pool.project_pool.project_manager import (
+    HISTORICAL_SNAPSHOT,
+    LATEST_SNAPSHOT,
     ProjectManager,
     ScoredProject,
     cosine_scores,
@@ -70,6 +75,9 @@ class FakeVectorRepository:
     def batch_delete(self, vector_ids):
         for vector_id in vector_ids:
             self.store.pop(int(vector_id), None)
+
+    def vectors_for(self, vector_ids):
+        return {int(v): self.store[int(v)] for v in vector_ids if int(v) in self.store}
 
     def close(self):
         self.closed = True
@@ -392,3 +400,75 @@ class TestConstruction:
         with ProjectManager(TOPIC, "q", database=db_path, vector_handler=handler) as m:
             m.projects()
         handler.get_project_summary_vector  # still usable; the manager did not own it
+
+
+def blend(cosine: float) -> np.ndarray:
+    """A unit vector at `cosine` to axis(0), the direction every query below points."""
+    return axis(0, cosine) + axis(1, float(np.sqrt(1 - cosine**2)))
+
+
+def snapshot(db_path, project_id, vector, seq, stored=True):
+    snapshot_id = ProjectSnapshotRepository(project_id, db_path).add_snapshot(
+        f"{project_id} snapshot {seq}", seq
+    )
+    if stored:
+        FakeVectorRepository(project_id).insert(snapshot_id, vector)
+    return snapshot_id
+
+
+class TestRouteBySnapshots:
+    def test_an_empty_topic_routes_nowhere(self, db_path, handler):
+        assert manager(db_path, handler, "q", {}).route_by_snapshots() is None
+
+    def test_a_project_without_snapshots_is_scored_on_its_summary(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.8)])
+        seed_project(db_path, "p2", "beta", [blend(0.2)])
+        match = manager(db_path, handler, "q", {}).route_by_snapshots()
+        assert (match.project_id, match.project_name, match.stage) == ("p1", "alpha", LATEST_SNAPSHOT)
+        assert match.latest_project_snapshot_id is None
+
+    def test_once_a_project_has_snapshots_its_summary_no_longer_counts(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.9)])
+        snapshot(db_path, "p1", blend(0.1), 1)
+        assert manager(db_path, handler, "q", {}).route_by_snapshots() is None
+
+    def test_the_latest_snapshot_is_tried_before_history(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.0)])
+        seed_project(db_path, "p2", "beta", [blend(0.0)])
+        snapshot(db_path, "p1", blend(0.9), 1)
+        snapshot(db_path, "p1", blend(0.1), 2)
+        snapshot(db_path, "p2", blend(0.5), 1)
+        match = manager(db_path, handler, "q", {}).route_by_snapshots()
+        assert (match.project_id, match.stage) == ("p2", LATEST_SNAPSHOT)
+        assert match.score == pytest.approx(0.5)
+
+    def test_history_is_searched_when_no_latest_snapshot_clears_the_floor(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.0)])
+        old = snapshot(db_path, "p1", blend(0.7), 1)
+        latest = snapshot(db_path, "p1", blend(0.1), 2)
+        match = manager(db_path, handler, "q", {}).route_by_snapshots()
+        assert (match.project_id, match.stage) == ("p1", HISTORICAL_SNAPSHOT)
+        assert match.latest_project_snapshot_id == latest != old
+
+    def test_latest_follows_the_watermark_not_the_order_written(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.0)])
+        newest = snapshot(db_path, "p1", blend(0.1), 2)
+        snapshot(db_path, "p1", blend(0.8), 1)
+        match = manager(db_path, handler, "q", {}).route_by_snapshots()
+        assert match.stage == HISTORICAL_SNAPSHOT
+        assert match.latest_project_snapshot_id == newest
+
+    def test_a_project_whose_snapshot_vectors_are_missing_is_skipped(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.9)])
+        seed_project(db_path, "p2", "beta", [blend(0.6)])
+        snapshot(db_path, "p1", blend(0.9), 1, stored=False)
+        match = manager(db_path, handler, "q", {}).route_by_snapshots()
+        assert match.project_id == "p2"
+
+    def test_each_stage_has_its_own_floor(self, db_path, handler):
+        seed_project(db_path, "p1", "alpha", [blend(0.0)])
+        snapshot(db_path, "p1", blend(0.3), 1)
+        snapshot(db_path, "p1", blend(0.2), 2)
+        assert manager(db_path, handler, "q", {}).route_by_snapshots() is None
+        relaxed = manager(db_path, handler, "q", {}, historical_floor=0.25)
+        assert relaxed.route_by_snapshots().stage == HISTORICAL_SNAPSHOT

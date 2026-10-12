@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 _CHARS_PER_TOKEN = 4
 _SYSTEM_OVERHEAD_TOKENS = 200
 _OUTPUT_RESERVE_TOKENS = 512
-_WINDOW_OVERLAP_CHUNKS = 50  # look-back overlap added to every context window
+_WINDOW_OVERLAP_CHUNKS = 50
 
 
 def _speaker(turn: Turn) -> str:
@@ -50,6 +50,7 @@ class ConversationSummary:
         draft_model_context_window_length: int,
         conversation_id: str,
         database: MemoryDatabase | str | Path | None = None,
+        embedder=None,
     ) -> None:
         self.conversation_id = require_identifier(conversation_id, "conversation_id")
         self.database = MemoryDatabase.of(database)
@@ -74,7 +75,7 @@ class ConversationSummary:
             meta_repo=self.summary_repo,
             conversation_id=conversation_id,
         )
-        self._embedder = None
+        self._embedder = embedder
         self._project_snapshot = None
 
     @property
@@ -166,10 +167,8 @@ class ConversationSummary:
                 lambda system, user: self.__run_inference(model, system, user)
             )
         except Exception:
-            # The conversation snapshot is already stored and is the thing the
-            # caller asked for. A failure to roll the project description
-            # forward leaves the watermark where it was, so the next snapshot
-            # picks these summaries up again.
+            # The conversation snapshot is already stored; the unmoved watermark
+            # lets the next snapshot pick these summaries up again.
             logger.exception(
                 "Could not roll the project snapshot forward for %s; "
                 "its watermark is unchanged",
@@ -181,7 +180,7 @@ class ConversationSummary:
 
     def __load_model(self):
         """Loads the GGUF draft model from Config.DRAFT_MODEL_PATH."""
-        from llama_cpp import Llama  # lazy — not needed on every import
+        from llama_cpp import Llama  # not a dependency; installed separately
 
         model_file = Path(Config.DRAFT_MODEL_PATH) / Config.DRAFT_MODEL_FILE
         if not model_file.exists():
@@ -366,10 +365,7 @@ class ConversationSummary:
                     chars=len(batch),
                 ):
                     running_summary = self.__run_inference(model, system, user_content)
-            # Loading the draft model is the expensive part of a snapshot, so
-            # anything else that needs it runs here rather than loading a second
-            # copy — see take_snapshot, which persists and then rolls the
-            # project snapshot forward from inside this window.
+            # While the model is resident, so the project snapshot needs no second load.
             if while_model_loaded is not None and running_summary:
                 while_model_loaded(model, running_summary)
         finally:

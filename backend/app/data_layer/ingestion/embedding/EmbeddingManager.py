@@ -1,3 +1,4 @@
+import gc
 import hashlib
 from typing import List
 
@@ -120,3 +121,16 @@ class EmbeddingManager:
         raise InvalidEmbeddingArgument(
             f"The argument passed is of type {type(arg).__name__}. The valid types are Chunk and List[Chunk]"
         )
+
+    def close(self) -> None:
+        """Release the model. Safe to call more than once."""
+        if getattr(self, "model", None) is None:
+            return
+        self.model = None
+        gc.collect()
+
+    def __enter__(self) -> "EmbeddingManager":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()

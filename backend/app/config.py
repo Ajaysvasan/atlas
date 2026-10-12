@@ -27,7 +27,7 @@ class Config:
     DRAFT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct-GGUF"
     DRAFT_MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
     DRAFT_MODEL_PATH = os.path.join(ABS_PATH, "models", "draft_model")
-    DRAFT_MODEL_CONTEXT_WINDOW = 131072  # 128K tokens
+    DRAFT_MODEL_CONTEXT_WINDOW = 131072
     INDEX_PATH = os.path.join(DATA_DIR, "disk_ann_index")
     DISTANCE_METRIC = "l2"
     VECTOR_DTYPE = np.float32
@@ -58,8 +58,9 @@ class Config:
     # sequence_number, and _WINDOW_OVERLAP_CHUNKS extends it further back.
     MAIN_MODEL_CONTEXT_WINDOW_TURNS = 100
 
-    # Unsummarised turns that must accumulate before ConversationPoolManager
-    # takes a snapshot on its own.
+    # Placeholder until the main model is chosen.
+    MAIN_MODEL_CONTEXT_WINDOW_TOKENS = 8192
+
     SNAPSHOT_EVERY_N_TURNS = 20
 
     CONVERSATION = Path(

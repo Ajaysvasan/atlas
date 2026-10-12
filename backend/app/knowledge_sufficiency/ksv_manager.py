@@ -1,5 +1,4 @@
 """Knowledge Sufficiency Verification: can this query be answered from what we have."""
-
 from typing import Iterable, List, Sequence, Tuple
 
 import numpy as np
@@ -71,6 +70,9 @@ class KSVManager:
         keep = [i for i in range(len(ids)) if scores[i] >= self.partial_floor]
         keep.sort(key=lambda i: float(scores[i]), reverse=True)
         return [ids[i] for i in keep]
+
+    def __conversation_sufficiency(self):
+        pass
 
     def acquire(
         self,

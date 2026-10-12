@@ -14,6 +14,7 @@ from config import Config
 from memory.memory_pool_exceptions import InvalidIdentifier, ProjectNotFound
 from memory.topic_pool.project_pool.project_data_repo.project_snapshot_repo import (
     ProjectSnapshotRepository,
+    list_topic_project_snapshots,
     project_snapshot_id,
 )
 
@@ -165,3 +166,25 @@ class TestTheDatabaseKeepsTheRelationships:
                     (snapshot_id,),
                 )
 
+
+
+class TestTheTopicListing:
+    def test_each_projects_snapshots_come_in_history_order(self, db):
+        first, second = ProjectSnapshotRepository("proj_1", db), ProjectSnapshotRepository("proj_2", db)
+        later = first.add_snapshot("later", 2)
+        earlier = first.add_snapshot("earlier", 1)
+        other = second.add_snapshot("other", 1)
+
+        listed = list_topic_project_snapshots("topic", db)
+        assert [(row.project_id, row.project_snapshot_id) for row in listed] == [
+            ("proj_1", earlier), ("proj_1", later), ("proj_2", other),
+        ]
+        assert listed[1].project_snapshot_id == first.latest().project_snapshot_id
+
+    def test_another_topics_projects_are_left_out(self, db, seed_projects):
+        seed_projects(db, "elsewhere", "proj_3")
+        ProjectSnapshotRepository("proj_3", db).add_snapshot("away", 1)
+        assert list_topic_project_snapshots("topic", db) == []
+
+    def test_a_topic_without_snapshots_lists_nothing(self, db):
+        assert list_topic_project_snapshots("topic", db) == []

@@ -35,7 +35,7 @@ class TopicManager:
 
         self.__repo = TopicPoolMetaHandler(database)
 
-    def __is_topic_exists(self) -> bool:
+    def is_topic_exists(self) -> bool:
         return self.__repo.is_topic_exists(self.topic)
 
     def get_topic_id(self) -> str:
