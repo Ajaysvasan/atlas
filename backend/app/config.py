@@ -63,6 +63,16 @@ class Config:
 
     SNAPSHOT_EVERY_N_TURNS = 20
 
+    SYSTEM_PROMPTS_FILE = ABS_PATH / "system_prompts.yml"
+
+    # Estimated tokens: past the soft limit a query is condensed, past the hard one refused.
+    QUERY_SOFT_LIMIT_TOKENS = 2_000
+    QUERY_HARD_LIMIT_TOKENS = 24_000
+    # Holds the hard limit plus prompts; the full 128k would need ~5 GB of KV cache.
+    QUERY_DECOMPOSITION_CONTEXT_WINDOW = 32_768
+    # One sub-query per worker planner.
+    MAX_SUB_QUERIES = 4
+
     CONVERSATION = Path(
         os.path.join(
             DATA_DIR,
