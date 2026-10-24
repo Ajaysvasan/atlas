@@ -141,6 +141,70 @@ def chunk_vectors(monkeypatch):
     return store
 
 
+class InMemoryConversationTable:
+    """Stands in for PostgreSQL's `conversation_table`, as ConversationTable uses it."""
+
+    def __init__(self) -> None:
+        self.rows = {}
+        self.closed = False
+
+    def record_query(self, conversation_id, user_id, query):
+        import uuid
+        from datetime import datetime, timezone
+
+        from query_decomposition.conversation_table import Exchange
+
+        exchange = Exchange(
+            uuid.uuid4().hex, conversation_id, user_id, query,
+            datetime.now(timezone.utc), None, None,
+        )
+        self.rows[exchange.exchange_id] = exchange
+        return exchange
+
+    def record_response(self, exchange_id, system_response):
+        from datetime import datetime, timezone
+
+        from query_decomposition.query_decomposition_exceptions import (
+            ExchangeNotFound,
+            ResponseAlreadyRecorded,
+        )
+
+        exchange = self.rows.get(exchange_id)
+        if exchange is None:
+            raise ExchangeNotFound(exchange_id)
+        if exchange.system_response is not None:
+            raise ResponseAlreadyRecorded(exchange_id)
+        exchange = exchange._replace(
+            system_response=system_response,
+            system_response_time=datetime.now(timezone.utc),
+        )
+        self.rows[exchange_id] = exchange
+        return exchange
+
+    def get(self, exchange_id):
+        return self.rows.get(exchange_id)
+
+    def history(self, conversation_id, user_id):
+        return sorted(
+            (row for row in self.rows.values()
+             if row.conversation_id == conversation_id and row.user_id == user_id),
+            key=lambda row: (row.query_created_at, row.exchange_id),
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def conversation_rows(monkeypatch):
+    """Queries the decomposition layer records go to memory, never to the real PostgreSQL."""
+    from query_decomposition import conversation_table
+
+    table = InMemoryConversationTable()
+    monkeypatch.setattr(conversation_table, "open_conversation_table", lambda: table)
+    return table
+
+
 # --------------------------------------------------------------------------- #
 # No test may leave a file in the app directory. A string meant as an id once
 # landed in a `database` parameter, and four SQLite files named after test ids

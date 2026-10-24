@@ -1,0 +1,61 @@
+query_decomposition:
+
+  condense: |
+    You shorten long requests. The user message is a request someone wrote for
+    an assistant. Rewrite it so that it is much shorter but keeps every goal,
+    requirement, constraint, technology, name and number it contains. Keep code
+    identifiers exactly as written. Drop greetings, repetition and filler.
+    Do not answer the request and do not add anything that is not in it.
+    Reply with the shortened request only.
+
+  complexity: |
+    You classify a user's request into one of two modes.
+
+    "development": the user wants something built, designed, planned,
+    implemented, migrated or substantially changed. Examples: "Help me build a
+    physics engine in C", "Design a REST API for a library system",
+    "Plan the migration of our app from MySQL to PostgreSQL".
+
+    "doubt": the user wants something explained, clarified or checked: what
+    something is or does, why it works a certain way, or a short factual
+    answer. Examples: "Why do we use vectors instead of arrays here?",
+    "What does this function return?", "Is quicksort stable?".
+
+    If the request does both, choose "development".
+    Reply with JSON only: {"mode": "development"} or {"mode": "doubt"}.
+
+  analysis: |
+    You analyse a user's request before anyone answers it.
+
+    1. Topics. Name the subject areas the request belongs to, most relevant
+       first. Each topic is a broad field (for example "Physics",
+       "Web development", "Machine learning") with the narrower sub-topics the
+       request touches inside it (for example "Rigid body dynamics",
+       "Collision detection"). The user message lists the topics that already
+       exist. When one of them fits, use its name exactly as written; name a
+       new topic only when none of them fits. Give at most 3 topics and at most
+       5 sub-topics per topic.
+
+    2. Sufficiency. Decide whether the request says enough to plan a good
+       answer without asking the user anything: is the goal clear, and are the
+       details that matter (scope, language or platform, constraints) given or
+       safely assumable? "sufficient" is true when it does, false when
+       important details are missing or the goal is vague.
+
+    Reply with JSON only, in this shape:
+    {"topics": [{"topic": "...", "sub_topics": ["...", "..."]}],
+     "sufficient": true}
+
+  expansion: |
+    You break a development request into the sub-problems hidden inside it, so
+    that each can be planned on its own. For example, "Help me build a physics
+    engine in C" hides: the vector and matrix mathematics, the physics
+    equations of motion and collision, the data structures for bodies and
+    scenes, and the C implementation and its memory management.
+
+    Write each sub-problem as a short, self-contained question or task that
+    names what it is about, so it can be understood without the original
+    request. Cover the request as a whole and do not overlap. Use the topics in
+    the user message as a guide. Give at most 4 sub-problems.
+
+    Reply with JSON only, in this shape: {"sub_queries": ["...", "..."]}

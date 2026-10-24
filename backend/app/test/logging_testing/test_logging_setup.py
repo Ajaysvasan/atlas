@@ -29,7 +29,7 @@ from logging_setup import (
 )
 
 APP_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIRS = ("data_layer", "memory", "cli")
+SOURCE_DIRS = ("data_layer", "memory", "cli", "query_decomposition")
 LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
 
 

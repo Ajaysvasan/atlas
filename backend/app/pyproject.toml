@@ -38,6 +38,7 @@ dependencies = [
 
     # --- Configuration --------------------------------------------------------
     "python-dotenv==1.2.2",         # the five DB_* settings; see .env.example
+    "PyYAML==6.0.3",                # system_prompts.yml
 
     # --- HTTP surface ---------------------------------------------------------
     # Declared ahead of use: no routes exist yet (see todo.md section 3).
