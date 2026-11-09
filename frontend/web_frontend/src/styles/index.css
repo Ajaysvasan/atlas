@@ -1,0 +1,298 @@
+@import "tailwindcss";
+
+/*
+ * Atlas — direction: sci-fi / cyber, editorial restraint. Tone: cold, precise, quiet.
+ * Signature move: the meridian — a 1px orange vertical line with coordinate ticks.
+ * Only these tokens are used for colour.
+ */
+:root {
+  --base: #05070a;
+  --base-2: #0a0e13;
+  --ink: #d7e2ea;
+  --ink-dim: color-mix(in oklab, var(--ink) 62%, transparent);
+  --ink-faint: color-mix(in oklab, var(--ink) 38%, transparent);
+  --rule: color-mix(in oklab, var(--ink) 16%, transparent);
+  --rule-strong: color-mix(in oklab, var(--ink) 30%, transparent);
+  --accent: #ff7a00;
+  --accent-dim: color-mix(in oklab, var(--accent) 22%, transparent);
+  --danger: #ff5a4f;
+
+  --ease-wipe: cubic-bezier(0.7, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --gutter: clamp(16px, 2.5vw, 40px);
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-base: var(--base);
+  --color-base-2: var(--base-2);
+  --color-ink: var(--ink);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-faint: var(--ink-faint);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-danger: var(--danger);
+
+  --font-display: "Syne", "Zen Kaku Gothic New", system-ui, sans-serif;
+  --font-body: "Zen Kaku Gothic New", "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --spacing-gutter: var(--gutter);
+}
+
+@layer base {
+  html {
+    background: var(--base);
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    margin: 0;
+    min-height: 100svh;
+    background: var(--base);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: clip;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--base);
+  }
+  :focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 3px;
+  }
+  [lang="ja"] {
+    font-feature-settings: "palt";
+  }
+  button {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  /* Film grain: cheap, and it takes the digital flatness off the black. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.07;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+}
+
+@layer components {
+  /* 11-13px uppercase meta labels with wide tracking */
+  .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+
+  .hairline {
+    border-color: var(--rule);
+  }
+
+  /* Text fields: an underline, not a box. */
+  .field {
+    width: 100%;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--rule-strong);
+    padding: 0.6rem 0;
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 1.05rem;
+    border-radius: 0;
+    transition: border-color 300ms var(--ease-out);
+  }
+  .field:hover {
+    border-bottom-color: var(--ink-dim);
+  }
+  .field:focus {
+    outline: none;
+    border-bottom-color: var(--accent);
+  }
+  .field[aria-invalid="true"] {
+    border-bottom-color: var(--danger);
+  }
+
+  /* Primary action: sharp, ink on base, the accent draws in from the left on hover. */
+  .btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 0.95rem 1.4rem;
+    border: 1px solid var(--rule-strong);
+    border-radius: 2px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink);
+    background: transparent;
+    overflow: hidden;
+    isolation: isolate;
+    transition:
+      color 500ms var(--ease-wipe),
+      border-color 500ms var(--ease-wipe);
+  }
+  .btn::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: var(--accent);
+    transform: scaleX(0);
+    transform-origin: right;
+    transition: transform 600ms var(--ease-wipe);
+  }
+  .btn:hover:not(:disabled)::before,
+  .btn:focus-visible::before {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+  .btn:hover:not(:disabled),
+  .btn:focus-visible {
+    color: var(--base);
+    border-color: var(--accent);
+  }
+  .btn:disabled {
+    opacity: 0.4;
+  }
+  .btn-solid {
+    background: var(--ink);
+    color: var(--base);
+    border-color: var(--ink);
+  }
+
+  /* Plain text link with an accent underline that draws in. */
+  .link {
+    background-image: linear-gradient(var(--accent), var(--accent));
+    background-size: 0% 1px;
+    background-position: 0 100%;
+    background-repeat: no-repeat;
+    transition: background-size 600ms var(--ease-wipe), color 300ms;
+  }
+  .link:hover,
+  .link:focus-visible {
+    background-size: 100% 1px;
+    color: var(--ink);
+  }
+
+  /* Masked line, for SplitText reveals and for static fallbacks. */
+  .mask {
+    display: block;
+    overflow: hidden;
+  }
+
+  /* Answer text */
+  .prose-atlas p {
+    margin: 0 0 1em;
+  }
+  .prose-atlas h3,
+  .prose-atlas h4 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    margin: 1.4em 0 0.5em;
+    line-height: 1.2;
+  }
+  .prose-atlas ul,
+  .prose-atlas ol {
+    margin: 0 0 1em;
+    padding-left: 1.3em;
+  }
+  .prose-atlas ul {
+    list-style: square;
+  }
+  .prose-atlas ol {
+    list-style: decimal;
+  }
+  .prose-atlas li::marker {
+    color: var(--accent);
+  }
+  .prose-atlas code {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    padding: 0.1em 0.35em;
+    background: var(--base-2);
+    border: 1px solid var(--rule);
+  }
+  .prose-atlas pre {
+    margin: 0 0 1em;
+    padding: 1rem 1.1rem;
+    background: var(--base-2);
+    border-left: 1px solid var(--accent);
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .prose-atlas pre code {
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+  .prose-atlas strong {
+    color: var(--ink);
+    font-weight: 700;
+  }
+}
+
+@layer utilities {
+  .vertical-rl {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-strong) transparent;
+  }
+}
+
+/* The meridian's running indicator: a tick that travels down the line. */
+@keyframes meridian-scan {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  15%,
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+.meridian-scan {
+  animation: meridian-scan 2.4s var(--ease-wipe) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .meridian-scan {
+    animation: none;
+    transform: none;
+    opacity: 1;
+  }
+}
