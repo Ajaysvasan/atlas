@@ -1,4 +1,4 @@
-"""Drive the running Java API end to end: register, log in, upload, query, and check user isolation.
+"""Drive the running Java API end to end: register, log in, upload, query, list, and check user isolation.
 
 Needs the Python gRPC server (`main.py serve`) and the Java API running. Real
 models, real PostgreSQL, no fakes; queries take minutes on a CPU.
@@ -110,6 +110,41 @@ class Run:
         return status, response
 
 
+def listings(run: Run, owner, other, conversation, question, turns) -> None:
+    """GET /conversations and /conversations/{id}/exchanges for the owner, and refusals for everyone else."""
+    api = run.api
+    status, body, _, seconds = api.call("GET", "/conversations", token=owner["token"])
+    print(f"    list: HTTP {status} in {seconds:.2f}s", flush=True)
+    mine = {c["conversationId"]: c for c in (body or {}).get("conversations", [])} if status == 200 else {}
+    run.check("the owner's list includes the conversation", conversation in mine, f"{status}")
+    run.check(f"the list counts {turns} exchange(s)", mine.get(conversation, {}).get("exchangeCount") == turns,
+              f"{mine.get(conversation, {}).get('exchangeCount')}")
+    run.check("the most recently active conversation is listed first",
+              status == 200 and body["conversations"] and body["conversations"][0]["conversationId"] == conversation)
+
+    path = f"/conversations/{conversation}/exchanges"
+    status, body, _, _ = api.call("GET", path, token=owner["token"])
+    exchanges = (body or {}).get("exchanges", []) if status == 200 else []
+    run.check(f"the thread has {turns} exchange(s), oldest first", len(exchanges) == turns
+              and exchanges[0]["query"] == question
+              and [e["askedAt"] for e in exchanges] == sorted(e["askedAt"] for e in exchanges), f"{status}")
+    run.check("each exchange carries its answer", exchanges and all(e.get("answer") for e in exchanges))
+
+    status, body, _, _ = api.call("GET", "/conversations", token=other["token"])
+    run.check("another user's list does not include it", status == 200
+              and conversation not in {c["conversationId"] for c in body["conversations"]}, f"{status}")
+    status, body, _, _ = api.call("GET", path, token=other["token"])
+    run.check("another user cannot read the thread", status == 404 and body["code"] == "CONVERSATION_NOT_FOUND",
+              f"{status}")
+    status, _, _, _ = api.call("GET", "/conversations")
+    run.check("an unauthenticated list is 401", status == 401, f"{status}")
+    status, body, _, _ = api.call("GET", "/conversations?limit=0", token=owner["token"])
+    run.check("an out-of-range limit is 400", status == 400 and body["code"] == "VALIDATION_FAILED", f"{status}")
+    status, body, _, _ = api.call("GET", "/conversations?cursor=bm90LWEtY3Vyc29y", token=owner["token"])
+    run.check("a cursor the API never issued is 400", status == 400 and body["code"] == "VALIDATION_FAILED",
+              f"{status}")
+
+
 def full(run: Run, state_path: str) -> dict:
     api = run.api
     status, body, _, _ = api.call("POST", "/query", {"query": "hi"})
@@ -152,6 +187,9 @@ def full(run: Run, state_path: str) -> dict:
     run.check("bob cannot use alice's conversation", status == 404 and body["code"] == "CONVERSATION_NOT_FOUND",
               f"{status}")
 
+    if conversation:
+        listings(run, alice, bob, conversation, FACT_QUESTION, turns=1)
+
     state = {"alice": alice, "bob": bob, "conversation": conversation, "document_id": document_id}
     with open(state_path, "w") as handle:
         json.dump(state, handle)
@@ -169,6 +207,12 @@ def resume(run: Run, state_path: str) -> None:
                            label="alice continues her conversation after the restart")
     run.check("alice's conversation survived the restart", status == 200
               and body["conversationId"] == state["conversation"] and not body["newConversation"], f"{status}")
+
+    bob = state["bob"]
+    status, body, _, _ = run.api.call("POST", "/login", {"email": bob["email"], "password": bob["password"]})
+    run.check("bob can still log in after the restart", status == 200, f"{status}")
+    bob["token"] = body["accessToken"]
+    listings(run, alice, bob, state["conversation"], FACT_QUESTION, turns=2)
 
 
 def main(argv=None) -> int:
