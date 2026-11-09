@@ -12,7 +12,9 @@ HELP = """Commands (anything else is sent to Atlas as a query):
   status --retries     planner/critic retries of the last query
   help                 this text
   exit                 leave (Ctrl+D works too)
-Each command may also be written with a leading '/', e.g. /status."""
+Each command may also be written with a leading '/', e.g. /status.
+From another terminal, without loading anything: main.py status [--time | --retries],
+main.py conversations [--user NAME]."""
 
 
 class Command(NamedTuple):

@@ -81,6 +81,7 @@ def _no_real_model_by_default(_memory_database_dir, monkeypatch):
     test = uuid.uuid4().hex
     monkeypatch.setattr(Config, "INFERENCE_CACHE_DIR", _memory_database_dir / f"kv-{test}")
     monkeypatch.setattr(Config, "CORPUS_DIR", _memory_database_dir / f"corpus-{test}")
+    monkeypatch.setattr(Config, "RUN_DIR", _memory_database_dir / f"run-{test}")
     absent = SharedModel(ModelSpec(_memory_database_dir / "absent-model.gguf"))
     runtime.install_runtime(runtime.InferenceRuntime(absent))
     yield
@@ -422,6 +423,6 @@ def conversation_registry(monkeypatch, conversation_rows):
     from memory import conversation_registry as module
 
     registry = InMemoryConversationRegistry(exchange_log=conversation_rows)
-    monkeypatch.setattr(module, "open_conversation_registry", lambda: registry)
+    monkeypatch.setattr(module, "open_conversation_registry", lambda **options: registry)
     return registry
 

@@ -45,14 +45,33 @@ def parse_arguments(argv=None):
     commands.add_parser(
         "serve", help="Serve the pipeline over gRPC to the Java API (ATLAS_GRPC_* settings)"
     )
-    return parser.parse_args(argv)
+    status = commands.add_parser(
+        "status", help="Report the running Atlas and every component, then exit (loads no model)"
+    )
+    detail = status.add_mutually_exclusive_group()
+    detail.add_argument("--time", dest="detail", action="store_const", const="time",
+                        help="Stage timings of the service's last query")
+    detail.add_argument("--retries", dest="detail", action="store_const", const="retries",
+                        help="Planner/critic retries of the service's last query")
+    commands.add_parser(
+        "conversations", help="List --user's conversations from PostgreSQL, then exit (loads no model)"
+    )
+    args = parser.parse_args(argv)
+    if args.query and args.command not in (None, "start"):
+        parser.error(f"--query cannot be combined with {args.command}")
+    return args
 
 
-def single_query(user_id: str, query: str, acquisition: bool) -> int:
+MONITORS = ("status", "conversations")
+
+
+def single_query(user_id: str, query: str, acquisition: bool, lease=None) -> int:
     from pipeline.bootstrap import Components
 
     components = Components(acquisition=acquisition)
     try:
+        if lease is not None:
+            lease.attach(components)
         pipeline = components.pipeline()
         conversation = pipeline.new_conversation(user_id, query)
         response = pipeline.ask(conversation.conversation_id, user_id, query)
@@ -68,6 +87,42 @@ def single_query(user_id: str, query: str, acquisition: bool) -> int:
         components.close()
 
 
+def run_service(args) -> int:
+    """`start`, `serve` or `-q`: the only paths that load the model, one at a time per data directory."""
+    from observability.service_state import AlreadyRunning, ServiceLease
+
+    logger.info("Initializing %s", Config.APP_NAME)
+    settings = None
+    if args.command == "serve" and not args.query:
+        from grpc_server.settings import GrpcSettings, SettingsError
+
+        try:
+            settings = GrpcSettings.from_environment()
+        except SettingsError as error:
+            print(f"Cannot start the gRPC server: {error}", file=sys.stderr)
+            return 2
+    mode = "query" if args.query else (args.command or "start")
+    try:
+        lease = ServiceLease(mode).acquire()
+    except AlreadyRunning as error:
+        print(f"{error}. `main.py status` reports on it.", file=sys.stderr)
+        return 1
+    try:
+        if args.query:
+            return single_query(args.user, args.query, not args.no_acquire, lease=lease)
+        if args.command == "serve":
+            from grpc_server.server import serve
+
+            logger.info("Starting the gRPC server")
+            return serve(settings, acquisition=not args.no_acquire, lease=lease)
+        from cli.cli_interface import cli_interface
+
+        logger.info("Starting interactive CLI interface for user %s", args.user)
+        return cli_interface(args.user, acquisition=not args.no_acquire, lease=lease)
+    finally:
+        lease.release()
+
+
 def main(argv=None) -> int:
     """Main runner function."""
     args = parse_arguments(argv)
@@ -79,26 +134,14 @@ def main(argv=None) -> int:
         json_lines=args.log_json or None,
     )
 
-    logger.info("Initializing %s", Config.APP_NAME)
-
     try:
-        if args.query:
-            return single_query(args.user, args.query, not args.no_acquire)
-        if args.command == "serve":
-            from grpc_server.server import serve
-            from grpc_server.settings import GrpcSettings, SettingsError
+        if args.command in MONITORS:
+            from cli import monitor
 
-            try:
-                settings = GrpcSettings.from_environment()
-            except SettingsError as error:
-                print(f"Cannot start the gRPC server: {error}", file=sys.stderr)
-                return 2
-            logger.info("Starting the gRPC server")
-            return serve(settings, acquisition=not args.no_acquire)
-        from cli.cli_interface import cli_interface
-
-        logger.info("Starting interactive CLI interface for user %s", args.user)
-        return cli_interface(args.user, acquisition=not args.no_acquire)
+            if args.command == "status":
+                return monitor.status(args.detail)
+            return monitor.conversations(args.user)
+        return run_service(args)
     except KeyboardInterrupt:
         print("\nGoodbye.")
         return 130

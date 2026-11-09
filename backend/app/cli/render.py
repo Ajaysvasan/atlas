@@ -112,3 +112,18 @@ def conversation_list(records, active_id: str | None) -> str:
             "",
         ]
     return "\n".join(lines).rstrip()
+
+
+def conversation_summaries(user_id: str, summaries) -> str:
+    if not summaries:
+        return f"{user_id} has no conversations yet."
+    lines: List[str] = [f"Conversations of {user_id}, most recently active first:", ""]
+    for number, summary in enumerate(summaries, start=1):
+        lines += [
+            f"{number}. {summary.conversation_name}",
+            f"   ID: {summary.conversation_id}",
+            f"   Created: {timestamp(summary.created_at)}   Last active: {timestamp(summary.last_activity_at)}"
+            f"   Exchanges: {summary.exchange_count}",
+            "",
+        ]
+    return "\n".join(lines).rstrip()

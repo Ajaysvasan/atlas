@@ -913,6 +913,13 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Explanation:** cassandra.apache.org's robots.txt says `Disallow: /doc` then `Allow: /doc/latest`. `urllib.robotparser` applies the first rule that matches and refused every `/doc/latest` page; RFC 9309 takes the longest match and allows them.
 - **Status:** **Fixed.** `RobotsRules` evaluates the `User-agent: *` group per RFC 9309: longest match, allow wins a tie, `*` and `$` supported.
 
+### Bug 9.17: Monitoring Atlas Meant Starting It (`main.py`, `cli/`, `observability/`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `status`, `status --time` and `status --retries` existed only at the `Atlas >` prompt, so seeing anything meant `start`: loading the 2 GB model, the embedder, the reranker and the index, and running startup's writes (registry migration, owner backfill, checkpoint sweep). The service kept its query records in memory, so no other process could read them, and nothing prevented a second `start` or `serve` from loading a second model over the same ingestion lock and KV cache.
+- **Status:** **Fixed.** `start`, `serve` and `-q` hold an exclusive `flock` on `data/run/atlas.lock` for their whole run; a second one is refused before anything loads. The lock, not a pid, is what says "running", so a killed service is never mistaken for a live one. The holder publishes `data/run/atlas.json` (0600, written atomically) after warm-up and after every request: mode, pid, start time, what is loaded with call and failure counts, KV session counters, and the last 20 request records (timings and retries; never prompt text). `main.py status [--time | --retries]` and `main.py conversations` read that, PostgreSQL (`conversations` opened read-only; a missing table reads as empty) and the SQLite stores read-only, and exit: 0 when Atlas is running, 3 when it is not. They import neither llama.cpp nor torch (measured 0.08–0.19 s and 40–60 MB, against 1.2 s and 610 MB for `Components`), and write nothing. With Atlas stopped, `--time`/`--retries` show the last run's final query, labelled as from the run that ended (or "stopped unexpectedly", when the state says running but nobody holds the lock). The prompt's own commands are unchanged. Verified against a real `start` in another process.
+
 ### Bug 7.8: memory_layer_testing's `llama_cpp` Stub Made Real-Model Tests Load a MagicMock — FIXED
 
 - **Criticality:** Medium

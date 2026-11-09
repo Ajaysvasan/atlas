@@ -101,6 +101,10 @@ class Config:
     INFERENCE_CACHE_DIR = Path(DATA_DIR) / "inference_cache"
     INFERENCE_CACHE_MAX_BYTES = 2 * GIB
 
+    # Where a running `start`/`serve`/`-q` holds its single-instance lock and
+    # publishes its state for `main.py status` in another process.
+    RUN_DIR = Path(DATA_DIR) / "run"
+
     THINKING_MAX_WORKERS = 2
     THINKING_MAX_JOB_RETRIES = 1
     THINKING_MAX_RUNTIME_RETRIES = 1

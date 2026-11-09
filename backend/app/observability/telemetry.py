@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Iterator, List
+from typing import Callable, Deque, Dict, Iterator, List
 
 from config import get_logger
 
@@ -90,12 +90,24 @@ class Telemetry:
     def __init__(self, keep: int = 50) -> None:
         self.__records: Deque[RequestRecord] = deque(maxlen=keep)
         self.__lock = threading.Lock()
+        self.__listeners: List[Callable[[RequestRecord], None]] = []
+
+    def subscribe(self, listener: Callable[[RequestRecord], None]) -> None:
+        """Called with each record after it is added; a failing listener is logged, never raised."""
+        with self.__lock:
+            self.__listeners.append(listener)
 
     def add(self, record: RequestRecord) -> None:
         with self.__lock:
             self.__records.append(record)
+            listeners = list(self.__listeners)
         if logger.isEnabledFor(logging.INFO):
             logger.info("Request finished: %s", record.summary())
+        for listener in listeners:
+            try:
+                listener(record)
+            except Exception:
+                logger.exception("A telemetry listener failed")
 
     def last(self) -> RequestRecord | None:
         with self.__lock:

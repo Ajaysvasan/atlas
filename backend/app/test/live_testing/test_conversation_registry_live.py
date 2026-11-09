@@ -166,3 +166,21 @@ def test_summaries_page_by_keyset_without_gaps_or_repeats(registry, user):
 
 def test_summaries_ignore_a_malformed_user(registry):
     assert registry.summaries("../etc") == []
+
+
+def test_a_read_only_registry_reads_but_never_writes(registry, user):
+    import psycopg
+
+    from memory.conversation_registry import ConversationRegistry
+
+    created = registry.create(user, "Readable")
+    reader = ConversationRegistry(read_only=True, connect_timeout=3)
+    try:
+        assert reader.exists
+        assert [r.conversation_id for r in reader.list(user)] == [created.conversation_id]
+        assert [s.conversation_id for s in reader.summaries(user)] == [created.conversation_id]
+        with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+            reader.create(user, "Must not be written")
+    finally:
+        reader.close()
+    assert [r.conversation_name for r in registry.list(user)] == ["Readable"]

@@ -111,14 +111,23 @@ def _as_datetime(value: str) -> datetime:
 class ConversationRegistry:
     """The `conversations` table, on the PostgreSQL database that holds the vectors and the exchange log."""
 
-    def __init__(self, connection=None) -> None:
+    def __init__(self, connection=None, *, read_only: bool = False, connect_timeout: int | None = None) -> None:
         if connection is None:
             from storage.postgres import connect
 
-            connection = connect()
+            connection = connect(connect_timeout=connect_timeout)
         self.conn = connection
         # One connection serves every thread; a transaction must not interleave.
         self.__lock = threading.RLock()
+        if read_only:
+            # For monitoring: the server refuses any write, and a missing table reads as empty.
+            self.conn.read_only = True
+            with self.__lock, self.conn.cursor() as cursor:
+                cursor.execute("select to_regclass('conversations')")
+                self.exists = cursor.fetchone()[0] is not None
+            self.conn.rollback()
+            return
+        self.exists = True
         with self.__lock, self.conn.cursor() as cursor:
             cursor.execute(_CREATE)
             cursor.execute(_INDEX)
@@ -180,6 +189,9 @@ class ConversationRegistry:
         return ConversationRecord(conversation_id, user_id, name, _stamp(created_at))
 
     def __select(self, where: str, parameters, suffix: str = "") -> List[ConversationRecord]:
+        if not self.exists:
+            return []
+
         def query(cursor):
             cursor.execute(f"select {_COLUMNS} from conversations where {where} {suffix}", parameters)
             return cursor.fetchall()
@@ -209,6 +221,8 @@ class ConversationRegistry:
         try:
             user_id = require_identifier(user_id, "user_id")
         except InvalidIdentifier:
+            return []
+        if not self.exists:
             return []
         position = (None, None) if after is None else (_as_datetime(after[0]), after[1])
 
@@ -254,6 +268,8 @@ class ConversationRegistry:
         return self.__run(remove)
 
     def count(self) -> int:
+        if not self.exists:
+            return 0
         return self.__run(lambda cursor: cursor.execute("select count(*) from conversations").fetchone()[0])
 
     def import_records(self, records: Iterable[ConversationRecord]) -> Tuple[int, int, List[Tuple[str, str, str]]]:
@@ -302,9 +318,9 @@ class ConversationRegistry:
             self.conn.close()
 
 
-def open_conversation_registry() -> ConversationRegistry:
-    """The conversation registry on the PostgreSQL named in .env."""
-    return ConversationRegistry()
+def open_conversation_registry(*, read_only: bool = False, connect_timeout: int | None = None) -> ConversationRegistry:
+    """The conversation registry on the PostgreSQL named in .env; `read_only` never creates or writes."""
+    return ConversationRegistry(read_only=read_only, connect_timeout=connect_timeout)
 
 
 def migrate_from_sqlite(registry, memory_db: str | Path) -> MigrationReport | None:

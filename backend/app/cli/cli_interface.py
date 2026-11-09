@@ -146,13 +146,15 @@ class CliSession:
             self.write(render.health_report(self.health(self.components)))
 
 
-def cli_interface(user_id: str, acquisition: bool = True) -> int:
+def cli_interface(user_id: str, acquisition: bool = True, lease=None) -> int:
     """Start Atlas and run the interactive loop; returns the process exit code."""
     from pipeline.bootstrap import Components
 
     print("Starting Atlas…")
     components = Components(acquisition=acquisition)
     try:
+        if lease is not None:
+            lease.attach(components)
         try:
             pipeline = components.pipeline()
         except Exception as error:
@@ -166,6 +168,8 @@ def cli_interface(user_id: str, acquisition: bool = True) -> int:
         except Exception as error:
             print(f"Atlas could not load the draft model: {error}", file=sys.stderr)
             return 1
+        if lease is not None:
+            lease.publish()
         for problem in problems:
             print(f"Warning: {problem} (answers continue without it; see `status`)")
         CliSession(pipeline, components, user_id).run()

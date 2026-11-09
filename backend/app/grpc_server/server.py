@@ -48,7 +48,7 @@ def build_server(servicer: AtlasServicer, settings: GrpcSettings, port: int | No
     return server, bound
 
 
-def serve(settings: GrpcSettings | None = None, acquisition: bool = True) -> int:
+def serve(settings: GrpcSettings | None = None, acquisition: bool = True, lease=None) -> int:
     """Load the pipeline once, serve until SIGINT/SIGTERM, then drain and release everything."""
     from pipeline.bootstrap import Components
     from pipeline.uploads import UploadIngestion
@@ -60,9 +60,13 @@ def serve(settings: GrpcSettings | None = None, acquisition: bool = True) -> int
     server = None
     servicer = None
     try:
+        if lease is not None:
+            lease.attach(components)
         pipeline = components.pipeline()
         for problem in components.warm_up():
             logger.warning("Starting without: %s", problem)
+        if lease is not None:
+            lease.publish()
         servicer = AtlasServicer(pipeline, uploads, settings, OperationGate(settings.max_waiting),
                                  exchanges=conversation_table.open_conversation_table())
         server, port = build_server(servicer, settings)

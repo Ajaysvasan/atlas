@@ -15,6 +15,10 @@ uv run python main.py start              # Interactive CLI (also the default wit
 uv run python main.py start --user NAME  # Whose conversations (default $ATLAS_USER or login name)
 uv run python main.py --no-acquire start # Never fetch from trusted sources
 uv run python main.py -q "question"      # One query in a new conversation, then exit
+uv run python main.py status             # From another terminal: the running Atlas + every component
+uv run python main.py status --time      # The service's last query: stage timings
+uv run python main.py status --retries   # The service's last query: planner/critic retries
+uv run python main.py conversations --user NAME   # NAME's conversations (PostgreSQL only)
 uv run python main.py --verbose          # Debug logging, console as well as file
 uv run python main.py --log-json         # One JSON object per line instead of text
 uv run python main.py --log-file PATH    # Write somewhere other than log/app.log
@@ -35,6 +39,16 @@ The gRPC bindings in `grpc_server/generated/` are generated, never edited:
 `scripts/backend_e2e.py --base-url http://localhost:8080` drives the running Java
 API end to end (two `e2e_*` users, a private upload, isolation checks; `--resume`
 after a restart). It writes real data.
+
+Only `start`, `serve` and `-q` load the model, and only one of them runs per
+data directory: each holds an exclusive lock on `data/run/atlas.lock` and is
+refused while another does. The holder publishes `data/run/atlas.json` (0600,
+atomic) after warm-up and after every request — what is loaded, counters, the
+last 20 request records, never prompt text (`observability/service_state.py`).
+`status` and `conversations` are monitors (`cli/monitor.py`): they read that file,
+PostgreSQL (read-only) and the SQLite stores, write nothing, import neither
+llama.cpp nor torch, and exit 0 if Atlas is running, 3 if not. Stopped, `--time`
+and `--retries` show the last run's final query, labelled as such (bug 9.17).
 
 At the `Atlas >` prompt anything is a query except a line that is exactly a
 command: `switch`, `switch <n|id-prefix>`, `new`, `status`, `status --time`,
@@ -98,7 +112,7 @@ skip even on a machine that has a server.
 
 The suite reads the real `.env`, so the root `conftest.py` also keeps it off the
 developer's data: per-test `Config.DB_PATH`, `Config.INDEX_PATH` and
-`Config.MEMORY_DB`, `Config.INFERENCE_CACHE_DIR` and `Config.CORPUS_DIR`, an
+`Config.MEMORY_DB`, `Config.INFERENCE_CACHE_DIR`, `Config.CORPUS_DIR` and `Config.RUN_DIR`, an
 in-memory chunk vector store (the `chunk_vectors` fixture) in place of
 PostgreSQL, and a shared model runtime pointed at a file that does not exist,
 so nothing loads the 2 GB model unless it asks for the `real_model` fixture.
@@ -138,7 +152,7 @@ All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 5. **Acquisition** — on a `none`/empty verdict, `Acquirer` (below), then one refresh and re-search.
 6. **Thinking** → 7. **Generation** → 8. **Persistence** — `MemoryManager.update` or `store_new_topic`/`store_new_project` (project named by the draft model), then `Decompose.record_response`. A failed write is a warning on the response, never hidden.
 
-`AtlasResponse` carries the text, status, `persisted` and a `RequestRecord` (`observability/telemetry.py`): monotonic stage timings, retries, model calls by purpose, cache and retrieval outcomes, never prompt text. `status --time`/`--retries` read it. `pipeline/bootstrap.py::Components` builds everything once per process; `observability/health.py` runs 29 bounded checks (no text generation) for `status`. Evidence is tagged `M1…` (memory) / `G1…` (global) with provenance URLs from `corpus_ingestion.source_urls`.
+`AtlasResponse` carries the text, status, `persisted` and a `RequestRecord` (`observability/telemetry.py`): monotonic stage timings, retries, model calls by purpose, cache and retrieval outcomes, never prompt text. `status --time`/`--retries` read it. `pipeline/bootstrap.py::Components` builds everything once per process; `observability/health.py` runs 29 bounded checks (no text generation) for `status`: `check(facts)` takes what only the service knows as published facts (`service_facts(components)` in-process, `atlas.json` from a monitor; `None` when it is not running), so the prompt's `status` and `main.py status` report the same thing. Evidence is tagged `M1…` (memory) / `G1…` (global) with provenance URLs from `corpus_ingestion.source_urls`.
 
 ### gRPC Server (`grpc_server/`)
 
@@ -213,7 +227,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 - **ProjectManager** (`topic_pool/project_pool/project_manager.py`): routes `(topic_id, query)` to an existing project. **Scoped to an owner** when given `user_id` (which `MemoryManager` always passes): only that user's projects are candidates, and a project it creates records them in `project_table.user_id` — topics stay shared labels, so two users asking about "PostgreSQL" share a topic but never a project, and recall (which reads a whole project) never reaches another user's turns. `user_id=None` (direct callers, tests) sees every project in the topic, as before. `backfill_project_owners()` in `project_meta_data.py` runs at startup (`Components`): an ownerless project gets the one user whose conversations it holds; one holding several users' conversations stays ownerless and is routable by nobody. `route()` -> `project_id` or `None`; `resolve()` -> `ProjectMatch` with score, margin, `ambiguous` and ranked candidates. A project scores as its best-matching vector, not its average. The no branch is a `pass` pending the thinking layer. Architecture lives in `memory/topic_pool/project_pool/README.md` — **module READMEs hold architecture, data flow and design rationale; `docs/` stays the API reference; code comments are only for logic that reads wrong without one**
 - **SnapShot** (`memory/snapshot.py`): Bidirectional cursor traversal and cosine similarity (torch) over a snapshot history, for **either** scope. `scope="conversation"` (the default) walks this conversation's cumulative summaries and needs a `conversation_id`; `scope="project"` walks the project registry and does not. The cursors, `advance`/`prev` and `search` are the same code for both, because each scope stores its vector under the id its listing returns. `add()` is conversation-only and `add_project_snapshot()` project-only; the wrong one raises `WrongSnapshotScope`
 - **ProjectSnapshot** (`topic_pool/project_pool/project_snapshot.py`): a project's rolling description — what it is about and what has been done. Incremental: each snapshot summarises the previous one plus the conversation summaries written since, so cost tracks what changed rather than the project's size. It reads across every conversation (`project_id`, ignoring `conversation_id`) because the result describes the project, not a chat. The watermark is `seq` on `cumulative_vector_meta_data`, allocated monotonically on write under `BEGIN IMMEDIATE`. An empty summary from the draft model does **not** advance the watermark, or those summaries would be dropped from every future snapshot. Triggered on every conversation snapshot, from inside the window where the draft model is already resident — loading it is the expensive part, so a second load is avoided
-- **ConversationRegistry** (`memory/conversation_registry.py`): `conversations(conversation_id, user_id, conversation_name, created_at timestamptz)` **in PostgreSQL**, beside `conversation_table`, through `storage/postgres.py`; obtain it with `open_conversation_registry()`. Names unique per user by the constraint `conversations_user_name_unique`; a clashing name gets ` (n)` via `ON CONFLICT ... DO NOTHING` and a bounded retry. `migrate_from_sqlite` moved the rows an earlier version kept in `memory_layer.db` (that table is now the backup `conversations_migrated`; bug 9.14). Names are proposed by the draft model from the first query (`pipeline/naming.py`), cleaned and bounded, with a deterministic fallback
+- **ConversationRegistry** (`memory/conversation_registry.py`): `conversations(conversation_id, user_id, conversation_name, created_at timestamptz)` **in PostgreSQL**, beside `conversation_table`, through `storage/postgres.py`; obtain it with `open_conversation_registry()` (`read_only=True` for monitors: no DDL, a read-only session, a missing table reads as empty). Names unique per user by the constraint `conversations_user_name_unique`; a clashing name gets ` (n)` via `ON CONFLICT ... DO NOTHING` and a bounded retry. `migrate_from_sqlite` moved the rows an earlier version kept in `memory_layer.db` (that table is now the backup `conversations_migrated`; bug 9.14). Names are proposed by the draft model from the first query (`pipeline/naming.py`), cleaned and bounded, with a deterministic fallback
 - **MemoryMappingHandler** (`memory/memory_mapping_handler.py`): `(conversation_id, user_id)` -> topic, project, latest project snapshot — the lookup `MemoryManager` needs to resume a conversation without routing it again, which is why it sits beside `memory_manager.py` rather than in the conversation pool. Takes no `conversation_id`: every method names the conversation it acts on, so one handler serves the whole table. The write is two steps because the information is — a row is opened when a conversation starts and routing fills it in later, so `search` returning `None` ("never seen") and `MemoryMapping(None, None, None)` ("seen, not yet routed") are deliberately different answers. The latest project snapshot is read from the chain on every `search`, not cached — routing stores only topic and project, which reference `project_table` as a pair. `user_id` is the only user-scoped column in the layer — see `bugs.md` 4.83
 - **ProjectSnapshotRepository** (`project_data_repo/project_snapshot_repo.py`): `project_snapshot` (summary, length, `last_seq_included`, timestamp) and `project_snapshot_mapping`, append-only on `(project_id, project_snapshot_id)` so it holds the ordered chain rather than a pointer at the newest. `project_snapshot_id` is also the pgvector `vector_id`, so a row needs no lookup to reach its embedding
 - **ConversationVectorMetaDataRepository** (`conversation_data_management/conversationVectorMetaManager.py`): SQLite metadata: `summary_vector_meta_data`, `cumulative_vector_meta_data` (carrying `conversation_id` and `seq`, unique **per project**), `summary_snapshot_map`; it writes snapshot chunks into `summary_chunks`, which `FullConversationRepository` owns. `get_highest_summarised_sequence()` is per **conversation**. `insert_snapshot()` writes a whole snapshot in one transaction.
@@ -229,6 +243,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 | Corpus files | `data/corpus/` | Downloaded sources (`sources/`), acquired text (`acquired/`), users' uploads by content hash (`uploads/`), `manifest.jsonl` (url, topic, fetched_at, sha256, document_id, stored bytes) |
 | Upload staging | `data/.upload_staging/` | One directory per `Ingest` call while it streams; removed whatever happens |
 | PostgreSQL (Java) | DB `Vectors` | `user_table` (accounts, Argon2id hashes) and `atlas_flyway_history`, owned by the Java service; Python never reads them |
+| Service state | `data/run/` | `atlas.lock` (held by the running `start`/`serve`/`-q`) and `atlas.json` (what it publishes for `main.py status`); 0700/0600 |
 | KV checkpoints | `data/inference_cache/` | One llama.cpp state per conversation; disposable — deleting it costs only recomputation |
 | Models | `models/draft_model/` | `qwen2.5-3b-instruct-q4_k_m.gguf` (~2 GB) |
 
@@ -285,7 +300,7 @@ Central config class with constants:
 - `INDEX_PATH`, `DB_PATH`, `CONVERSATION` paths
 - `SHARED_MODEL_CONTEXT_WINDOW` (32768), `MAIN_MODEL_PATH` (None = the draft answers), `MODEL_THREADS`
 - `THINKING_*` budgets (workers 2, job retries 1, runtime retries 1, plan revisions 1, planned jobs 3, deadline 900 s); `GENERATION_MAX_TOKENS` (1200), `GENERATION_CONTEXT_TOKENS` (12000), `GENERATION_HISTORY_TURNS` (6)
-- `INFERENCE_CACHE_DIR`, `INFERENCE_CACHE_MAX_BYTES` (2 GiB, LRU)
+- `INFERENCE_CACHE_DIR`, `INFERENCE_CACHE_MAX_BYTES` (2 GiB, LRU); `RUN_DIR` (`data/run`, the service lock and state)
 - `MAX_INGESTION_STORAGE_BYTES` (1 GiB), `MAX_ACQUISITION_STORAGE_BYTES` (256 MiB), `MAX_ACQUISITION_DOWNLOAD_BYTES` (16 MiB): bytes or `None`; the environment overrides each (`null`/`none` = unlimited, anything non-positive is refused at import). `INGESTION_DISK_RESERVE_BYTES` (512 MiB), `CORPUS_DIR`
 - `LOG_FILE`, `DEBUG`: defaults `main.py` hands to `configure_logging()`
 - Not in `Config`: the gRPC server reads its own environment (`grpc_server/settings.py`) — `ATLAS_GRPC_SERVICE_TOKEN` (required), `ATLAS_GRPC_BIND` (`127.0.0.1`), `ATLAS_GRPC_PORT` (50051), `ATLAS_GRPC_TLS_CERT`/`_KEY`/`_CLIENT_CA`, `ATLAS_GRPC_WORKERS` (8), `ATLAS_GRPC_MAX_WAITING` (4), `ATLAS_UPLOAD_MAX_FILES` (10), `ATLAS_UPLOAD_MAX_FILE_BYTES` (25 MiB), `ATLAS_UPLOAD_MAX_REQUEST_BYTES` (100 MiB), `ATLAS_QUERY_MAX_CHARS` (8000); `.env` is loaded first
@@ -307,6 +322,7 @@ Central config class with constants:
 
 **Fixed since this list was written** (each has a regression test):
 - Bugs 2.1/2.2/4.1: the CLI and `-q` run the whole pipeline; `MemoryManager` is implemented and wired
+- Bug 9.17: monitoring no longer starts Atlas — `main.py status`/`conversations` are standalone, and one service runs at a time
 - Bugs 9.13–9.16: sitemap discovery, the registry moved to PostgreSQL with its SQLite rows migrated, the test leak into PostgreSQL, RFC 9309 robots.txt
 - Bugs 9.1–9.7, 9.10–9.12, 7.8: discovery, robots.txt, source search URLs, acquisition storage and limits, streaming fetch, one shared model, ingestion estimate, critic scope, naming, the `llama_cpp` stub
 - Bug 4.3: `search()` no longer moves the instance cursors — `__find_best_snapshot` scans with local ones

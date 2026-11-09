@@ -1,4 +1,9 @@
-"""Bounded checks of each component that is actually running. None generates text with a model."""
+"""Bounded checks of each component. None generates text with a model, and none needs the service's process.
+
+What only the running service knows (what is loaded, its counters) comes in as
+`facts` — `service_state.service_facts()` in that process, or what it published
+for a monitor in another one; None when Atlas is not running.
+"""
 
 import os
 import sqlite3
@@ -81,10 +86,29 @@ def _sqlite_count(path: Path, table: str) -> int:
         connection.close()
 
 
+NOT_RUNNING = "Atlas is not running"
+
+
 def check_all(components) -> List[ComponentHealth]:
-    """Every component's health; `components` is the running pipeline's bootstrap.Components."""
+    """Every component's health from inside the running process; `components` is bootstrap.Components."""
+    from observability.service_state import service_facts
+
+    return check(service_facts(components))
+
+
+def _sqlite_sum(path: Path, table: str, column: str) -> tuple:
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+    try:
+        return connection.execute(f'select count(*), coalesce(sum("{column}"), 0) from "{table}"').fetchone()
+    finally:
+        connection.close()
+
+
+def check(facts: dict | None, absent: str = NOT_RUNNING) -> List[ComponentHealth]:
+    """Every component's health. Reads only; with `facts` None, service-held parts report NOT_INITIALIZED, saying `absent`."""
     results: List[ComponentHealth] = []
     pg_state = {}
+    running = facts is not None
 
     def add(name, probe):
         results.append(_check(name, probe))
@@ -109,29 +133,40 @@ def check_all(components) -> List[ComponentHealth]:
         load_section("naming", ("conversation", "project"))
         return Health.HEALTHY, f"all sections present in {Path(Config.SYSTEM_PROMPTS_FILE).name}"
 
-    def model(shared, role):
+    def model(path, published):
         def probe():
-            try:
-                import llama_cpp  # noqa: F401
-            except ImportError:
+            import importlib.util
+
+            # find_spec, not import: a monitor need not load llama.cpp's library to know it is there.
+            if importlib.util.find_spec("llama_cpp") is None:
                 return Health.NOT_CONFIGURED, "llama-cpp-python is not installed"
-            if not shared.spec.path.exists():
-                return Health.NOT_CONFIGURED, f"model file missing: {shared.spec.path.name}"
-            if shared.load_error:
-                return Health.UNAVAILABLE, f"failed to load: {shared.load_error[:120]}"
-            if not shared.loaded:
-                return Health.NOT_INITIALIZED, f"{shared.spec.path.name} present; loads on first use"
-            stats = shared.stats()
+            name = Path(path).name
+            if not Path(path).exists():
+                return Health.NOT_CONFIGURED, f"model file missing: {name}"
+            if not running:
+                return Health.NOT_INITIALIZED, f"{name} present; loaded by `start`/`serve` ({absent})"
+            if published.get("load_error"):
+                return Health.UNAVAILABLE, f"failed to load: {published['load_error'][:120]}"
+            if not published.get("loaded"):
+                return Health.NOT_INITIALIZED, f"{name} present; loads on first use"
             return Health.HEALTHY, (
-                f"{shared.spec.path.name} resident, n_ctx={shared.spec.n_ctx}, "
-                f"{sum(stats.calls.values())} call(s), {stats.failures} failure(s)"
+                f"{name} resident, n_ctx={published.get('n_ctx')}, "
+                f"{published.get('calls', 0)} call(s), {published.get('failures', 0)} failure(s)"
             )
         return probe
 
+    def draft_model():
+        from inference.shared_model import ModelSpec
+
+        published = facts["draft"] if running else {}
+        return model(published.get("path") or ModelSpec.draft().path, published)()
+
     def main_model():
-        if not components.runtime.separate_main:
+        published = facts.get("main") if running else None
+        if published is None and (running or not Config.MAIN_MODEL_PATH):
             return Health.HEALTHY, "served by the draft model (MAIN_MODEL_PATH not set)"
-        return model(components.runtime.main, "main")()
+        published = published or {}
+        return model(published.get("path") or Config.MAIN_MODEL_PATH, published)()
 
     def postgres():
         connection, problem = _postgres()
@@ -140,8 +175,9 @@ def check_all(components) -> List[ComponentHealth]:
             return Health.NOT_CONFIGURED, problem
         try:
             with connection.cursor() as cursor:
-                cursor.execute("select to_regclass('vectors'), to_regclass('conversation_table')")
-                vectors_table, exchanges_table = cursor.fetchone()
+                cursor.execute("select to_regclass('vectors'), to_regclass('conversation_table'), "
+                               "to_regclass('conversations')")
+                vectors_table, exchanges_table, conversations_table = cursor.fetchone()
                 global_rows = total_rows = 0
                 if vectors_table:
                     cursor.execute("select count(*) filter (where project_id = %s), count(*) from vectors",
@@ -151,8 +187,13 @@ def check_all(components) -> List[ComponentHealth]:
                 if exchanges_table:
                     cursor.execute("select count(*) from conversation_table")
                     exchanges = cursor.fetchone()[0]
+                conversations = None
+                if conversations_table:
+                    cursor.execute("select count(*) from conversations")
+                    conversations = cursor.fetchone()[0]
             pg_state.update(ok=True, global_rows=global_rows, total_rows=total_rows,
-                            exchanges=exchanges, exchanges_table=bool(exchanges_table))
+                            exchanges=exchanges, exchanges_table=bool(exchanges_table),
+                            conversations=conversations)
             return Health.HEALTHY, f"reachable; {total_rows} vector row(s), {exchanges} exchange(s)"
         finally:
             connection.close()
@@ -204,46 +245,50 @@ def check_all(components) -> List[ComponentHealth]:
 
         generations = IndexGenerations(Config.INDEX_PATH)
         current = generations.current()
-        handle = components.retriever
-        built = handle.retriever is not None
+        built = running and bool(facts["retriever"]["built"])
         if current is None:
             labels = _sqlite_count(Path(Config.DB_PATH), "vector_meta_data") if "vector_meta_data" in _sqlite_tables(Path(Config.DB_PATH)) else 0
             if labels:
                 return Health.DEGRADED, f"no built generation; {labels} vector(s) searched from the recent index only"
             return Health.HEALTHY, "no generation built (empty corpus)"
-        state = "open" if built else "opens on first query"
+        state = "open" if built else ("opens on first query" if running else f"opened by `start` ({absent})")
         return Health.HEALTHY, f"generation {current} through label {generations.through()}; {state}"
 
     def global_retrieval():
-        handle = components.retriever
-        if handle.error:
-            return Health.UNAVAILABLE, f"could not start: {handle.error[:120]}"
-        if handle.retriever is None:
+        if not running:
+            return Health.NOT_INITIALIZED, f"built by `start`/`serve` ({absent})"
+        retriever = facts["retriever"]
+        if retriever.get("error"):
+            return Health.UNAVAILABLE, f"could not start: {retriever['error'][:120]}"
+        if not retriever.get("built"):
             return Health.NOT_INITIALIZED, "builds on first query (loads reranker and index)"
-        generation = handle.retriever.vector_search.generation
+        generation = retriever.get("generation")
         return Health.HEALTHY, f"ready; searching generation {generation or 'none (recent vectors only)'}"
 
     def ksv():
-        k = components.ksv
-        return Health.HEALTHY, f"floors: sufficient {k.sufficient_floor}, partial {k.partial_floor}"
+        from knowledge_sufficiency.thresholds import PARTIAL_FLOOR, SUFFICIENT_FLOOR
+
+        return Health.HEALTHY, f"floors: sufficient {SUFFICIENT_FLOOR}, partial {PARTIAL_FLOOR}"
 
     def acquisition():
+        from data_layer.ingestion.corpus_ingestion import acquired_bytes
         from knowledge_sufficiency.sources import DEFAULT_SOURCES
 
-        acquirer = components.acquirer
-        if acquirer is None:
+        if running and not facts.get("acquisition"):
             return Health.NOT_CONFIGURED, "disabled (--no-acquire)"
         searchable = sum(1 for s in DEFAULT_SOURCES if s.searchable)
         mapped = sum(1 for s in DEFAULT_SOURCES if s.has_sitemap)
-        limit = acquirer.storage_limit
-        used = acquirer.stored_bytes()
-        budget = acquirer.download_limit
+        limit = Config.MAX_ACQUISITION_STORAGE_BYTES
+        used = acquired_bytes(Path(Config.CORPUS_DIR))
+        budget = Config.MAX_ACQUISITION_DOWNLOAD_BYTES
         detail = (f"{len(DEFAULT_SOURCES)} trusted source(s), {searchable} searchable, "
                   f"{mapped} with a sitemap; acquired "
                   f"{used:,} of {'unlimited' if limit is None else f'{limit:,}'} bytes; download budget "
                   f"{'unlimited' if budget is None else f'{budget:,}'} bytes per acquisition; network not probed")
         if limit is not None and used >= limit:
             return Health.DEGRADED, "acquisition limit reached; " + detail
+        if not running:
+            return Health.NOT_INITIALIZED, f"{absent}; " + detail
         return Health.HEALTHY, detail
 
     thinking_self_test = {}
@@ -266,20 +311,24 @@ def check_all(components) -> List[ComponentHealth]:
         return probe
 
     def generation():
-        settings = components.generator
-        return Health.HEALTHY, f"prompt loaded; max {settings.max_tokens} tokens per answer"
+        return Health.HEALTHY, f"prompt loaded; max {Config.GENERATION_MAX_TOKENS} tokens per answer"
 
     def kv():
-        store = components.checkpoints
-        sessions = components.sessions
-        if not os.access(store.directory, os.W_OK):
-            return Health.DEGRADED, f"{store.directory} not writable; answers recompute every turn"
-        rows = store.rows()
-        usage = sum(r.size_bytes for r in rows)
+        directory = Path(Config.INFERENCE_CACHE_DIR)
+        if directory.exists() and not os.access(directory, os.W_OK):
+            return Health.DEGRADED, f"{directory} not writable; answers recompute every turn"
+        path = Path(Config.MEMORY_DB)
+        count, usage = (_sqlite_sum(path, "inference_checkpoints", "size_bytes")
+                        if "inference_checkpoints" in _sqlite_tables(path) else (0, 0))
+        limit = Config.INFERENCE_CACHE_MAX_BYTES
+        detail = f"{count} checkpoint(s), {usage / 1e6:.1f} of " + (
+            "unlimited" if limit is None else f"{limit / 1e6:.0f} MB")
+        if not running:
+            return Health.HEALTHY, f"{detail}; session counters while Atlas runs"
+        sessions = facts["kv"]
         return Health.HEALTHY, (
-            f"{len(rows)} checkpoint(s), {usage / 1e6:.1f} of {store.max_bytes / 1e6:.0f} MB; "
-            f"restores {sessions.restores}, misses {sessions.misses}, "
-            f"invalidated {sessions.invalidations}, save failures {sessions.save_failures}"
+            f"{detail}; restores {sessions['restores']}, misses {sessions['misses']}, "
+            f"invalidated {sessions['invalidations']}, save failures {sessions['save_failures']}"
         )
 
     def ingestion():
@@ -300,7 +349,7 @@ def check_all(components) -> List[ComponentHealth]:
 
     add("Configuration", configuration)
     add("Prompt registry", prompts)
-    add("Draft model", model(components.runtime.draft, "draft"))
+    add("Draft model", draft_model)
     add("Main model", main_model)
     add("PostgreSQL", postgres)
     add("Query Decomposition", from_pg("exchanges", lambda: (
@@ -310,15 +359,23 @@ def check_all(components) -> List[ComponentHealth]:
         status, detail = memory_db()
         if status is not Health.HEALTHY and status is not Health.NOT_INITIALIZED:
             return status, detail
-        models = getattr(components, "models", None)
-        loaded = models is not None and getattr(models, "_MemoryModels__embedder", None) is not None
-        embedder = "embedder resident" if loaded else "embedder loads on first query"
+        if not running:
+            embedder = f"embedder loaded by `start` ({absent})"
+        elif facts.get("embedder_resident"):
+            embedder = "embedder resident"
+        else:
+            embedder = "embedder loads on first query"
         return Health.HEALTHY, f"routing, recall and storage ready; {embedder}"
 
     add("Memory Manager", memory_manager)
     add("Conversation persistence", table_probe("full_conversation", "stored turn(s)"))
     def registry():
-        return Health.HEALTHY, f"PostgreSQL `conversations`: {components.registry.count()} conversation(s)"
+        if "ok" not in pg_state:
+            return Health.UNAVAILABLE, f"PostgreSQL: {pg_state.get('error') or 'unreachable'}"
+        count = pg_state.get("conversations")
+        if count is None:
+            return Health.NOT_INITIALIZED, "PostgreSQL `conversations` is created when Atlas starts"
+        return Health.HEALTHY, f"PostgreSQL `conversations`: {count} conversation(s)"
 
     add("Conversation registry", registry)
     add("Memory Mapping", table_probe("memory_mapping_table", "mapped conversation(s)"))
