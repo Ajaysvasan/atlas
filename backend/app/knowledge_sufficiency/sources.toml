@@ -11,34 +11,43 @@
 #   search       the source's own search page. Omit it and the source is never
 #                searched: there is no way to ask what it holds, and guessing
 #                paths would be a crawl
+#   sitemap      the source's published sitemap (plain XML; an index is followed
+#                one level). Discovery ranks its URLs by the target's terms when
+#                there is no search, or the search found nothing
+#   sitemap_scope  only sitemap URLs starting with this are candidates, e.g. the
+#                current version of a manual
 
 [[source]]
 name = "python"
 host = "docs.python.org"
 kind = "docs"
 description = "Python language reference and standard library: syntax, built-in types, modules, sqlite3, asyncio, typing, packaging"
-search = "https://docs.python.org/3/search.html?q={terms}"
+# No search: the results page is built by JavaScript; its HTML holds none.
 
 [[source]]
 name = "peps"
 host = "peps.python.org"
 kind = "docs"
 description = "Python Enhancement Proposals: language design decisions, rationale, deprecations and the reasoning behind syntax changes"
-search = "https://peps.python.org/search/?q={terms}"
+# No search: peps.python.org has no search page (HTTP 404).
 
 [[source]]
 name = "mdn"
 host = "developer.mozilla.org"
 kind = "docs"
 description = "Web platform reference for developers: CSS layout, flexbox and grid, HTML elements, JavaScript language and browser APIs, HTTP headers and caching, how to do things in a browser"
-search = "https://developer.mozilla.org/en-US/search?q={terms}"
+# No search: results are rendered by JavaScript, and robots.txt disallows the
+# JSON API (/api/) that serves them.
 
 [[source]]
 name = "postgresql"
 host = "www.postgresql.org"
 kind = "docs"
 description = "PostgreSQL manual: SQL dialect, indexing, query planning, transactions, replication, extensions and pgvector"
-search = "https://www.postgresql.org/search/?q={terms}"
+# No search: robots.txt disallows /search/. Its sitemap lists every version of
+# the manual; the scope keeps the current one (1,152 of 29,613 URLs).
+sitemap = "https://www.postgresql.org/sitemap.xml"
+sitemap_scope = "https://www.postgresql.org/docs/current/"
 
 [[source]]
 name = "sqlite"
@@ -52,14 +61,15 @@ name = "ietf"
 host = "datatracker.ietf.org"
 kind = "docs"
 description = "RFCs and internet standards: the HTTP protocol and its caching and header semantics, TLS, DNS, authentication, URIs and wire formats"
-search = "https://datatracker.ietf.org/doc/search/?name={terms}"
+# Without rfcs=on and activedrafts=on the page lists no documents at all.
+search = "https://datatracker.ietf.org/doc/search/?name={terms}&rfcs=on&activedrafts=on"
 
 [[source]]
 name = "arxiv"
 host = "arxiv.org"
 kind = "docs"
 description = "Research papers and preprints: neural networks, transformers and attention, language models, embeddings, retrieval augmented generation, training methods and algorithms"
-search = "https://arxiv.org/search/?query={terms}&searchtype=all"
+# No search: robots.txt disallows /search. Papers are fetched by explicit URL.
 
 [[source]]
 name = "w3c"
@@ -73,3 +83,11 @@ host = "huggingface.co"
 kind = "dataset"
 description = "Machine learning datasets and model cards: training corpora, benchmarks, evaluation sets with licence and size metadata"
 search = "https://huggingface.co/api/datasets?search={terms}"
+
+[[source]]
+name = "cassandra"
+host = "cassandra.apache.org"
+kind = "docs"
+description = "Apache Cassandra documentation: distributed database architecture, partitioning and sharding with consistent hashing, replication, tunable consistency levels, LSM storage engine, compaction, hinted handoff and read repair"
+sitemap = "https://cassandra.apache.org/sitemap.xml"
+sitemap_scope = "https://cassandra.apache.org/doc/latest/"

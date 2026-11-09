@@ -1,23 +1,24 @@
 import argparse
+import getpass
 import logging
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cli.cli_interface import cli_interface
-from config import Config, configure_logging, get_logger, log_context, new_correlation_id
+from config import Config, configure_logging, get_logger
 
 logger = get_logger("backend_main")
 
 
-def parse_arguments():
+def default_user() -> str:
+    return os.environ.get("ATLAS_USER") or getpass.getuser()
+
+
+def parse_arguments(argv=None):
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Final Year Project Backend - Command Line Interface"
-    )
-    parser.add_argument(
-        "--query", "-q", type=str, help="Run a single query directly and exit"
+        description="Atlas - development command line interface"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose debug logging"
@@ -28,12 +29,45 @@ def parse_arguments():
     parser.add_argument(
         "--log-json", action="store_true", help="Emit logs as one JSON object per line"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--query", "-q", type=str, help="Answer one query in a new conversation and exit"
+    )
+    parser.add_argument(
+        "--user", default=default_user(),
+        help="Whose conversations to use (default: $ATLAS_USER or your login name)",
+    )
+    parser.add_argument(
+        "--no-acquire", action="store_true",
+        help="Never fetch from trusted sources when the knowledge base falls short",
+    )
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("start", help="Start Atlas and query it interactively (the default)")
+    return parser.parse_args(argv)
 
 
-def main():
+def single_query(user_id: str, query: str, acquisition: bool) -> int:
+    from pipeline.bootstrap import Components
+
+    components = Components(acquisition=acquisition)
+    try:
+        pipeline = components.pipeline()
+        conversation = pipeline.new_conversation(user_id, query)
+        response = pipeline.ask(conversation.conversation_id, user_id, query)
+        if response.text is None:
+            print(f"Atlas could not answer ({response.record.error_category}): {response.error}",
+                  file=sys.stderr)
+            return 1
+        print(response.text)
+        for warning in response.warnings:
+            print(f"Warning: {warning}", file=sys.stderr)
+        return 0
+    finally:
+        components.close()
+
+
+def main(argv=None) -> int:
     """Main runner function."""
-    args = parse_arguments()
+    args = parse_arguments(argv)
 
     configure_logging(
         level=logging.DEBUG if (args.verbose or Config.DEBUG) else logging.INFO,
@@ -46,21 +80,19 @@ def main():
 
     try:
         if args.query:
-            # Single query execution mode
-            with log_context(query_id=new_correlation_id()):
-                logger.info("Executing single query: %r", args.query)
-                # For demonstration, we print it directly. You can route this
-                # to your query processing logic.
-                print(f"Result for '{args.query}': [Processing placeholder]")
-        else:
-            # Interactive CLI mode
-            logger.info("Starting interactive CLI interface")
-            cli_interface()
+            return single_query(args.user, args.query, not args.no_acquire)
+        from cli.cli_interface import cli_interface
 
+        logger.info("Starting interactive CLI interface for user %s", args.user)
+        return cli_interface(args.user, acquisition=not args.no_acquire)
+    except KeyboardInterrupt:
+        print("\nGoodbye.")
+        return 130
     except Exception as e:
         logger.critical("Unhandled exception in main execution: %s", e, exc_info=True)
-        sys.exit(1)
+        print(f"Fatal error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

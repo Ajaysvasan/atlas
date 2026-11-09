@@ -29,17 +29,19 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 ## Section 2: CLI & Pipeline Execution (`cli/` & `main.py`)
 
-### Bug 2.1: Placeholder Execution in Single Query Mode (`main.py`)
+### Bug 2.1: Placeholder Execution in Single Query Mode (`main.py`) — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
 - **Explanation:** In `main.py`, when a user specifies the `--query` or `-q` argument, `main()` logs `Executing single query` but outputs `Result for '<query>': [Processing placeholder]`. The single query CLI mode is disconnected from `IngestionPipeline`, vector database search, and RAG retrieval pipelines.
+- **Status:** **Fixed.** `-q` runs the whole pipeline (`pipeline/atlas.py`) in a new, named conversation and prints the answer, or the failure and its category with exit code 1.
 
-### Bug 2.2: Unimplemented Query Loop in Interactive CLI (`cli/cli_interface.py`)
+### Bug 2.2: Unimplemented Query Loop in Interactive CLI (`cli/cli_interface.py`) — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
 - **Explanation:** In `cli_interface()`, the interactive terminal loop accepts user input, logs the query, and prints `Processing query: <query>`, but contains `# some stuff` with no downstream execution logic. Query processing is not connected to search or response generation modules.
+- **Status:** **Fixed.** `main.py start` warms the models and runs `CliSession`: queries go through the pipeline, and `switch`, `new`, `status`, `status --time` and `status --retries` are commands only when the whole line is one. Verified across two processes (`scripts/cli_smoke.sh`).
 
 ---
 
@@ -63,11 +65,12 @@ This document catalogs all logical, architectural, and execution pipeline bugs i
 
 ---
 
-### Bug 4.1: Empty Module Directory Shells / Unimplemented Managers (`memory/`)
+### Bug 4.1: Empty Module Directory Shells / Unimplemented Managers (`memory/`) — FIXED
 
 - **Criticality:** Medium
 - **Priority:** P2
 - **Explanation:** `MemoryManager` (`memory_manager.py`) is still an empty class containing `pass`, so the top of the hierarchy has no entry point: nothing resolves a topic/project/conversation triple and hands back a `ConversationPoolManager`. The rest is now implemented — `TopicManager` creates, reads and soft-deletes topics; `ProjectManager` routes a query to a project within a topic; `ConversationPoolManager` owns the `FullConversation` / `ConversationSummary` / `SnapShot` trio for one conversation. What is missing besides `MemoryManager` is the wiring *between* the built layers: nothing passes `(topic_id, query)` from the topic layer to the project layer, and `ProjectManager.route()` stops at a `pass` where the thinking layer will go.
+- **Status:** **Fixed.** `MemoryManager` was implemented (commit 96867c6) and routes by snapshots, recalls with KSV, and stores through `update` / `store_new_topic` / `store_new_project`. The pipeline now drives it: it names a new project with the draft model and falls back to topic `General` when decomposition finds none. `ProjectManager.route()`'s `pass` is still there, unused — `MemoryManager` calls `route_by_snapshots()`.
 
 ---
 
@@ -793,4 +796,127 @@ Like 5b, invisible until something read the index back: every earlier test of th
 - **Priority:** P2
 - **Explanation:** Introduced and caught while fixing 5.23. A fallback test ended a temporary patch with `monkeypatch.undo()`. The `monkeypatch` fixture is one instance per test, shared with the root `conftest.py`'s autouse fixtures, so `undo()` also reverted the chunk vector store and the path redirects, and the rest of the test opened `VectorRepository("global")` against the developer's PostgreSQL. What it did there: `create extension if not exists` and `create table if not exists`, both no-ops on a database that has them, then a read that found nothing. Nothing was written. Verified afterwards: the real chunk store unchanged at 0 labels, no index directory created.
 - **Status:** **Fixed.** Temporary patches use `pytest.MonkeyPatch.context()`, which reverts only its own. `test_no_test_undoes_every_patch` fails the suite if any test calls `monkeypatch.undo()`.
+
+---
+
+## Section 9: The Python MVP — Thinking, Inference, Generation, Pipeline (found building them)
+
+### Bug 9.1: KSV Discovery Took the Site Menu as Search Results (`discovery.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `extract_links` kept the first five same-host links on a results page. Every searchable source puts its header and menus before its results, so for "How does SQLite VACUUM INTO create a backup?" sqlite.org yielded `index.html`, `about.html`, `docs.html`, `download.html`, `copyright.html`. Acquisition fetched those, nothing passed the relevance gate, and nothing was ever stored — verified live with 3 rounds and 0 documents.
+- **Status:** **Fixed.** Links inside `nav`, `header` and `footer` are dropped (before de-duplication, so a page the menu also links can still count as a result), as are links into search, login and submission pages and the site root. The rest are kept only if their text, URL or surrounding result block mentions a target term — not the source's own name, which matches every page — and ranked by how many. A whole-sentence search that finds nothing is retried once with topic and subtopics. The same query now yields `lang_vacuum.html`, `faq.html`, `cli.html`; live acquisitions store relevant pages.
+
+### Bug 9.2: Discovery Searched Pages robots.txt Disallows (`sources.toml`, `discovery.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** postgresql.org disallows `/search/` and arxiv.org disallows `/search`, and both were configured as search URLs. Nothing read robots.txt.
+- **Status:** **Fixed.** `knowledge_sufficiency/robots.py` reads each host's robots.txt once an hour and discovery obeys it for the search page and every candidate (RFC 9309: missing or 4xx allows all, unreachable denies all). The two search URLs are removed; pages on both hosts are still fetched by explicit URL.
+
+### Bug 9.3: Four Configured Search URLs Could Never Return a Result (`sources.toml`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** docs.python.org and MDN build their results with JavaScript, so the HTML holds none (MDN's JSON API is disallowed by its robots.txt); peps.python.org has no search page (HTTP 404); IETF Datatracker lists nothing without `rfcs=on&activedrafts=on`.
+- **Status:** **Fixed.** The three dead search URLs are removed, with the reason beside each; IETF's has its parameters. sqlite.org and IETF are the searchable documentation sources left, and the acquirer ranks only searchable sources. See 9.13.
+
+### Bug 9.4: Acquisition Chunked, Embedded and Stored Raw HTML (`acquisition.py`, `pipeline/acquisition.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `KnowledgeAcquisition` windows `document.text`, which for a page is its HTML, so tags reached the relevance gate, the KSV verdict and the corpus (`</p></li><li><p>` in a retrieved passage).
+- **Status:** **Fixed.** The acquirer passes a chunker that reduces markup to readable text first (no scripts, menus or footers); discovery still sees the HTML it needs for links. One acquired page stored before the fix remains in the corpus with markup in two chunks (`data/corpus/acquired/2c77a4c69e658e4e.txt`); there is no corpus deletion yet to remove it.
+
+### Bug 9.5: Acquired Knowledge Was Never Stored, and Acquisition Had No Data Limit (`ksv_manager.py`, `pipeline/acquisition.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** Nothing outside the tests called `acquire()` with a `store`, so acquired material was verified and discarded. Nothing bounded how much it might download or keep.
+- **Status:** **Fixed.** `pipeline/acquisition.py` stores through `corpus_ingestion.ingest_files`, inside the ingestion quota, with provenance in the corpus manifest. `Config.MAX_ACQUISITION_DOWNLOAD_BYTES` (16 MiB) caps what one acquisition downloads — each fetch is capped at what is left and later ones are refused unsent — and `Config.MAX_ACQUISITION_STORAGE_BYTES` (256 MiB) caps what acquired material occupies in all, checked and recorded inside the ingestion lock so concurrent acquisitions cannot both pass it. A refused file is deleted rather than left unindexed. Acquired vectors join the recent index; acquisition no longer forces a full index rebuild.
+
+### Bug 9.6: `fetch_document` Read the Whole Body Before Truncating (`fetching.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `client.get` buffers the response, so the 2 MiB cap was applied after an arbitrarily large download sat in memory.
+- **Status:** **Fixed.** The body is streamed and reading stops one byte past the cap, whatever Content-Length says.
+
+### Bug 9.7: The Summariser Loaded Its Own Draft Model at a 131k-Token Context (`conversation_summary.py`, `config.py`) — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** `ConversationSummary` loaded a private `Llama` with `n_ctx=131072` (~4.8 GB of KV cache) every snapshot, beside whatever else held the model. With the query pipeline resident, a snapshot would have needed two copies on a 15 GB machine.
+- **Status:** **Fixed.** One process-wide model (`inference/shared_model.py`) at `Config.SHARED_MODEL_CONTEXT_WINDOW` (32768) serves every caller under one lock; the summariser and `DraftModel()` borrow it. `Config.DRAFT_MODEL_CONTEXT_WINDOW` follows it.
+
+### Bug 9.8: Hydration Reports a Context Id as `document_id` (`hydration.py`) — OPEN
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** For hierarchical chunks `Passage.document_id` is `Chunks.contextId`; for recursive ones it is the document id. Anything mapping a passage to its source document gets nothing for most of the corpus.
+- **Status:** Worked around in `corpus_ingestion.source_urls`, which resolves contexts through `Sections`. The field still misnames what it holds.
+
+### Bug 9.9: `uv sync` Removes llama-cpp-python, and Its Installer Cannot Reinstall It (`install_llama_cpp.py`) — OPEN
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** llama-cpp-python is deliberately outside the lock, so `uv sync` uninstalls it. `install_llama_cpp.py` runs `python -m pip`, and the uv-built venv has no pip, so it fails.
+- **Status:** Open. Reinstall with `CMAKE_ARGS=... uv pip install llama-cpp-python` (the CPU build needs none). The installer should call `uv pip`.
+
+### Bug 9.10: The Ingestion Estimate Missed WAL Growth (`corpus_ingestion.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** On the initial corpus 14 of 57 documents grew the corpus by more than their estimate, up to 6.7 MB against 0.2 MB, because the chunk store's WAL grows to ~4.7 MB before a checkpoint and lands on whichever document is being written. Under a tight quota that could pass the limit.
+- **Status:** **Fixed.** Every reservation carries 8 MiB of WAL headroom, the multiplier is 24x text (17.1x measured), and real usage is re-measured after each document, stopping the run if the limit was passed anyway.
+
+### Bug 9.11: The Job Critic Judged One Job Against the Whole Request (`system_prompts.yml`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** Found by the real-model complex-query test. The critic rejected the indexing job twice for not listing trade-offs that belonged to another job; its retries ran out and both dependents were cancelled. The planner also wrote answers into `expected_output`, which the critic then demanded verbatim.
+- **Status:** **Fixed** in the prompts: the critic judges only its job's task, and `expected_output` names what a result must contain. The same request now plans three dependent jobs and completes.
+
+### Bug 9.12: Draft-Model Names Came Back as "...WriteAHEAD..." (`pipeline/naming.py`, `system_prompts.yml`) — FIXED
+
+- **Criticality:** Low
+- **Priority:** P3
+- **Explanation:** The prompt's `{"name": "..."}` template was copied literally, and a `maxLength` in the JSON grammar truncated words.
+- **Status:** **Fixed** with a concrete example, no grammar length (`clean_name` bounds it), and dots and ellipses stripped. Two conversations under user `atlas-e2e` keep their old names.
+
+### Bug 9.13: Only Two Documentation Sources Could Be Searched (`discovery.py`, `sources.toml`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** After 9.2 and 9.3, discovery could search sqlite.org and IETF only. A PostgreSQL or Cassandra question the corpus could not answer found no candidates.
+- **Status:** **Fixed** with sitemap discovery (`knowledge_sufficiency/sitemaps.py`). A source may declare `sitemap` and `sitemap_scope` in `sources.toml`; postgresql.org (1,152 of 29,613 URLs, the current manual) and Cassandra (`/doc/latest/`) do. It is used when a source has no search or its search found nothing. The sitemap is read under robots.txt with its own 8 MiB cap (postgresql.org's is 4.6 MB), parsed with a `<loc>` pattern rather than an XML parser so no entity can expand, followed one level when it is an index (never into `.gz`), and cached for a day per source; downloads count against the acquisition budget. URLs are ranked by path words weighted by rarity, compounds such as `pg_stat_statements` also matched joined, and a word inside a longer matched one not counted twice. Live: "How do BRIN indexes work?" acquires `brin.html`; logical decoding, `pg_stat_statements` and Cassandra repair find their pages. Python's sitemap lists only version roots and MDN's children are gzipped, so neither is configured.
+
+### Bug 9.14: The Conversation Registry Was in SQLite, Apart From the Exchange Log (`memory/conversation_registry.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P1
+- **Explanation:** The registry (`conversation_id`, `user_id`, `conversation_name`, `created_at`) was created in `memory_layer.db`, while the exchange log (`conversation_table`) it describes is in PostgreSQL's `Vectors` database with the vectors.
+- **Status:** **Fixed.** `conversations` is in PostgreSQL beside `conversation_table`: `created_at timestamptz`, names unique per user by the named constraint `conversations_user_name_unique`, a clashing name resolved by `ON CONFLICT ... DO NOTHING` and a bounded retry (8 writers on separate connections get 8 distinct names, live-tested). Both tables connect through `storage/postgres.py`. `migrate_from_sqlite` copies the SQLite rows with their ids, names and starts in one transaction, verifies each, and only then renames the SQLite table to `conversations_migrated` as a backup; it runs at start and from `scripts/migrate_conversations.py`, and a second run does nothing. The 3 existing rows were migrated and verified field by field. The memory-layer guard `test_no_memory_module_opens_its_own_connection` matched any `connect(` and now matches SQLite connections only (`sqlite3.connect`, `storage.sqlite_setup`), which is what it protects; the migration itself reads and renames through `MemoryDatabase`.
+
+### Bug 9.15: Tests Wrote 64 Conversations Into the Real PostgreSQL — FIXED
+
+- **Criticality:** High
+- **Priority:** P1
+- **Explanation:** Introduced and caught during 9.14. Test modules imported `open_conversation_registry` by name, binding the real factory before the root conftest patched the module, so one run created conversations for users `alice` and `bob` in the developer's database.
+- **Status:** **Fixed.** Tests reach the registry only through the `conversation_registry` fixture or the module attribute, and an autouse fixture makes `storage.postgres.connect` raise in every test not marked `live`, so the mistake now fails instead of writing. The 64 rows (users `alice`/`bob`, created 13:29–13:31 IST on 2026-11-09, no exchanges) were deleted; a full run afterwards leaves the table unchanged.
+
+### Bug 9.16: urllib's robots.txt Parser Takes the First Matching Rule (`robots.py`) — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** cassandra.apache.org's robots.txt says `Disallow: /doc` then `Allow: /doc/latest`. `urllib.robotparser` applies the first rule that matches and refused every `/doc/latest` page; RFC 9309 takes the longest match and allows them.
+- **Status:** **Fixed.** `RobotsRules` evaluates the `User-agent: *` group per RFC 9309: longest match, allow wins a tie, `*` and `$` supported.
+
+### Bug 7.8: memory_layer_testing's `llama_cpp` Stub Made Real-Model Tests Load a MagicMock — FIXED
+
+- **Criticality:** Medium
+- **Priority:** P2
+- **Explanation:** `test/memory_layer_testing/conftest.py` installs `sys.modules.setdefault("llama_cpp", MagicMock())`. Under `pytest test/` it is imported before any real-model test, so those tests "loaded" a mock and failed with `'>=' not supported between MagicMock and int`; run alone they passed.
+- **Status:** **Fixed** as for psycopg: the root `conftest.py` imports the real `llama_cpp` first, so the guard stands down where it is installed.
 

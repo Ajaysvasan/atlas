@@ -56,6 +56,7 @@ NO_TOPIC = "no_topic"
 NO_PROJECT = "no_project"
 
 __all__ = [
+    "ConversationContext",
     "HISTORICAL_SNAPSHOT",
     "KNOWN",
     "LATEST_SNAPSHOT",
@@ -77,6 +78,14 @@ class Route(NamedTuple):
     project_name: str | None
     latest_project_snapshot_id: int | None
     score: float | None
+
+
+class ConversationContext(NamedTuple):
+    """What a conversation already holds; `total_turns` places `turns` in the whole of it."""
+
+    summary: str | None
+    turns: Tuple[Tuple[str, str], ...]
+    total_turns: int
 
 
 class MemoryModels:
@@ -306,6 +315,22 @@ class MemoryManager:
             for passage, vector in zip(missing, embedded):
                 vectors[passage.vector_id] = np.asarray(vector, dtype=float32)
         return vectors
+
+    def conversation_context(self, max_turns: int) -> "ConversationContext":
+        """This conversation's rolling summary and its latest turns, oldest first; empty before routing."""
+        route = self.route
+        if route.project_id is None:
+            return ConversationContext(None, (), 0)
+        pool = self.__pool(route.project_id, route.project_name)
+        try:
+            turns = pool.recent(max_turns) if max_turns > 0 else []
+            return ConversationContext(
+                pool.current_summary(),
+                tuple((turn.role, turn.text) for turn in turns),
+                pool.size(),
+            )
+        finally:
+            pool.close()
 
     def store_new_topic(self, system_response: str, project_name: str) -> Route:
         """Start this conversation under a new topic, as the first project in it."""

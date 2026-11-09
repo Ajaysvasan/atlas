@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+GIB = 1 << 30
+
 import numpy as np
 
 from logging_setup import (
@@ -23,11 +25,17 @@ class Config:
     DATA_DIR = os.path.join(ABS_PATH, "data")
     DB_PATH = os.path.join(DATA_DIR, "hierarchical_db")
     EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-    MODEL_PATH = None
+    # None: the draft model also answers. A different GGUF here is loaded once,
+    # beside the draft model, and serves the main role only.
+    MAIN_MODEL_PATH = None
     DRAFT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct-GGUF"
     DRAFT_MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
     DRAFT_MODEL_PATH = os.path.join(ABS_PATH, "models", "draft_model")
-    DRAFT_MODEL_CONTEXT_WINDOW = 131072
+    # One resident instance serves every prompt; its KV cache is sized to this,
+    # not to the model's 128k maximum (~5 GB at 131072, ~1.2 GB here).
+    SHARED_MODEL_CONTEXT_WINDOW = 32_768
+    DRAFT_MODEL_CONTEXT_WINDOW = SHARED_MODEL_CONTEXT_WINDOW
+    MODEL_THREADS = max(1, min(8, (os.cpu_count() or 2) // 2))
     INDEX_PATH = os.path.join(DATA_DIR, "disk_ann_index")
     DISTANCE_METRIC = "l2"
     VECTOR_DTYPE = np.float32
@@ -88,11 +96,70 @@ class Config:
     MEMORY_DB = Path(DATA_DIR) / "memory" / "memory_layer" / "memory_layer.db"
     VECTOR_DIMENSIONS = 128
 
+    # Saved llama.cpp inference state, one checkpoint per conversation. A cache:
+    # deleting the directory loses only the time to recompute it.
+    INFERENCE_CACHE_DIR = Path(DATA_DIR) / "inference_cache"
+    INFERENCE_CACHE_MAX_BYTES = 2 * GIB
+
+    THINKING_MAX_WORKERS = 2
+    THINKING_MAX_JOB_RETRIES = 1
+    THINKING_MAX_RUNTIME_RETRIES = 1
+    THINKING_MAX_PLAN_REVISIONS = 1
+    THINKING_MAX_PLANNED_JOBS = 3
+    THINKING_DEADLINE_SECONDS = 900.0
+
+    GENERATION_MAX_TOKENS = 1_200
+    GENERATION_CONTEXT_TOKENS = 12_000
+    # Turns of this conversation replayed verbatim into the answer prompt.
+    GENERATION_HISTORY_TURNS = 6
+
+    # Everything ingestion writes for the document corpus may occupy at most
+    # this many bytes (binary GiB); None disables the quota, not disk checks.
+    # MAX_INGESTION_STORAGE_BYTES in the environment overrides it.
+    MAX_INGESTION_STORAGE_BYTES = 1 * GIB
+    # Disk that must stay free whatever the quota says.
+    INGESTION_DISK_RESERVE_BYTES = 512 * 1024 * 1024
+    CORPUS_DIR = Path(DATA_DIR) / "corpus"
+
+    # KSV acquisition. What acquired material may occupy in the corpus in all
+    # (inside MAX_INGESTION_STORAGE_BYTES, never beside it), and what a single
+    # acquisition may download: search pages and documents. None is unlimited;
+    # MAX_ACQUISITION_STORAGE_BYTES and MAX_ACQUISITION_DOWNLOAD_BYTES in the
+    # environment override them.
+    MAX_ACQUISITION_STORAGE_BYTES = 256 * 1024 * 1024
+    MAX_ACQUISITION_DOWNLOAD_BYTES = 16 * 1024 * 1024
+
     # Vector ids are stored in signed 64-bit columns (SQLite INTEGER, Postgres
     # bigint). Hash-derived ids are unsigned and overflow both for roughly half
     # of all inputs, so they are masked into the non-negative signed range.
     VECTOR_ID_MASK = (1 << 63) - 1
 
+
+def parse_storage_limit(value) -> int | None:
+    """A byte count, or None for unlimited; anything else is refused."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "null", "none", "unlimited"):
+            return None
+        try:
+            value = int(text)
+        except ValueError as error:
+            raise ValueError(f"storage limit {value!r} is not a whole number of bytes") from error
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"storage limit must be an int or None, got {value!r}")
+    if value <= 0:
+        raise ValueError(f"storage limit must be positive, got {value}")
+    return value
+
+
+for _limit in (
+    "MAX_INGESTION_STORAGE_BYTES",
+    "MAX_ACQUISITION_STORAGE_BYTES",
+    "MAX_ACQUISITION_DOWNLOAD_BYTES",
+):
+    setattr(Config, _limit, parse_storage_limit(os.environ.get(_limit, getattr(Config, _limit))))
 
 config = Config()
 
@@ -104,4 +171,5 @@ __all__ = [
     "log_context",
     "log_timing",
     "new_correlation_id",
+    "parse_storage_limit",
 ]

@@ -691,9 +691,11 @@ class TestJournalMode:
             plain.close()
 
     def test_no_memory_module_opens_its_own_connection(self):
-        """Every table owner goes through MemoryDatabase, so its pragmas and its
-        transaction discipline cannot come apart. The guard used to cover two
-        modules out of four (bugs.md 7.2); it now reads all of memory/."""
+        """Every SQLite table owner goes through MemoryDatabase, so its pragmas and
+        its transaction discipline cannot come apart. The guard used to cover two
+        modules out of four (bugs.md 7.2); it now reads all of memory/. It looks
+        for SQLite connections specifically: the conversation registry lives in
+        PostgreSQL and connects through storage.postgres (bugs.md 9.14)."""
         import pathlib
 
         allowed = {"memory_database.py"}
@@ -703,7 +705,7 @@ class TestJournalMode:
                 continue
             for number, line in enumerate(path.read_text().splitlines(), start=1):
                 code = line.split("#", 1)[0]
-                if "connect(" in code:
+                if "sqlite3.connect(" in code or "sqlite_setup" in code:
                     offenders.append(f"{path}:{number}: {line.strip()}")
         assert offenders == []
 

@@ -386,7 +386,8 @@ class TestTheLoopUsesSourceSelection:
         )
         acq.acquire_until_sufficient(target_for())
 
-        assert len(asked) == 2
+        searched = {url.split("/")[2] for url in asked if not url.endswith("/robots.txt")}
+        assert len(searched) == 2
 
     def test_supplying_urls_skips_discovery_altogether(self, verify):
         index, _ = self.index_over(("wanted", unit(41)))

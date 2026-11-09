@@ -227,3 +227,28 @@ class IndexGenerationUnusable(Exception):
 
     def __str__(self) -> str:
         return f"Index generation {self.generation!r} is unusable: {self.reason}"
+
+
+class IngestionQuotaExceeded(Exception):
+    """Ingesting more would take the corpus past MAX_INGESTION_STORAGE_BYTES."""
+
+    def __init__(self, used: int, requested: int, limit: int) -> None:
+        self.used = used
+        self.requested = requested
+        self.limit = limit
+        super().__init__(
+            f"ingestion needs ~{requested} more bytes; {used} of {limit} are already used"
+        )
+
+
+class InsufficientDiskSpace(Exception):
+    """The filesystem cannot take an ingestion and keep its reserve free, quota or not."""
+
+    def __init__(self, free: int, requested: int, reserve: int) -> None:
+        self.free = free
+        self.requested = requested
+        self.reserve = reserve
+        super().__init__(
+            f"ingestion needs ~{requested} bytes but only {free} are free "
+            f"and {reserve} must stay free"
+        )

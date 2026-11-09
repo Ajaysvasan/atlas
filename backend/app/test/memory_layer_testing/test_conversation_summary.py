@@ -1132,9 +1132,12 @@ class TestDraftWindowIsHonoured:
         # (4096 - 200 - 512) * 4
         assert captured["max_chars"] == (4096 - 200 - 512) * 4
 
-    def test_model_is_loaded_with_the_injected_window(self, tmp_path):
+    def test_the_shared_draft_model_is_used_never_a_private_load(self, tmp_path):
+        """The window shapes batching only; the model is the process's shared one."""
+        from inference import runtime
+        from inference.shared_model import ModelSpec, SharedModel
+
         with patch(_FULL_CONV) as MockFC, patch(_META_REPO) as MockMR:
-            mock_fc = MockFC.return_value
             mock_mr = MockMR.return_value
             mock_mr.get_latest_summary.return_value = None
             mock_mr.get_highest_summarised_sequence.return_value = None
@@ -1147,17 +1150,21 @@ class TestDraftWindowIsHonoured:
                 conversation_id=_CONV_ID,
             )
 
+        loads = []
+        model_file = tmp_path / "m.gguf"
+        model_file.write_text("stub")
+        shared = SharedModel(ModelSpec(model_file), loader=lambda spec: loads.append(spec) or MagicMock())
+        runtime.install_runtime(runtime.InferenceRuntime(shared))
         import llama_cpp
 
-        model_file = Path(str(tmp_path)) / "m.gguf"
-        model_file.write_text("stub")
-        with patch(f"{_MOD}.Config") as MockConfig, patch.object(
-            llama_cpp, "Llama"
-        ) as MockLlama:
-            MockConfig.DRAFT_MODEL_PATH = str(tmp_path)
-            MockConfig.DRAFT_MODEL_FILE = "m.gguf"
-            instance._ConversationSummary__load_model()
-        assert MockLlama.call_args.kwargs["n_ctx"] == 8192
+        with patch.object(llama_cpp, "Llama") as MockLlama:
+            first = instance._ConversationSummary__load_model()
+            second = instance._ConversationSummary__load_model()
+            instance._ConversationSummary__unload_model(first)
+        assert MockLlama.call_count == 0
+        assert len(loads) == 1
+        assert first.model is shared and second.model is shared
+        assert shared.loaded
 
 
 # ---------------------------------------------------------------------------
