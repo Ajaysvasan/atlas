@@ -22,10 +22,21 @@ class TrustedSource(NamedTuple):
     description: str
     search: str = ""
     kind: str = DOCS
+    sitemap: str = ""
+    sitemap_scope: str = ""
 
     @property
     def searchable(self) -> bool:
         return bool(self.search)
+
+    @property
+    def has_sitemap(self) -> bool:
+        return bool(self.sitemap)
+
+    @property
+    def discoverable(self) -> bool:
+        """Discovery can name candidate pages on it: by search, or from its sitemap."""
+        return self.searchable or self.has_sitemap
 
 
 # A starting set, meant to be curated rather than grown casually: every entry is
@@ -46,6 +57,8 @@ def load_sources(path: Path | str = SOURCES_FILE) -> Tuple[TrustedSource, ...]:
             description=entry["description"],
             search=entry.get("search", ""),
             kind=entry.get("kind", DOCS),
+            sitemap=entry.get("sitemap", ""),
+            sitemap_scope=entry.get("sitemap_scope", ""),
         )
         for entry in data.get("source", ())
     )

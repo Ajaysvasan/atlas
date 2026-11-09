@@ -179,24 +179,18 @@ class ConversationSummary:
         return self.summary_repo.get_latest_summary()
 
     def __load_model(self):
-        """Loads the GGUF draft model from Config.DRAFT_MODEL_PATH."""
-        from llama_cpp import Llama  # not a dependency; installed separately
+        """The process's shared draft model, behind the create_chat_completion this class calls."""
+        from inference.model_port import SUMMARY
+        from inference.runtime import shared_runtime
 
-        model_file = Path(Config.DRAFT_MODEL_PATH) / Config.DRAFT_MODEL_FILE
-        if not model_file.exists():
-            raise FileNotFoundError(
-                f"Draft model not found at {model_file}.\n"
-                "Run:  python download_models/download_draft_model.py"
-            )
-        logger.info("Loading draft model from %s", model_file)
-        return Llama(
-            model_path=str(model_file),
-            n_ctx=self.draft_model_context_window_length,
-            verbose=False,
-        )
+        draft = shared_runtime().draft
+        draft.ensure_loaded()
+        return draft.chat_adapter(SUMMARY)
 
     def __unload_model(self, model) -> None:
-        """Removes the model from RAM, frees VRAM KV cache if CUDA is present."""
+        """Releases a privately loaded model; the shared one stays resident for the next caller."""
+        if getattr(model, "shared", False):
+            return
         logger.debug("Unloading draft model")
         del model
         gc.collect()

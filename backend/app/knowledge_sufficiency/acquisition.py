@@ -70,6 +70,8 @@ class KnowledgeAcquisition:
         source_index: SourceIndex | None = None,
         top_sources: int = TOP_SOURCES,
         acquisition_store: AcquisitionStore | None = None,
+        robots=None,
+        sitemaps=None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError(f"max_rounds must be at least 1, got {max_rounds}")
@@ -88,6 +90,8 @@ class KnowledgeAcquisition:
         self.source_index = source_index
         self.top_sources = top_sources
         self.acquisition_store = acquisition_store
+        self.robots = robots
+        self.sitemaps = sitemaps
 
     def __round(self, url: str) -> List[Candidate]:
         document = self.fetch(url)
@@ -117,7 +121,7 @@ class KnowledgeAcquisition:
                 sources = self.source_index.select(
                     target, kind=DOCS, top_k=self.top_sources
                 )
-            urls = discover(target, sources, self.fetch)
+            urls = discover(target, sources, self.fetch, robots=self.robots, sitemaps=self.sitemaps)
             logger.info(
                 "Discovered %d candidate(s) for topic %r from %d source(s)",
                 len(urls), target.topic, len(sources),

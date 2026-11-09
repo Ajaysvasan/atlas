@@ -11,6 +11,14 @@ try:
 except ImportError:
     pass
 
+# The same for llama_cpp: memory_layer_testing stubs it with setdefault, and
+# without the real module imported first the real-model tests would collect
+# against that stub and "load" a MagicMock.
+try:
+    import llama_cpp  # noqa: F401
+except ImportError:
+    pass
+
 
 @pytest.fixture(scope="session")
 def _real_diskannpy():
@@ -54,6 +62,29 @@ def real_diskann(monkeypatch, _real_diskannpy):
 @pytest.fixture(scope="session")
 def _memory_database_dir(tmp_path_factory):
     return tmp_path_factory.mktemp("memory_databases")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_model_by_default(_memory_database_dir, monkeypatch):
+    """No test loads the 2 GB draft model or writes the real inference cache unless it asks to.
+
+    The shared runtime is pointed at a file that does not exist, so code that
+    reaches for the model fails fast with ModelFileMissing; the real-model
+    tests install their own runtime over this one.
+    """
+    import uuid
+
+    from config import Config
+    from inference import runtime
+    from inference.shared_model import ModelSpec, SharedModel
+
+    test = uuid.uuid4().hex
+    monkeypatch.setattr(Config, "INFERENCE_CACHE_DIR", _memory_database_dir / f"kv-{test}")
+    monkeypatch.setattr(Config, "CORPUS_DIR", _memory_database_dir / f"corpus-{test}")
+    absent = SharedModel(ModelSpec(_memory_database_dir / "absent-model.gguf"))
+    runtime.install_runtime(runtime.InferenceRuntime(absent))
+    yield
+    runtime.install_runtime(None)
 
 
 @pytest.fixture(autouse=True)
@@ -117,6 +148,9 @@ class InMemoryVectorStore:
 
     def insert(self, vector_id, vector) -> None:
         self.batch_insert([vector_id], [vector])
+
+    def storage_bytes(self) -> int:
+        return sum(4 * len(vector) + 36 for vector in self.rows.values())
 
     def vectors_for(self, vector_ids):
         self.__reachable()
@@ -244,3 +278,115 @@ def pytest_sessionfinish(session, exitstatus):
             "Tests left files in the app directory: " + ", ".join(map(repr, left)),
             red=True,
         )
+
+
+@pytest.fixture(scope="session")
+def real_model():
+    """The real draft model, loaded once for every real-model test; skips when absent."""
+    pytest.importorskip("llama_cpp")
+    from inference.shared_model import ModelSpec, SharedModel
+
+    spec = ModelSpec.draft()
+    if not spec.path.exists():
+        pytest.skip(f"draft model not downloaded ({spec.path})")
+    # Smaller than production's window: enough for these prompts, a third of the KV cache.
+    model = SharedModel(spec._replace(n_ctx=12_288))
+    model.ensure_loaded()
+    yield model
+    model.close()
+
+
+class InMemoryConversationRegistry:
+    """The PostgreSQL `conversations` table's contract, over a dict: unique names per user, newest first."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.rows = {}
+        self.lock = threading.Lock()
+
+    def create(self, user_id, proposed_name, conversation_id=None, created_at=None):
+        import uuid
+
+        from memory.conversation_registry import ConversationRecord, clean_name, first_free, name_stem
+        from memory.identifiers import require_identifier
+        from storage.timestamps import utc_now
+
+        user_id = require_identifier(user_id, "user_id")
+        stem = name_stem(clean_name(proposed_name))
+        if not stem:
+            raise ValueError("a conversation name needs at least one visible character")
+        with self.lock:
+            taken = {r.conversation_name for r in self.rows.values() if r.user_id == user_id}
+            record = ConversationRecord(conversation_id or uuid.uuid4().hex, user_id,
+                                        first_free(stem, taken), created_at or utc_now())
+            self.rows[record.conversation_id] = record
+            return record
+
+    def get(self, conversation_id, user_id):
+        record = self.rows.get(conversation_id)
+        return record if record is not None and record.user_id == user_id else None
+
+    def list(self, user_id, limit=50):
+        mine = [r for r in self.rows.values() if r.user_id == user_id]
+        return sorted(mine, key=lambda r: (r.created_at, r.conversation_id), reverse=True)[:limit]
+
+    def find_by_prefix(self, user_id, prefix):
+        prefix = (prefix or "").strip()
+        return [r for r in self.list(user_id, 10_000) if prefix and r.conversation_id.startswith(prefix)]
+
+    def delete(self, conversation_id, user_id):
+        return self.rows.pop(conversation_id, None) is not None if self.get(conversation_id, user_id) else False
+
+    def count(self):
+        return len(self.rows)
+
+    def import_records(self, records):
+        from memory.conversation_registry import first_free, name_stem
+
+        copied = present = 0
+        renamed = []
+        for record in records:
+            if record.conversation_id in self.rows:
+                present += 1
+                continue
+            taken = {r.conversation_name for r in self.rows.values() if r.user_id == record.user_id}
+            name = (record.conversation_name if record.conversation_name not in taken
+                    else first_free(name_stem(record.conversation_name), taken))
+            if name != record.conversation_name:
+                renamed.append((record.conversation_id, record.conversation_name, name))
+            self.rows[record.conversation_id] = record._replace(conversation_name=name)
+            copied += 1
+        return copied, present, renamed
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_postgres_outside_live_tests(request, monkeypatch):
+    """Only test/live_testing may open the real database through storage.postgres.
+
+    The registry and the exchange log both connect through it; a test that
+    reached the real one by importing a factory before it was patched once
+    wrote 64 conversations into the developer's PostgreSQL (bugs.md 9.15).
+    """
+    if request.node.get_closest_marker("live") is not None:
+        return
+    from storage import postgres
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a non-live test tried to connect to the real PostgreSQL")
+
+    monkeypatch.setattr(postgres, "connect", refuse)
+
+
+@pytest.fixture(autouse=True)
+def conversation_registry(monkeypatch):
+    """Conversations the pipeline and CLI create go to memory, never to the real PostgreSQL."""
+    from memory import conversation_registry as module
+
+    registry = InMemoryConversationRegistry()
+    monkeypatch.setattr(module, "open_conversation_registry", lambda: registry)
+    return registry
+

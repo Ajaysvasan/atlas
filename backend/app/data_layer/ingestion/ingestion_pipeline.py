@@ -23,10 +23,13 @@ from .TextFileProcessor.text_extractor import TextExtractor
 
 logger = get_logger(__name__)
 
+# A vector row, its index share, its label row and its slot in the vector index.
+VECTOR_WRITE_BYTES = 2048
+
 
 # I Don't need any more abstraction here since I am not mutating the data rather just providing an simplified interface that I can use
 class IngestionPipeline:
-    def __init__(self, vector_store=None, index_path: str | Path | None = None):
+    def __init__(self, vector_store=None, index_path: str | Path | None = None, quota=None):
         logger.info("Building ingestion pipeline")
         self.f_loader = FileLoader()
         self.t_extractor = TextExtractor()
@@ -40,7 +43,21 @@ class IngestionPipeline:
         self.vector_store = vector_store
         self._owns_store = vector_store is None
         self.index_path = index_path
+        self._quota = quota
         logger.debug("Ingestion pipeline ready")
+
+    @property
+    def quota(self):
+        """The storage quota every vector write is checked against, built on first use."""
+        if getattr(self, "_quota", None) is None:
+            from data_layer.ingestion.quota import IngestionQuota
+
+            self._quota = IngestionQuota(postgres_usage=self.corpus_storage_bytes)
+        return self._quota
+
+    def corpus_storage_bytes(self) -> int:
+        """The corpus's share of PostgreSQL, read over this pipeline's own connection."""
+        return int(self.__store().storage_bytes())
 
     def load_file(self, folder_path) -> Dict[str, List[Path]]:
         """Returns the files that are within that specified path"""
@@ -101,6 +118,9 @@ class IngestionPipeline:
         chunk_ids = [e.meta_data.chunk_id for e in embedded_objs]
         vector_ids = [checked_vector_id(e.vector_id, c) for e, c in zip(embedded_objs, chunk_ids)]
         vectors = np.stack([np.asarray(e.vector, dtype=np.float32) for e in embedded_objs])
+        # The backstop for any caller that drives the stages itself rather than
+        # through corpus_ingestion, which reserves before chunking.
+        self.quota.require_room(self.quota.usage().total, len(vector_ids) * VECTOR_WRITE_BYTES)
         with log_timing(logger, "vector store", vectors=len(vector_ids)):
             self.__store().batch_insert(vector_ids, vectors)
         labels = self.vector_meta.batch_insert(vector_ids, chunk_ids)

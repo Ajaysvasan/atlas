@@ -4,26 +4,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Python RAG (Retrieval-Augmented Generation) backend system that ingests multi-format documents, generates embeddings, stores them in a DiskANN vector index, and manages conversation memory with snapshot history. Currently CLI-only — no FastAPI routes exist yet.
+Atlas: a Python RAG backend that ingests documents into a DiskANN index, keeps hierarchical conversation memory, and answers a query end to end — decomposition → memory → retrieval/KSV/acquisition → thinking (plan, jobs, critique) → generation → persistence — on one shared local Qwen2.5-3B model. It is driven by a development CLI; there is no HTTP surface yet (a Java/Spring backend over gRPC is the next phase).
 
 ## Running the Application
 
 ```bash
 # From the app/ directory. uv resolves the interpreter and deps from
 # pyproject.toml + uv.lock, so there is nothing to activate.
-uv run python main.py                    # Interactive CLI mode
+uv run python main.py start              # Interactive CLI (also the default with no command)
+uv run python main.py start --user NAME  # Whose conversations (default $ATLAS_USER or login name)
+uv run python main.py --no-acquire start # Never fetch from trusted sources
+uv run python main.py -q "question"      # One query in a new conversation, then exit
 uv run python main.py --verbose          # Debug logging, console as well as file
 uv run python main.py --log-json         # One JSON object per line instead of text
 uv run python main.py --log-file PATH    # Write somewhere other than log/app.log
 ```
 
+At the `Atlas >` prompt anything is a query except a line that is exactly a
+command: `switch`, `switch <n|id-prefix>`, `new`, `status`, `status --time`,
+`status --retries`, `help`, `exit` (each also with a leading `/`). `start` loads
+the model, embedder, reranker and index before the first prompt.
+
+The corpus is built with `uv run python scripts/build_corpus.py` (58 named pages
+from postgresql.org, sqlite.org, cassandra.apache.org, ingested inside the
+quota, provenance in `data/corpus/manifest.jsonl`) and checked with
+`scripts/validate_corpus.py`. `bash scripts/cli_smoke.sh` drives the real CLI
+through stdin across a restart.
+
 First checkout: `uv sync --all-extras` builds `.venv` from the lock, downloading
 CPython 3.11 if needed. **3.11 is a hard ceiling, not a preference** —
 `diskannpy` has never published a wheel past `cp311` in its entire release
 history, so a newer Python has no on-disk ANN index without a source build.
-`llama-cpp-python` is deliberately not a dependency and is installed separately
-by `uv run python download_models/install_llama_cpp.py`, which detects the GPU
-and sets the `CMAKE_ARGS` a plain install would get wrong.
+`llama-cpp-python` is deliberately not a dependency, so **`uv sync` removes it**.
+Reinstall with `uv pip install llama-cpp-python` (CPU; add `CMAKE_ARGS=-DGGML_CUDA=on`
+for an NVIDIA GPU). `download_models/install_llama_cpp.py` detects the GPU but
+calls `python -m pip`, which the uv venv lacks (bug 9.9). The draft model is
+fetched by `uv run python download_models/download_draft_model.py`; set
+`HF_HUB_DISABLE_XET=1` if the Xet transfer stalls.
 
 `LOG_LEVEL`, `LOG_FILE`, `LOG_CONSOLE_LEVEL`, `LOG_FORMAT=json`, `LOG_MAX_BYTES`
 and `LOG_BACKUP_COUNT` override the flags, so logging can be retuned without a
@@ -42,12 +59,16 @@ uv run pytest test/memory_layer_testing/ -v       # Memory layer tests
 uv run pytest test/stress_testing/ -v             # Stress tests
 uv run pytest test/logging_testing/ -v            # Logging tests
 uv run pytest test/live_testing/ -v               # Real PostgreSQL; self-skipping
+uv run pytest test/ -m "not real_model"           # Everything but the real-model tests (~30 s)
+uv run pytest test/ -m real_model                 # Real draft model; self-skipping (~5.5 min CPU)
 uv run pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v
 ```
 
-**1723 passed** is the expected result. If 8 of them skip, the live tests could
-not reach a server; `-rs` prints which precondition failed, and
-`scripts/smoke.py` checks the whole setup and names what is missing.
+**2210 passed** is the expected full result: 2196 without the model and 14
+`real_model` tests (KV checkpoints against llama.cpp, and the pipeline with the
+real model). The real-model tests skip themselves when `llama_cpp` or the model
+file is missing; the live tests when PostgreSQL is unreachable. `-rs` prints
+which precondition failed, and `scripts/smoke.py` checks the whole setup.
 
 Most of the suite swaps `psycopg` for a `MagicMock`, which is what lets it run
 with no database — but a mock adapts anything and returns anything, so it cannot
@@ -60,8 +81,15 @@ skip even on a machine that has a server.
 
 The suite reads the real `.env`, so the root `conftest.py` also keeps it off the
 developer's data: per-test `Config.DB_PATH`, `Config.INDEX_PATH` and
-`Config.MEMORY_DB`, and an in-memory chunk vector store (the `chunk_vectors`
-fixture) in place of PostgreSQL. **Never call `monkeypatch.undo()`** — the
+`Config.MEMORY_DB`, `Config.INFERENCE_CACHE_DIR` and `Config.CORPUS_DIR`, an
+in-memory chunk vector store (the `chunk_vectors` fixture) in place of
+PostgreSQL, and a shared model runtime pointed at a file that does not exist,
+so nothing loads the 2 GB model unless it asks for the `real_model` fixture.
+The conversation registry is an in-memory stand-in (the `conversation_registry`
+fixture), and `storage.postgres.connect` raises in any test not marked `live`
+(bug 9.15) — reach the registry through the fixture or the module attribute,
+never by importing `open_conversation_registry` by name. It
+imports the real `llama_cpp` first for the same reason as `psycopg` (bug 7.8). **Never call `monkeypatch.undo()`** — the
 fixture instance is shared with those redirects, so it reverts them and the rest
 of the test reaches the real database (bug 7.7); scope a temporary patch with
 `pytest.MonkeyPatch.context()`. A test enforces this.
@@ -82,6 +110,40 @@ All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 - **Vectors and labels** (`IngestionPipeline.batch_insert_vectors`): the vector goes to pgvector under its vector id (project id `Config.GLOBAL_VECTOR_SCOPE`, `"global"`) **before** `vector_meta_data` allocates its DiskANN label, so a label never exists without a stored vector. The vector id is **required** — `MissingVectorId` / `MalformedVectorId`, and the column is `NOT NULL` with a `CHECK` — and `label` is the only number generated (bug 5.22). `vector_meta_data` holds no vectors
 - **The DiskANN index** (`vector_db_manager/`): a **built generation** on disk (`index_generations.py`) — a static memory index while it fits `VECTOR_INDEX_RAM_MB` (512), a static disk index with a RAM-budgeted node cache past it — opened, not rebuilt, at startup; plus the vectors ingested since, in a dynamic index capped at `RECENT_VECTOR_CAPACITY` (20k). `VectorDbManager` searches both and merges by distance. Ingestion builds a new generation every `INDEX_REBUILD_AT` (10k) vectors, in a separate process, and swaps `CURRENT` atomically. diskannpy 0.7.0 cannot save its dynamic index at all (5.20). **Every allocation is admitted against free memory first** (`memory_guard.py`; Linux overcommits, so a `MemoryError` never comes): short of memory, disk, a usable generation or PostgreSQL, the index degrades — smaller cache, previous generation, built index only, keyword search alone — and never takes the app down; the builder sets its own `oom_score_adj` to 1000. No search asks a part for more than it holds (5.18, 5.24), a disk index is never searched with one thread (it hangs, 5.24), and the recent index is built with `saturate_graph=True` (5.19). See `vector_db_manager/README.md`
 
+### Query Pipeline (`pipeline/`)
+
+`AtlasPipeline.ask(conversation_id, user_id, query)` in order, each stage through its owner's public interface:
+
+1. **Ownership** — `ConversationRegistry.get(conversation_id, user_id)`; another user's conversation is "not found".
+2. **Decomposition** — `Decompose.decompose()` records the exchange in PostgreSQL and returns `Decomposition` (mode, topics, sub-queries).
+3. **Memory** — `MemoryManager(query, …, topic=primary_topic or "General")`: route, `conversation_context()`, `conversation_retrieval()` (KSV inside).
+4. **Global retrieval + KSV** — skipped for a `DOUBT` that memory answers `FULL`. Otherwise `Retriever` over the working query and each sub-query; KSV keeps only supporting passages as evidence.
+5. **Acquisition** — on a `none`/empty verdict, `Acquirer` (below), then one refresh and re-search.
+6. **Thinking** → 7. **Generation** → 8. **Persistence** — `MemoryManager.update` or `store_new_topic`/`store_new_project` (project named by the draft model), then `Decompose.record_response`. A failed write is a warning on the response, never hidden.
+
+`AtlasResponse` carries the text, status, `persisted` and a `RequestRecord` (`observability/telemetry.py`): monotonic stage timings, retries, model calls by purpose, cache and retrieval outcomes, never prompt text. `status --time`/`--retries` read it. `pipeline/bootstrap.py::Components` builds everything once per process; `observability/health.py` runs 29 bounded checks (no text generation) for `status`. Evidence is tagged `M1…` (memory) / `G1…` (global) with provenance URLs from `corpus_ingestion.source_urls`.
+
+### Thinking Layer (`thinking_layer/`)
+
+Depth comes from decomposition, with no new classification: `DOUBT` → **DIRECT** (one answer job + job critique), `DEVELOPMENT` → **PLANNED** (model planner, ≤3 jobs, plan critique, 1 revision), `DEVELOPMENT` with sub-queries → **EXPANDED** (one worker job per sub-query + a stitch job). `ThinkingOrchestrator.think(ThinkingRequest)` coordinates `Planner`, `JobPool` (validated DAG, enforced state machine, claim-once), `Scheduler` (dependency order, failed prerequisites cancel dependents), `WorkerPool` (bounded threads — logical concurrency only; inference is serialised by the model lock), `Accumulator` (accepted results only; model output is never filed as evidence), `JobCritic` (rule checks, e.g. invented citations, before the model) and `PlanCritic` (reopens only the named jobs and their dependents). Budgets in `settings.py`/Config: job reasoning retries, runtime retries (separate), plan revisions, a request deadline. The original query always reaches every prompt; a condensed one is shown beside it, never instead. Returns `ThinkingResult` (status, jobs, accepted, cited evidence, critiques, limitations, `RetryStats`, timings).
+
+### Inference (`inference/`)
+
+- **One model per process** (`SharedModel`, `runtime.shared_runtime()`): loaded on first use at `Config.SHARED_MODEL_CONTEXT_WINDOW` (32768), every call under one `RLock`. Query decomposition's `DraftModel()` and the summariser borrow it; `ReasoningModel` sends worker/stitch jobs to the main model (the draft unless `Config.MAIN_MODEL_PATH` is set). Callers use `infer(system, user, schema=, max_tokens=, purpose=)` (`model_port.TextModel`).
+- **KV checkpoints** (`KVSessionManager`, `CheckpointStore`): main generation formats and tokenises the prompt with the model's own template, restores the conversation's saved state when its tokens are a longer exact prefix than what is resident, generates, then truncates to the evidence-free prefix (system + history) and saves it. Files in `data/inference_cache/` (0600, atomic, no pickle) are loaded only if model fingerprint, context window, format version and SHA-256 match the `inference_checkpoints` row; anything else is discarded and recomputed. The generation history window moves in half-window steps so the saved prefix stays reusable. llama.cpp's results depend on batch partitioning, so a cold recompute is not bit-identical to a restored run — compare like with like.
+
+### Generation Layer (`generation_layer/`)
+
+`assemble()` builds a deterministic, budgeted context — prefix: system prompt + rolling summary + history; turn: request verbatim, accepted results (the stitch when there is one), evidence cited first, knowledge status, limitations — and `Generator` writes the answer through the session manager. It does no retrieval, planning or memory writes.
+
+### Knowledge Acquisition (`pipeline/acquisition.py`, `knowledge_sufficiency/`)
+
+Discovery asks a source through its search (sqlite.org, IETF) or, when it has none or the search found nothing, through its published sitemap (postgresql.org's current manual, Cassandra's latest docs; `sitemaps.py`, configured by `sitemap`/`sitemap_scope` in `sources.toml`). Search results drop menu/header/footer links and are ranked by the target's terms (bug 9.1); sitemap URLs are ranked by path words weighted by rarity (9.13). Everything obeys robots.txt, evaluated per RFC 9309 (`robots.py`, 9.16). The acquirer chunks readable text, not markup, and stores through `ingest_files` with two limits: `MAX_ACQUISITION_DOWNLOAD_BYTES` per acquisition and `MAX_ACQUISITION_STORAGE_BYTES` for acquired material in all, checked and recorded inside the ingestion lock.
+
+### Ingestion Quota (`data_layer/ingestion/quota.py`, `corpus_ingestion.py`)
+
+`ingest_files()` ingests one document at a time inside `IngestionQuota.reserve()` (a process and file lock, so ingestions are serialised): it estimates growth (24x text + 128 KiB + 8 MiB WAL headroom), refuses before writing, re-measures after, and stops a run that passes the limit. Counted: the chunk store and its WAL, the keyword index, the DiskANN directory, `data/corpus/`, and the corpus's share of PostgreSQL (`VectorRepository.storage_bytes()`). `IngestionPipeline.batch_insert_vectors` checks the quota too, as a backstop. `None` disables the quota, never the disk reserve.
+
 ### Memory Layer
 
 Hierarchical organization: Topic → Project → Conversation → Snapshot
@@ -96,6 +158,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 - **ProjectManager** (`topic_pool/project_pool/project_manager.py`): routes `(topic_id, query)` to an existing project. `route()` -> `project_id` or `None`; `resolve()` -> `ProjectMatch` with score, margin, `ambiguous` and ranked candidates. A project scores as its best-matching vector, not its average. The no branch is a `pass` pending the thinking layer. Architecture lives in `memory/topic_pool/project_pool/README.md` — **module READMEs hold architecture, data flow and design rationale; `docs/` stays the API reference; code comments are only for logic that reads wrong without one**
 - **SnapShot** (`memory/snapshot.py`): Bidirectional cursor traversal and cosine similarity (torch) over a snapshot history, for **either** scope. `scope="conversation"` (the default) walks this conversation's cumulative summaries and needs a `conversation_id`; `scope="project"` walks the project registry and does not. The cursors, `advance`/`prev` and `search` are the same code for both, because each scope stores its vector under the id its listing returns. `add()` is conversation-only and `add_project_snapshot()` project-only; the wrong one raises `WrongSnapshotScope`
 - **ProjectSnapshot** (`topic_pool/project_pool/project_snapshot.py`): a project's rolling description — what it is about and what has been done. Incremental: each snapshot summarises the previous one plus the conversation summaries written since, so cost tracks what changed rather than the project's size. It reads across every conversation (`project_id`, ignoring `conversation_id`) because the result describes the project, not a chat. The watermark is `seq` on `cumulative_vector_meta_data`, allocated monotonically on write under `BEGIN IMMEDIATE`. An empty summary from the draft model does **not** advance the watermark, or those summaries would be dropped from every future snapshot. Triggered on every conversation snapshot, from inside the window where the draft model is already resident — loading it is the expensive part, so a second load is avoided
+- **ConversationRegistry** (`memory/conversation_registry.py`): `conversations(conversation_id, user_id, conversation_name, created_at timestamptz)` **in PostgreSQL**, beside `conversation_table`, through `storage/postgres.py`; obtain it with `open_conversation_registry()`. Names unique per user by the constraint `conversations_user_name_unique`; a clashing name gets ` (n)` via `ON CONFLICT ... DO NOTHING` and a bounded retry. `migrate_from_sqlite` moved the rows an earlier version kept in `memory_layer.db` (that table is now the backup `conversations_migrated`; bug 9.14). Names are proposed by the draft model from the first query (`pipeline/naming.py`), cleaned and bounded, with a deterministic fallback
 - **MemoryMappingHandler** (`memory/memory_mapping_handler.py`): `(conversation_id, user_id)` -> topic, project, latest project snapshot — the lookup `MemoryManager` needs to resume a conversation without routing it again, which is why it sits beside `memory_manager.py` rather than in the conversation pool. Takes no `conversation_id`: every method names the conversation it acts on, so one handler serves the whole table. The write is two steps because the information is — a row is opened when a conversation starts and routing fills it in later, so `search` returning `None` ("never seen") and `MemoryMapping(None, None, None)` ("seen, not yet routed") are deliberately different answers. The latest project snapshot is read from the chain on every `search`, not cached — routing stores only topic and project, which reference `project_table` as a pair. `user_id` is the only user-scoped column in the layer — see `bugs.md` 4.83
 - **ProjectSnapshotRepository** (`project_data_repo/project_snapshot_repo.py`): `project_snapshot` (summary, length, `last_seq_included`, timestamp) and `project_snapshot_mapping`, append-only on `(project_id, project_snapshot_id)` so it holds the ordered chain rather than a pointer at the newest. `project_snapshot_id` is also the pgvector `vector_id`, so a row needs no lookup to reach its embedding
 - **ConversationVectorMetaDataRepository** (`conversation_data_management/conversationVectorMetaManager.py`): SQLite metadata: `summary_vector_meta_data`, `cumulative_vector_meta_data` (carrying `conversation_id` and `seq`, unique **per project**), `summary_snapshot_map`; it writes snapshot chunks into `summary_chunks`, which `FullConversationRepository` owns. `get_highest_summarised_sequence()` is per **conversation**. `insert_snapshot()` writes a whole snapshot in one transaction.
@@ -106,8 +169,11 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 |-------|------|---------|
 | DiskANN index | `data/disk_ann_index/` | `gen-NNNNNN/` built generations (the current one and the one before, as a fallback) and `CURRENT` naming the one in use; plus an in-memory index of what was ingested since |
 | SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one; plus `vector_meta_data` — each DiskANN label, its vector id and its chunk, no vectors (`vectorMetaDataRepository.py`) |
-| SQLite (memory) | `data/memory/memory_layer/memory_layer.db` | **Every** memory table, one file (`memory_database.py`): topics, the project registry and its snapshot chain, conversation turns and snapshot metadata, the conversation mapping. Foreign keys enforced across all of them. WAL journal (so `.db-wal` and `.db-shm` sit alongside it), `synchronous=NORMAL`. The old `data/topic_db/`, `data/project_db/` and `data/memory_mapping/` files are no longer read |
-| PostgreSQL | localhost:5432, DB `Vectors` | Every vector, via pgvector (`vectorRepository.py`): document chunks under project id `"global"`, the memory layer's under theirs |
+| SQLite (memory) | `data/memory/memory_layer/memory_layer.db` | **Every** memory table, one file (`memory_database.py`): topics, the project registry and its snapshot chain, conversation turns and snapshot metadata, the conversation mapping and `inference_checkpoints`. (`conversations_migrated` is the pre-9.14 registry, kept as a backup and never read.) Foreign keys enforced across all of them. WAL journal (so `.db-wal` and `.db-shm` sit alongside it), `synchronous=NORMAL`. The old `data/topic_db/`, `data/project_db/` and `data/memory_mapping/` files are no longer read |
+| PostgreSQL | localhost:5432, DB `Vectors` | Every vector, via pgvector (`vectorRepository.py`): document chunks under project id `"global"`, the memory layer's under theirs; `conversation_table`, the exchange log (query, response); and `conversations`, the registry (id, owner, unique name, start) |
+| Corpus files | `data/corpus/` | Downloaded sources (`sources/`), acquired text (`acquired/`), `manifest.jsonl` (url, topic, fetched_at, sha256, document_id, stored bytes) |
+| KV checkpoints | `data/inference_cache/` | One llama.cpp state per conversation; disposable — deleting it costs only recomputation |
+| Models | `models/draft_model/` | `qwen2.5-3b-instruct-q4_k_m.gguf` (~2 GB) |
 
 PostgreSQL credentials are in `.env` (not committed; see `.env.example`): `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Every one is `DB_`-prefixed on purpose — `load_dotenv()` does not override a variable already in the environment, and the unprefixed names are ones other things set: login shells export `USER`, conda exports `HOST` as its compiler triplet, PaaS platforms set `PORT` (bug 6.2).
 
@@ -160,6 +226,10 @@ Central config class with constants:
 - `MAX_VECTORS`: 1,000,000 — the corpus size designed for; no index is sized to it
 - `VECTOR_INDEX_RAM_MB` (512), `RECENT_VECTOR_CAPACITY` (20,000), `INDEX_REBUILD_AT` (10,000), `MEMORY_HEADROOM_MB` (256), `GLOBAL_VECTOR_SCOPE` (`"global"`)
 - `INDEX_PATH`, `DB_PATH`, `CONVERSATION` paths
+- `SHARED_MODEL_CONTEXT_WINDOW` (32768), `MAIN_MODEL_PATH` (None = the draft answers), `MODEL_THREADS`
+- `THINKING_*` budgets (workers 2, job retries 1, runtime retries 1, plan revisions 1, planned jobs 3, deadline 900 s); `GENERATION_MAX_TOKENS` (1200), `GENERATION_CONTEXT_TOKENS` (12000), `GENERATION_HISTORY_TURNS` (6)
+- `INFERENCE_CACHE_DIR`, `INFERENCE_CACHE_MAX_BYTES` (2 GiB, LRU)
+- `MAX_INGESTION_STORAGE_BYTES` (1 GiB), `MAX_ACQUISITION_STORAGE_BYTES` (256 MiB), `MAX_ACQUISITION_DOWNLOAD_BYTES` (16 MiB): bytes or `None`; the environment overrides each (`null`/`none` = unlimited, anything non-positive is refused at import). `INGESTION_DISK_RESERVE_BYTES` (512 MiB), `CORPUS_DIR`
 - `LOG_FILE`, `DEBUG`: defaults `main.py` hands to `configure_logging()`
 
 ### Exception Hierarchy
@@ -169,11 +239,16 @@ Central config class with constants:
 
 ## Known Bugs (see `bugs.md` and `production_impact_report.md`)
 
-**P2 — Unimplemented:**
-- Bug 2.1/2.2: `cli/cli_interface.py` query loop is a placeholder (`# some stuff`) — no downstream pipeline integration
-- Bug 4.1: `MemoryManager` is still an empty stub class. `TopicManager`, `ProjectManager`, `ConversationPoolManager` and `ConversationSummary` are implemented; nothing yet wires the topic layer to the project layer.
+**Open:**
+- Python and MDN docs are reachable only by explicit URL: no usable search, and their sitemaps list version roots / gzipped children
+- Bug 9.9 (P2): `uv sync` removes llama-cpp-python and `install_llama_cpp.py` cannot reinstall it (no pip in the venv)
+- Bug 9.8 (P3): hydration's `Passage.document_id` is a context id for hierarchical chunks (worked around in provenance)
+- No corpus or conversation deletion yet; `CheckpointStore.delete_conversation` is ready for it
 
 **Fixed since this list was written** (each has a regression test):
+- Bugs 2.1/2.2/4.1: the CLI and `-q` run the whole pipeline; `MemoryManager` is implemented and wired
+- Bugs 9.13–9.16: sitemap discovery, the registry moved to PostgreSQL with its SQLite rows migrated, the test leak into PostgreSQL, RFC 9309 robots.txt
+- Bugs 9.1–9.7, 9.10–9.12, 7.8: discovery, robots.txt, source search URLs, acquisition storage and limits, streaming fetch, one shared model, ingestion estimate, critic scope, naming, the `llama_cpp` stub
 - Bug 4.3: `search()` no longer moves the instance cursors — `__find_best_snapshot` scans with local ones
 - Bug 4.4: a failed similarity search returns `None`, not `[-1]`
 - Vector ids are ints masked into the signed 64-bit range (`Config.VECTOR_ID_MASK`), derived from `chunk_id` rather than chunk text

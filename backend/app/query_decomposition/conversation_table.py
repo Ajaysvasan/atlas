@@ -1,17 +1,10 @@
 """conversation_table in PostgreSQL: each query as it arrives, and the system's response once there is one."""
 
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import List, NamedTuple
 
-import psycopg
-from dotenv import load_dotenv
-
 from config import get_logger
-from data_layer.datalayer_exceptions.datalayer_exceptions import (
-    MissingDatabaseConfiguration,
-)
 from query_decomposition.query_decomposition_exceptions import (
     ExchangeNotFound,
     ResponseAlreadyRecorded,
@@ -36,28 +29,11 @@ class Exchange(NamedTuple):
 
 
 def _connect():
-    load_dotenv()
-    settings = {
-        name: os.getenv(name)
-        for name in ("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT")
-    }
-    missing = [name for name, value in settings.items() if value is None]
-    if missing:
-        logger.error("PostgreSQL configuration incomplete; missing %s", ", ".join(missing))
-        raise MissingDatabaseConfiguration(missing)
-    connection = psycopg.connect(
-        dbname=settings["DB_NAME"],
-        user=settings["DB_USER"],
-        password=settings["DB_PASSWORD"],
-        host=settings["DB_HOST"],
-        port=settings["DB_PORT"],
-    )
-    logger.info(
-        "Connected to the conversation table in %s@%s:%s",
-        settings["DB_NAME"],
-        settings["DB_HOST"],
-        settings["DB_PORT"],
-    )
+    from storage.postgres import connect
+
+    connection = connect()
+    info = connection.info
+    logger.info("Connected to the conversation table in %s@%s:%s", info.dbname, info.host, info.port)
     return connection
 
 

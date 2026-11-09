@@ -242,6 +242,28 @@ class VectorRepository:
             return {}
         return self.__get_vectors_by_id(list(vector_ids))
 
+    def storage_bytes(self) -> int:
+        """Bytes this project's rows occupy: tuples, plus their share of the table's indexes."""
+        try:
+            self.curr.execute(
+                "select coalesce(sum(pg_column_size(v.*)), 0), count(*) "
+                "from vectors v where project_id = %s;",
+                (self.project_id,),
+            )
+            tuple_bytes, rows = self.curr.fetchone()
+            self.curr.execute(
+                "select count(*), pg_indexes_size('vectors'::regclass) from vectors;"
+            )
+            total_rows, index_bytes = self.curr.fetchone()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        # 28 bytes a row the column sizes leave out: the tuple header and its
+        # line pointer.
+        share = index_bytes * rows // total_rows if total_rows else 0
+        return int(tuple_bytes) + 28 * int(rows) + int(share)
+
     def close(self):
         self.curr.close()
         self.conn.close()
