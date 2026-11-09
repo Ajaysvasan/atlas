@@ -12,6 +12,7 @@ import tools.jackson.databind.json.JsonMapper;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.request.AbstractMockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** Register, log in and call with a token, each from its own client address so rate limits stay out of the way. */
@@ -27,7 +28,7 @@ public final class ApiTestSupport {
 		this.json = json;
 	}
 
-	public static MockHttpServletRequestBuilder from(MockHttpServletRequestBuilder builder, String address) {
+	public static <B extends AbstractMockHttpServletRequestBuilder<B>> B from(B builder, String address) {
 		return builder.with(request -> {
 			request.setRemoteAddr(address);
 			return request;
