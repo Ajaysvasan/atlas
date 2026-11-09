@@ -1,6 +1,7 @@
 package com.fyp.atlas.grpc;
 
 import java.time.Duration;
+import java.util.Map;
 
 import com.fyp.atlas.exception.ApiException;
 import com.fyp.atlas.exception.ErrorCode;
@@ -30,9 +31,12 @@ public final class GrpcErrorTranslator {
 				status.getDescription());
 		return switch (status.getCode()) {
 			case NOT_FOUND -> new ApiException(ErrorCode.CONVERSATION_NOT_FOUND);
-			case INVALID_ARGUMENT -> "QUERY_TOO_LARGE".equals(code)
-					? new ApiException(ErrorCode.VALIDATION_FAILED, "The query is too long.")
-					: new ApiException(ErrorCode.VALIDATION_FAILED, "The pipeline could not process the request as given.");
+			case INVALID_ARGUMENT -> switch (code == null ? "" : code) {
+				case "QUERY_TOO_LARGE" -> new ApiException(ErrorCode.VALIDATION_FAILED, "The query is too long.");
+				case "INVALID_CURSOR" -> ApiException.validation(Map.of("cursor", "is not a cursor this API issued"));
+				default -> new ApiException(ErrorCode.VALIDATION_FAILED,
+						"The pipeline could not process the request as given.");
+			};
 			case RESOURCE_EXHAUSTED -> "TOO_LARGE".equals(code) ? new ApiException(ErrorCode.PAYLOAD_TOO_LARGE)
 					: new ApiException(ErrorCode.BACKEND_BUSY, ErrorCode.BACKEND_BUSY.defaultMessage(), null,
 							Duration.ofSeconds(30), failure);

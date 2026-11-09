@@ -49,6 +49,16 @@ class AtlasServiceStub:
                 request_serializer=grpc__server_dot_generated_dot_atlas__service__pb2.HealthRequest.SerializeToString,
                 response_deserializer=grpc__server_dot_generated_dot_atlas__service__pb2.HealthResponse.FromString,
                 _registered_method=True)
+        self.ListConversations = channel.unary_unary(
+                '/atlas.v1.AtlasService/ListConversations',
+                request_serializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListConversationsRequest.SerializeToString,
+                response_deserializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListConversationsResponse.FromString,
+                _registered_method=True)
+        self.ListExchanges = channel.unary_unary(
+                '/atlas.v1.AtlasService/ListExchanges',
+                request_serializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListExchangesRequest.SerializeToString,
+                response_deserializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListExchangesResponse.FromString,
+                _registered_method=True)
 
 
 class AtlasServiceServicer:
@@ -77,6 +87,22 @@ class AtlasServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListConversations(self, request, context):
+        """The user's conversations, most recently active first. Read-only: served
+        beside a running query, never queued behind it.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListExchanges(self, request, context):
+        """One conversation's exchanges, oldest first. The user must own it;
+        another user's conversation is NOT_FOUND, as if absent. Read-only.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AtlasServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -94,6 +120,16 @@ def add_AtlasServiceServicer_to_server(servicer, server):
                     servicer.Health,
                     request_deserializer=grpc__server_dot_generated_dot_atlas__service__pb2.HealthRequest.FromString,
                     response_serializer=grpc__server_dot_generated_dot_atlas__service__pb2.HealthResponse.SerializeToString,
+            ),
+            'ListConversations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListConversations,
+                    request_deserializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListConversationsRequest.FromString,
+                    response_serializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListConversationsResponse.SerializeToString,
+            ),
+            'ListExchanges': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListExchanges,
+                    request_deserializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListExchangesRequest.FromString,
+                    response_serializer=grpc__server_dot_generated_dot_atlas__service__pb2.ListExchangesResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -177,6 +213,60 @@ class AtlasService:
             '/atlas.v1.AtlasService/Health',
             grpc__server_dot_generated_dot_atlas__service__pb2.HealthRequest.SerializeToString,
             grpc__server_dot_generated_dot_atlas__service__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListConversations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/atlas.v1.AtlasService/ListConversations',
+            grpc__server_dot_generated_dot_atlas__service__pb2.ListConversationsRequest.SerializeToString,
+            grpc__server_dot_generated_dot_atlas__service__pb2.ListConversationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListExchanges(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/atlas.v1.AtlasService/ListExchanges',
+            grpc__server_dot_generated_dot_atlas__service__pb2.ListExchangesRequest.SerializeToString,
+            grpc__server_dot_generated_dot_atlas__service__pb2.ListExchangesResponse.FromString,
             options,
             channel_credentials,
             insecure,

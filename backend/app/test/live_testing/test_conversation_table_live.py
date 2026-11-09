@@ -81,3 +81,35 @@ def test_history_is_one_users_conversation_oldest_first(table):
         first.exchange_id,
         second.exchange_id,
     ]
+
+
+def test_pages_continue_after_the_cursor_and_keep_to_one_user(table):
+    table, conversation_id = table
+    asked = [table.record_query(conversation_id, "user", f"q{n}") for n in range(5)]
+    table.record_query(conversation_id, "someone else", "not theirs")
+
+    first = table.page(conversation_id, "user", 2)
+    rest = table.page(conversation_id, "user", 10, (first[-1].query_created_at, first[-1].exchange_id))
+    assert [row.exchange_id for row in first + rest] == [row.exchange_id for row in asked]
+
+
+def test_the_lock_survives_threads_reading_at_once(table):
+    import threading
+
+    table, conversation_id = table
+    table.record_query(conversation_id, "user", "one")
+    failures = []
+
+    def read():
+        try:
+            for _ in range(20):
+                assert len(table.page(conversation_id, "user", 10)) == 1
+        except Exception as error:  # pragma: no cover - reported below
+            failures.append(error)
+
+    threads = [threading.Thread(target=read) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert failures == []

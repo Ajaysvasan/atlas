@@ -207,3 +207,81 @@ class HealthResponse(_message.Message):
     queued: int
     busy: bool
     def __init__(self, serving: _Optional[bool] = ..., pipeline_ready: _Optional[bool] = ..., queued: _Optional[int] = ..., busy: _Optional[bool] = ...) -> None: ...
+
+class ListConversationsRequest(_message.Message):
+    __slots__ = ("request_id", "user_id", "limit", "cursor")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    CURSOR_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    user_id: str
+    limit: int
+    cursor: str
+    def __init__(self, request_id: _Optional[str] = ..., user_id: _Optional[str] = ..., limit: _Optional[int] = ..., cursor: _Optional[str] = ...) -> None: ...
+
+class ConversationSummary(_message.Message):
+    __slots__ = ("conversation_id", "conversation_name", "created_at", "last_activity_at", "exchange_count")
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_NAME_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    LAST_ACTIVITY_AT_FIELD_NUMBER: _ClassVar[int]
+    EXCHANGE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    conversation_id: str
+    conversation_name: str
+    created_at: str
+    last_activity_at: str
+    exchange_count: int
+    def __init__(self, conversation_id: _Optional[str] = ..., conversation_name: _Optional[str] = ..., created_at: _Optional[str] = ..., last_activity_at: _Optional[str] = ..., exchange_count: _Optional[int] = ...) -> None: ...
+
+class ListConversationsResponse(_message.Message):
+    __slots__ = ("request_id", "conversations", "next_cursor")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATIONS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_CURSOR_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    conversations: _containers.RepeatedCompositeFieldContainer[ConversationSummary]
+    next_cursor: str
+    def __init__(self, request_id: _Optional[str] = ..., conversations: _Optional[_Iterable[_Union[ConversationSummary, _Mapping]]] = ..., next_cursor: _Optional[str] = ...) -> None: ...
+
+class ListExchangesRequest(_message.Message):
+    __slots__ = ("request_id", "user_id", "conversation_id", "limit", "cursor")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    CURSOR_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    user_id: str
+    conversation_id: str
+    limit: int
+    cursor: str
+    def __init__(self, request_id: _Optional[str] = ..., user_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., limit: _Optional[int] = ..., cursor: _Optional[str] = ...) -> None: ...
+
+class ExchangeRecord(_message.Message):
+    __slots__ = ("exchange_id", "query", "asked_at", "answer", "answered_at")
+    EXCHANGE_ID_FIELD_NUMBER: _ClassVar[int]
+    QUERY_FIELD_NUMBER: _ClassVar[int]
+    ASKED_AT_FIELD_NUMBER: _ClassVar[int]
+    ANSWER_FIELD_NUMBER: _ClassVar[int]
+    ANSWERED_AT_FIELD_NUMBER: _ClassVar[int]
+    exchange_id: str
+    query: str
+    asked_at: str
+    answer: str
+    answered_at: str
+    def __init__(self, exchange_id: _Optional[str] = ..., query: _Optional[str] = ..., asked_at: _Optional[str] = ..., answer: _Optional[str] = ..., answered_at: _Optional[str] = ...) -> None: ...
+
+class ListExchangesResponse(_message.Message):
+    __slots__ = ("request_id", "conversation_id", "conversation_name", "exchanges", "next_cursor")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_NAME_FIELD_NUMBER: _ClassVar[int]
+    EXCHANGES_FIELD_NUMBER: _ClassVar[int]
+    NEXT_CURSOR_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    conversation_id: str
+    conversation_name: str
+    exchanges: _containers.RepeatedCompositeFieldContainer[ExchangeRecord]
+    next_cursor: str
+    def __init__(self, request_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., conversation_name: _Optional[str] = ..., exchanges: _Optional[_Iterable[_Union[ExchangeRecord, _Mapping]]] = ..., next_cursor: _Optional[str] = ...) -> None: ...

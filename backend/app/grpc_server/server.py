@@ -52,16 +52,19 @@ def serve(settings: GrpcSettings | None = None, acquisition: bool = True) -> int
     """Load the pipeline once, serve until SIGINT/SIGTERM, then drain and release everything."""
     from pipeline.bootstrap import Components
     from pipeline.uploads import UploadIngestion
+    from query_decomposition import conversation_table
 
     settings = GrpcSettings.from_environment() if settings is None else settings
     components = Components(acquisition=acquisition)
     uploads = UploadIngestion(refresh_retrieval=components.retriever.refresh)
     server = None
+    servicer = None
     try:
         pipeline = components.pipeline()
         for problem in components.warm_up():
             logger.warning("Starting without: %s", problem)
-        servicer = AtlasServicer(pipeline, uploads, settings, OperationGate(settings.max_waiting))
+        servicer = AtlasServicer(pipeline, uploads, settings, OperationGate(settings.max_waiting),
+                                 exchanges=conversation_table.open_conversation_table())
         server, port = build_server(servicer, settings)
         stop = threading.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -77,5 +80,7 @@ def serve(settings: GrpcSettings | None = None, acquisition: bool = True) -> int
     finally:
         if server is not None:
             server.stop(None)
+        if servicer is not None and servicer.exchanges is not None:
+            servicer.exchanges.close()
         uploads.close()
         components.close()

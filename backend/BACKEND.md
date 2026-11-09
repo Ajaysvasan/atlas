@@ -52,6 +52,7 @@ never runs `clean`.
 | `ATLAS_GRPC_SERVICE_TOKEN` | **required** | at least 16 chars, the same value as Python's |
 | `ATLAS_GRPC_HOST` / `ATLAS_GRPC_PORT` | `127.0.0.1` / `50051` | where the pipeline listens |
 | `ATLAS_GRPC_QUERY_DEADLINE` / `ATLAS_GRPC_INGEST_DEADLINE` | `PT20M` / `PT30M` | per-call deadlines |
+| `ATLAS_GRPC_LIST_DEADLINE` | `PT10S` | deadline for the two conversation listings |
 | `ATLAS_GRPC_TLS_ENABLED`, `_TLS_TRUST_CERT`, `_TLS_CLIENT_CERT`, `_TLS_CLIENT_KEY` | off | TLS, and mTLS when a client cert is given |
 | `ATLAS_HTTP_PORT` | `8080` | HTTP port |
 | `ATLAS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:3000` | CORS; `*` is ignored |
@@ -183,6 +184,49 @@ The body above comes back with every one of these statuses:
 The request itself can also fail: `400` for no files or more than 10, `401`, or the same
 `503` and `504` as `/query`.
 
+### `GET /conversations` (Bearer token)
+
+The caller's conversations, most recently active first. Query parameters: `limit` (1–200,
+default 50) and `cursor` (the previous page's `nextCursor`; leave it out for the first page).
+Any user parameter is ignored: the user is the token's subject.
+
+```json
+{"requestId": "...", "nextCursor": "WyIyMDI2LTExLTA5VDEw...",
+ "conversations": [
+   {"conversationId": "...", "conversationName": "PostgreSQL MVCC",
+    "createdAt": "2026-11-09T10:00:00Z", "lastActivityAt": "2026-11-09T10:05:12.345678Z",
+    "exchangeCount": 3}]}
+```
+
+- `lastActivityAt` is the latest of the start, the last query and the last answer.
+  `exchangeCount` counts queries, answered or not.
+- `nextCursor` is `null` on the last page. Cursors are opaque positions (keyset, not offset), so
+  a conversation that becomes active between pages moves to the top rather than shifting rows.
+- Errors: `400` `VALIDATION_FAILED` naming `limit` or `cursor`; `401`; the same `503` and `504`
+  as `/query` (but never `BACKEND_BUSY`: see below).
+
+### `GET /conversations/{conversationId}/exchanges` (Bearer token)
+
+One conversation's exchanges, oldest first, paged the same way.
+
+```json
+{"requestId": "...", "conversationId": "...", "conversationName": "PostgreSQL MVCC", "nextCursor": null,
+ "exchanges": [
+   {"exchangeId": "...", "query": "What is MVCC?", "askedAt": "...", "answer": "...", "answeredAt": "..."},
+   {"exchangeId": "...", "query": "And vacuum?", "askedAt": "..."}]}
+```
+
+- `answer` and `answeredAt` are absent when no answer was recorded (the pipeline failed, or the
+  query is still running).
+- A conversation that belongs to someone else, doesn't exist, or has a malformed id is `404`
+  `CONVERSATION_NOT_FOUND`, the same answer as `/query` gives.
+- Errors otherwise as for `GET /conversations`.
+
+Both listings are served by Python (`ListConversations`, `ListExchanges`) from the registry and
+the exchange log, so ownership is decided in one place. They only read, so they skip the
+one-at-a-time gate and answer while a query runs. `ListExchanges` reads the exchange log on its
+own connection, not the pipeline's.
+
 ### `GET /actuator/health` (public)
 
 `{"status": "UP"}`, with no details. It reports the Java service only.
@@ -225,7 +269,7 @@ answer into it.
 ## Behaviour under load and failure
 
 - The pipeline runs one operation at a time, query or ingestion, because the model, index
-  and ingestion lock are single-occupancy. Up to `ATLAS_GRPC_MAX_WAITING` requests can
+  and ingestion lock are single-occupancy. The two listings only read, so they never queue. Up to `ATLAS_GRPC_MAX_WAITING` requests can
   queue; beyond that the answer is `BUSY` (HTTP 503 with `Retry-After`).
 - A queued request whose caller has gone away, or whose deadline has passed, never starts.
   A request that has started runs to completion even if the caller leaves, because a model

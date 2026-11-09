@@ -31,6 +31,14 @@ service AtlasService {
 
   // Liveness and whether the pipeline is loaded; no model call.
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // The user's conversations, most recently active first. Read-only: served
+  // beside a running query, never queued behind it.
+  rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
+
+  // One conversation's exchanges, oldest first. The user must own it;
+  // another user's conversation is NOT_FOUND, as if absent. Read-only.
+  rpc ListExchanges(ListExchangesRequest) returns (ListExchangesResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,4 +160,58 @@ message HealthResponse {
   bool pipeline_ready = 2;
   int32 queued = 3;                   // operations waiting for the pipeline
   bool busy = 4;                      // an operation is running
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+//
+// Both listings page by keyset: `limit` (0 = 50, at most 200) and `cursor`,
+// the `next_cursor` of the previous page, opaque to the caller and empty for
+// the first page. An empty `next_cursor` means there is nothing more. A cursor
+// that cannot be read is INVALID_ARGUMENT with atlas-error-code INVALID_CURSOR.
+// Timestamps are RFC 3339 strings in UTC with microseconds.
+
+message ListConversationsRequest {
+  string request_id = 1;
+  string user_id = 2;
+  int32 limit = 3;
+  string cursor = 4;
+}
+
+message ConversationSummary {
+  string conversation_id = 1;
+  string conversation_name = 2;
+  string created_at = 3;
+  string last_activity_at = 4;        // latest of start, last query, last answer
+  int32 exchange_count = 5;           // queries recorded, answered or not
+}
+
+message ListConversationsResponse {
+  string request_id = 1;
+  repeated ConversationSummary conversations = 2;
+  string next_cursor = 3;
+}
+
+message ListExchangesRequest {
+  string request_id = 1;
+  string user_id = 2;
+  string conversation_id = 3;
+  int32 limit = 4;
+  string cursor = 5;
+}
+
+message ExchangeRecord {
+  string exchange_id = 1;
+  string query = 2;
+  string asked_at = 3;
+  optional string answer = 4;         // absent when no answer was recorded
+  optional string answered_at = 5;
+}
+
+message ListExchangesResponse {
+  string request_id = 1;
+  string conversation_id = 2;
+  string conversation_name = 3;
+  repeated ExchangeRecord exchanges = 4;
+  string next_cursor = 5;
 }

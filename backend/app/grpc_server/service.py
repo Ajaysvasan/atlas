@@ -1,20 +1,25 @@
-"""AtlasService: Query, Ingest and Health, as thin adapters over the pipeline the CLI runs.
+"""AtlasService: Query, Ingest, Health and the two listings, as thin adapters over the pipeline the CLI runs.
 
 No intelligence lives here. Query is `AtlasPipeline.new_conversation` + `ask`,
 exactly as the CLI calls them; Ingest stages and validates the stream, then
 hands the files to `UploadIngestion`, which uses the quota-checked
-`ingest_files`. Errors leave as status codes with a stable `atlas-error-code`
+`ingest_files`. ListConversations and ListExchanges only read the registry and
+the exchange log, so they never wait at the operation gate. Errors leave as status codes with a stable `atlas-error-code`
 trailer and a message written for the end user, never a stack trace or path.
 """
 
+import base64
+import binascii
 import hashlib
+import json
 import re
 import shutil
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, Dict, List
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Tuple
 
 import grpc
 
@@ -32,6 +37,10 @@ logger = get_logger(__name__)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+DEFAULT_PAGE = 50
+MAX_PAGE = 200
+_MAX_CURSOR_CHARS = 512
 
 # Pipeline error category -> (status, atlas-error-code, message for the user).
 _CATEGORIES = {
@@ -56,6 +65,37 @@ def _abort(context, status: grpc.StatusCode, code: str, message: str, **trailers
     context.abort(status, message)
 
 
+class InvalidCursor(ValueError):
+    """A cursor this server did not issue, or one that was altered."""
+
+
+def encode_cursor(stamp: str, key: str) -> str:
+    """An opaque position: (timestamp, id) of the last row of a page."""
+    raw = json.dumps([stamp, key], separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> Tuple[str, str]:
+    if len(cursor) > _MAX_CURSOR_CHARS:
+        raise InvalidCursor(cursor)
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        stamp, key = json.loads(raw)
+        datetime.fromisoformat(stamp)
+    except (binascii.Error, ValueError, TypeError) as error:
+        raise InvalidCursor(cursor) from error
+    if not isinstance(stamp, str) or not isinstance(key, str) or not key:
+        raise InvalidCursor(cursor)
+    return stamp, key
+
+
+def _stamp(value) -> str:
+    """RFC 3339 in UTC with microseconds, the form the registry returns and cursors carry."""
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    return str(value)
+
+
 def _category(error: BaseException) -> str:
     from pipeline.atlas import _category as pipeline_category
 
@@ -71,8 +111,11 @@ class AtlasServicer(pb_grpc.AtlasServiceServicer):
         gate: OperationGate | None = None,
         ready: Callable[[], bool] = lambda: True,
         staging_dir: str | Path | None = None,
+        exchanges=None,
     ) -> None:
         self.pipeline = pipeline
+        # Its own exchange-log connection: the pipeline's is in use while a query runs.
+        self.exchanges = exchanges
         self.uploads = uploads
         self.settings = settings
         self.gate = OperationGate(settings.max_waiting) if gate is None else gate
@@ -284,6 +327,94 @@ class AtlasServicer(pb_grpc.AtlasServiceServicer):
         if limit is not None:
             response.storage_limit_bytes = limit
         return response
+
+    # ------------------------------------------------------------ Conversations
+
+    def __page(self, limit: int, context) -> int:
+        if limit < 0 or limit > MAX_PAGE:
+            _abort(context, grpc.StatusCode.INVALID_ARGUMENT, "INVALID_REQUEST",
+                   f"the page size must be between 1 and {MAX_PAGE}")
+        return limit or DEFAULT_PAGE
+
+    def __position(self, cursor: str, context) -> Tuple[str, str] | None:
+        if not cursor:
+            return None
+        try:
+            return decode_cursor(cursor)
+        except InvalidCursor:
+            _abort(context, grpc.StatusCode.INVALID_ARGUMENT, "INVALID_CURSOR", "the cursor is not valid")
+
+    def __read(self, context, request_id: str, what: str, work: Callable[[], object]):
+        """A read outside the gate; a store failure becomes the status its category names."""
+        try:
+            return work()
+        except Exception as error:
+            category = _category(error)
+            logger.error("Listing %s failed (%s): %s", what, category, error, exc_info=category == "internal")
+            status, code, message = _CATEGORIES.get(category, _CATEGORIES["internal"])
+            _abort(context, status, code, message, request_id=request_id)
+
+    def ListConversations(self, request: pb.ListConversationsRequest, context) -> pb.ListConversationsResponse:
+        request_id = self.__request_id(request.request_id)
+        user_id = self.__user(request.user_id, context)
+        limit = self.__page(request.limit, context)
+        after = self.__position(request.cursor, context)
+        with log_context(request_id=request_id, user_id=user_id):
+            rows = self.__read(context, request_id, "conversations",
+                               lambda: self.pipeline.registry.summaries(user_id, limit + 1, after))
+            page, more = rows[:limit], len(rows) > limit
+            last = page[-1] if more else None
+            return pb.ListConversationsResponse(
+                request_id=request_id,
+                conversations=[
+                    pb.ConversationSummary(
+                        conversation_id=row.conversation_id,
+                        conversation_name=row.conversation_name,
+                        created_at=row.created_at,
+                        last_activity_at=row.last_activity_at,
+                        exchange_count=row.exchange_count,
+                    )
+                    for row in page
+                ],
+                next_cursor=encode_cursor(last.last_activity_at, last.conversation_id) if last else "",
+            )
+
+    def ListExchanges(self, request: pb.ListExchangesRequest, context) -> pb.ListExchangesResponse:
+        request_id = self.__request_id(request.request_id)
+        user_id = self.__user(request.user_id, context)
+        conversation_id = request.conversation_id
+        if not _IDENTIFIER.match(conversation_id or ""):
+            _abort(context, grpc.StatusCode.NOT_FOUND, "CONVERSATION_NOT_FOUND", "no such conversation")
+        limit = self.__page(request.limit, context)
+        after = self.__position(request.cursor, context)
+        if self.exchanges is None:
+            _abort(context, grpc.StatusCode.UNAVAILABLE, "DATABASE_UNAVAILABLE", "the database is unavailable")
+        with log_context(request_id=request_id, user_id=user_id):
+            conversation = self.__read(context, request_id, "exchanges",
+                                       lambda: self.pipeline.registry.get(conversation_id, user_id))
+            if conversation is None:
+                _abort(context, grpc.StatusCode.NOT_FOUND, "CONVERSATION_NOT_FOUND", "no such conversation",
+                       request_id=request_id)
+            position = None if after is None else (datetime.fromisoformat(after[0]), after[1])
+            rows = self.__read(context, request_id, "exchanges",
+                               lambda: self.exchanges.page(conversation_id, user_id, limit + 1, position))
+            page, more = rows[:limit], len(rows) > limit
+            last = page[-1] if more else None
+            records = []
+            for row in page:
+                record = pb.ExchangeRecord(exchange_id=row.exchange_id, query=row.query,
+                                           asked_at=_stamp(row.query_created_at))
+                if row.system_response is not None:
+                    record.answer = row.system_response
+                    record.answered_at = _stamp(row.system_response_time)
+                records.append(record)
+            return pb.ListExchangesResponse(
+                request_id=request_id,
+                conversation_id=conversation.conversation_id,
+                conversation_name=conversation.conversation_name,
+                exchanges=records,
+                next_cursor=encode_cursor(_stamp(last.query_created_at), last.exchange_id) if last else "",
+            )
 
     # ------------------------------------------------------------------- Health
 

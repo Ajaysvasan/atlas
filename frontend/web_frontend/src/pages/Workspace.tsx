@@ -1,11 +1,18 @@
-import { useEffect, useRef, useState, type SubmitEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type SubmitEvent } from "react";
 import { createPortal } from "react-dom";
 import { Link, NavLink, useNavigate, useParams } from "react-router";
 import { Answer } from "../components/Answer";
 import { Meridian, MeridianTick } from "../components/Meridian";
 import { QUERY_MAX_CHARS } from "../lib/api";
 import { useSession } from "../lib/auth";
-import { conversationStore, useConversations, type Conversation, type Turn } from "../lib/conversations";
+import {
+  conversationStore,
+  useConversations,
+  type ConversationMeta,
+  type ListState,
+  type ThreadState,
+  type Turn,
+} from "../lib/conversations";
 import { formatDuration, formatStamp } from "../lib/format";
 
 const EXAMPLES = [
@@ -16,48 +23,61 @@ const EXAMPLES = [
 
 export function Workspace() {
   const { conversationId } = useParams();
-  const { conversations, pending, orphanError } = useConversations();
+  const session = useSession();
+  const { list, threads, pending, orphanError } = useConversations();
   const conversation = conversationStore.get(conversationId);
+  const thread = conversationId ? threads[conversationId] : undefined;
   const [railOpen, setRailOpen] = useState(false);
+
+  useEffect(() => {
+    if (list.status === "idle") void conversationStore.loadList(session.accessToken);
+  }, [list.status, session.accessToken]);
+
+  // Opening a conversation reads its turns from the server, unless they are already here.
+  useEffect(() => {
+    if (conversationId && !conversationStore.getState().threads[conversationId]) {
+      void conversationStore.loadThread(session.accessToken, conversationId);
+    }
+  }, [conversationId, session.accessToken]);
+
+  const missing = Boolean(conversationId && thread?.status === "missing");
+  const title = conversation?.name ?? (conversationId ? (missing ? "Unknown conversation" : "Loading") : "Untitled");
 
   return (
     <div className="grid h-[calc(100svh-3.5rem)] grid-cols-1 lg:grid-cols-[19rem_minmax(0,1fr)]">
       <ConversationRail
-        conversations={conversations}
+        list={list}
         activeId={conversationId}
-        pendingId={pending?.conversationId ?? (pending ? "new" : null)}
+        pendingId={pending?.conversationId ?? null}
         className="hidden border-r border-rule lg:flex"
       />
       {railOpen &&
-        createPortal(
-          <RailDrawer conversations={conversations} activeId={conversationId} onClose={() => setRailOpen(false)} />,
-          document.body,
-        )}
+        createPortal(<RailDrawer list={list} activeId={conversationId} onClose={() => setRailOpen(false)} />, document.body)}
 
       <section className="flex min-h-0 flex-col" aria-label="Conversation">
         <div className="flex items-center justify-between gap-4 border-b border-rule px-gutter py-3">
           <div className="min-w-0">
             <p className="label">
-              <span className="text-accent">{conversation ? "Conversation" : "New"}</span>
+              <span className="text-accent">{conversationId ? "Conversation" : "New"}</span>
               <span className="mx-2 text-ink-faint">/</span>
               <span lang="ja">会話</span>
             </p>
-            <h1 className="truncate font-display text-lg font-bold tracking-[-0.01em]">
-              {conversation?.name ?? (conversationId ? "Unknown conversation" : "Untitled")}
-            </h1>
+            <h1 className="truncate font-display text-lg font-bold tracking-[-0.01em]">{title}</h1>
           </div>
           <button type="button" className="label link shrink-0 lg:hidden" onClick={() => setRailOpen(true)}>
-            History ({conversations.length})
+            History{list.status === "ready" ? ` (${list.items.length}${list.nextCursor ? "+" : ""})` : ""}
           </button>
         </div>
 
-        {conversationId && !conversation ? (
+        {missing ? (
           <UnknownConversation />
+        ) : conversationId ? (
+          <Thread conversationId={conversationId} thread={thread} />
         ) : (
-          <Thread conversation={conversation} orphanError={conversationId ? null : orphanError} />
+          <NewConversation orphanError={orphanError} />
         )}
 
-        <Composer conversation={conversation} disabled={Boolean(conversationId && !conversation)} />
+        <Composer conversation={conversation} conversationId={conversationId} disabled={missing} />
       </section>
     </div>
   );
@@ -66,18 +86,19 @@ export function Workspace() {
 /* ------------------------------------------------------------------ rail */
 
 function ConversationRail({
-  conversations,
+  list,
   activeId,
   pendingId,
   className = "",
   onNavigate,
 }: {
-  conversations: Conversation[];
+  list: ListState;
   activeId?: string;
   pendingId?: string | null;
   className?: string;
   onNavigate?: () => void;
 }) {
+  const session = useSession();
   return (
     <aside className={`min-h-0 flex-col ${className}`} aria-label="Conversations">
       <div className="flex items-center justify-between px-gutter py-4 lg:px-6">
@@ -88,62 +109,63 @@ function ConversationRail({
           + New
         </Link>
       </div>
-      <nav className="scrollbar-thin min-h-0 flex-1 overflow-y-auto border-t border-rule">
-        {conversations.length === 0 && (
-          <p className="px-gutter py-6 text-sm text-ink-faint lg:px-6">No conversations yet. They are listed here once answered.</p>
+      <nav className="scrollbar-thin min-h-0 flex-1 overflow-y-auto border-t border-rule" aria-busy={list.status === "loading"}>
+        {list.status === "loading" && <p className="label px-gutter py-6 lg:px-6">Loading</p>}
+        {list.status === "error" && (
+          <div className="px-gutter py-6 lg:px-6" role="alert">
+            <p className="text-sm text-ink-dim">{list.error}</p>
+            <button type="button" className="label link mt-3" onClick={() => void conversationStore.loadList(session.accessToken)}>
+              Retry
+            </button>
+          </div>
+        )}
+        {list.status === "ready" && list.items.length === 0 && (
+          <p className="px-gutter py-6 text-sm text-ink-faint lg:px-6">No conversations yet.</p>
         )}
         <ul>
-          {conversations.map((c) => (
-            <li key={c.id} className="group relative border-b border-rule">
-              <NavLink
-                to={`/workspace/${encodeURIComponent(c.id)}`}
-                onClick={onNavigate}
-                className={({ isActive }) =>
-                  `block py-4 pl-gutter pr-10 transition-colors duration-500 lg:pl-6 ${isActive ? "bg-base-2" : "hover:bg-base-2/60"}`
-                }
-              >
-                {c.id === activeId && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-px bg-accent" />}
-                <span className="block truncate font-display text-[15px] font-bold tracking-[-0.01em]">{c.name}</span>
-                <span className="label mt-1 block text-[10px]">
-                  {formatStamp(c.updatedAt)} · {c.turns.length} {c.turns.length === 1 ? "turn" : "turns"}
-                  {pendingId === c.id && <span className="ml-2 text-accent">· Running</span>}
-                </span>
-              </NavLink>
-              <button
-                type="button"
-                className="label absolute right-3 top-1/2 -translate-y-1/2 px-1 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                title="Remove from this browser (the server keeps it)"
-                aria-label={`Remove ${c.name} from this browser`}
-                onClick={() => {
-                  if (window.confirm(`Remove “${c.name}” from this browser? The server keeps the conversation.`)) {
-                    conversationStore.remove(c.id);
-                  }
-                }}
-              >
-                ×
-              </button>
-            </li>
+          {list.items.map((c) => (
+            <RailItem key={c.id} c={c} active={c.id === activeId} running={pendingId === c.id} onNavigate={onNavigate} />
           ))}
         </ul>
+        {list.nextCursor && (
+          <div className="px-gutter py-4 lg:px-6">
+            <button
+              type="button"
+              className="label link"
+              disabled={list.loadingMore}
+              onClick={() => void conversationStore.loadMore(session.accessToken)}
+            >
+              {list.loadingMore ? "Loading" : "Load more"}
+            </button>
+          </div>
+        )}
       </nav>
-      {conversations.length > 0 && (
-        <div className="border-t border-rule px-gutter py-3 lg:px-6">
-          <button
-            type="button"
-            className="label link"
-            onClick={() => {
-              if (window.confirm("Forget every conversation stored in this browser? The server keeps them.")) conversationStore.clearAll();
-            }}
-          >
-            Clear local history
-          </button>
-        </div>
-      )}
     </aside>
   );
 }
 
-function RailDrawer({ conversations, activeId, onClose }: { conversations: Conversation[]; activeId?: string; onClose: () => void }) {
+function RailItem({ c, active, running, onNavigate }: { c: ConversationMeta; active: boolean; running: boolean; onNavigate?: () => void }) {
+  return (
+    <li className="relative border-b border-rule">
+      <NavLink
+        to={`/workspace/${encodeURIComponent(c.id)}`}
+        onClick={onNavigate}
+        className={({ isActive }) =>
+          `block px-gutter py-4 transition-colors duration-500 lg:px-6 ${isActive ? "bg-base-2" : "hover:bg-base-2/60"}`
+        }
+      >
+        {active && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-px bg-accent" />}
+        <span className="block truncate font-display text-[15px] font-bold tracking-[-0.01em]">{c.name}</span>
+        <span className="label mt-1 block text-[10px]">
+          {formatStamp(c.lastActivityAt)} · {c.exchangeCount} {c.exchangeCount === 1 ? "turn" : "turns"}
+          {running && <span className="ml-2 text-accent">· Running</span>}
+        </span>
+      </NavLink>
+    </li>
+  );
+}
+
+function RailDrawer({ list, activeId, onClose }: { list: ListState; activeId?: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
@@ -158,7 +180,7 @@ function RailDrawer({ conversations, activeId, onClose }: { conversations: Conve
             Close
           </button>
         </div>
-        <ConversationRail conversations={conversations} activeId={activeId} className="flex min-h-0 flex-1" onNavigate={onClose} />
+        <ConversationRail list={list} activeId={activeId} className="flex min-h-0 flex-1" onNavigate={onClose} />
       </div>
       <button type="button" aria-label="Close history" className="flex-1 bg-base/70" onClick={onClose} />
     </div>
@@ -171,10 +193,8 @@ function UnknownConversation() {
   return (
     <div className="flex flex-1 flex-col justify-center px-gutter">
       <p className="label mb-4 text-accent">404</p>
-      <p className="max-w-xl font-display text-3xl font-bold tracking-[-0.02em]">This conversation is not in this browser’s history.</p>
-      <p className="mt-4 max-w-xl text-ink-dim">
-        The list of conversations is kept locally, so it is empty on a new device or after clearing history.
-      </p>
+      <p className="max-w-xl font-display text-3xl font-bold tracking-[-0.02em]">No such conversation.</p>
+      <p className="mt-4 max-w-xl text-ink-dim">It does not exist, or it belongs to another account.</p>
       <Link to="/workspace" className="btn mt-8 self-start">
         Start a new conversation
       </Link>
@@ -182,32 +202,76 @@ function UnknownConversation() {
   );
 }
 
-function Thread({ conversation, orphanError }: { conversation?: Conversation; orphanError: Turn | null }) {
-  const { pending } = useConversations();
+function useScrollToEnd(deps: unknown[]) {
   const end = useRef<HTMLDivElement>(null);
-  const showPending = pending && (pending.conversationId ?? null) === (conversation?.id ?? null);
-  const turns = conversation?.turns ?? [];
-
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [turns.length, showPending, orphanError]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  return end;
+}
 
-  if (!turns.length && !showPending && !orphanError) return <EmptyState />;
+function Timeline({ turns, running, children }: { turns: Turn[]; running: boolean; children?: ReactNode }) {
+  return (
+    <div className="relative mx-auto max-w-4xl px-gutter py-12">
+      {/* the meridian as the conversation's timeline */}
+      <Meridian running={running} className="absolute bottom-0 left-gutter top-0" />
+      <ol className="space-y-16 pl-8 sm:pl-12">
+        {turns.map((t, i) => (
+          <TurnView key={t.id} turn={t} index={i + 1} />
+        ))}
+        {children}
+      </ol>
+    </div>
+  );
+}
+
+function Thread({ conversationId, thread }: { conversationId: string; thread?: ThreadState }) {
+  const session = useSession();
+  const { pending } = useConversations();
+  const showPending = pending?.conversationId === conversationId;
+  const turns = thread?.turns ?? [];
+  const end = useScrollToEnd([turns.length, showPending, thread?.status]);
 
   return (
-    <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto" aria-live="polite">
-      <div className="relative mx-auto max-w-4xl px-gutter py-12">
-        {/* the meridian as the conversation's timeline */}
-        <Meridian running={Boolean(showPending)} className="absolute bottom-0 left-gutter top-0" />
-        <ol className="space-y-16 pl-8 sm:pl-12">
-          {turns.map((t, i) => (
-            <TurnView key={t.id} turn={t} index={i + 1} />
-          ))}
-          {orphanError && <TurnView turn={orphanError} index={1} onDismiss={() => conversationStore.dismissOrphanError()} />}
+    <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-busy={thread?.status === "loading"}>
+      {(!thread || thread.status === "loading") && turns.length === 0 && (
+        <p className="label mx-auto max-w-4xl px-gutter py-12">Loading the conversation</p>
+      )}
+      {thread?.status === "error" && (
+        <div role="alert" className="mx-auto max-w-4xl px-gutter pt-8">
+          <p className="border-l border-danger py-1 pl-4 text-sm">{thread.error}</p>
+          <button
+            type="button"
+            className="label link ml-4 mt-3"
+            onClick={() => void conversationStore.loadThread(session.accessToken, conversationId)}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {(turns.length > 0 || showPending) && (
+        <Timeline turns={turns} running={showPending}>
           {showPending && pending && <PendingTurn query={pending.query} startedAt={pending.startedAt} index={turns.length + 1} />}
-        </ol>
-        <div ref={end} />
-      </div>
+        </Timeline>
+      )}
+      <div ref={end} />
+    </div>
+  );
+}
+
+function NewConversation({ orphanError }: { orphanError: Turn | null }) {
+  const { pending } = useConversations();
+  const showPending = Boolean(pending && pending.conversationId === null);
+  const end = useScrollToEnd([showPending, orphanError]);
+  if (!showPending && !orphanError) return <EmptyState />;
+  return (
+    <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto" aria-live="polite">
+      <Timeline turns={[]} running={showPending}>
+        {orphanError && <TurnView turn={orphanError} index={1} onDismiss={() => conversationStore.dismissOrphanError()} />}
+        {showPending && pending && <PendingTurn query={pending.query} startedAt={pending.startedAt} index={1} />}
+      </Timeline>
+      <div ref={end} />
     </div>
   );
 }
@@ -225,6 +289,10 @@ function TurnView({ turn, index, onDismiss }: { turn: Turn; index: number; onDis
 
       {turn.answer !== undefined && <Answer text={turn.answer} />}
 
+      {turn.answer === undefined && !turn.error && (
+        <p className="border-l border-rule-strong py-1 pl-4 text-sm text-ink-dim">No answer was recorded for this question.</p>
+      )}
+
       {turn.error && (
         <div role="alert" className="border-l border-danger py-1 pl-4">
           <p className="label mb-1 text-danger">{turn.error.code}</p>
@@ -238,23 +306,28 @@ function TurnView({ turn, index, onDismiss }: { turn: Turn; index: number; onDis
         </div>
       )}
 
-      {r && (
-        <>
-          {(r.warnings.length > 0 || !r.persisted) && (
-            <ul className="mt-4 space-y-1 border-l border-accent pl-4 text-sm text-ink-dim">
-              {r.warnings.map((w) => (
-                <li key={w}>{w}</li>
-              ))}
-              {!r.persisted && r.warnings.length === 0 && <li>This turn was not saved to memory; the next question will not see it.</li>}
-            </ul>
-          )}
+      {r && (r.warnings.length > 0 || !r.persisted) && (
+        <ul className="mt-4 space-y-1 border-l border-accent pl-4 text-sm text-ink-dim">
+          {r.warnings.map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+          {!r.persisted && r.warnings.length === 0 && <li>This turn was not saved to memory; the next question will not see it.</li>}
+        </ul>
+      )}
+
+      {r ? (
+        <dl className="mt-6 flex flex-wrap gap-x-6 gap-y-1 border-t border-rule pt-3">
+          <Meta k="Status" v={r.status === "COMPLETED" ? "Completed" : "With warnings"} accent={r.status !== "COMPLETED"} />
+          <Meta k="Time" v={formatDuration(r.executionTimeMs)} />
+          <Meta k="Retries" v={String(r.retryCount)} />
+          <Meta k="Request" v={r.requestId.slice(0, 18)} title={r.requestId} />
+        </dl>
+      ) : (
+        turn.answeredAt !== undefined && (
           <dl className="mt-6 flex flex-wrap gap-x-6 gap-y-1 border-t border-rule pt-3">
-            <Meta k="Status" v={r.status === "COMPLETED" ? "Completed" : "With warnings"} accent={r.status !== "COMPLETED"} />
-            <Meta k="Time" v={formatDuration(r.executionTimeMs)} />
-            <Meta k="Retries" v={String(r.retryCount)} />
-            <Meta k="Request" v={r.requestId.slice(0, 18)} title={r.requestId} />
+            <Meta k="Answered" v={formatStamp(turn.answeredAt)} />
           </dl>
-        </>
+        )
       )}
     </li>
   );
@@ -292,9 +365,7 @@ function PendingTurn({ query, startedAt, index }: { query: string; startedAt: nu
         <p className="label text-accent" role="status">
           Running · {formatDuration(elapsed, true)}
         </p>
-        <p className="text-sm text-ink-dim">
-          Decomposing, recalling, retrieving, planning and critiquing. On a CPU this takes minutes.
-        </p>
+        <p className="text-sm text-ink-dim">Decomposing, recalling, retrieving, planning and critiquing. On a CPU this takes minutes.</p>
       </div>
       <button
         type="button"
@@ -348,14 +419,22 @@ function EmptyState() {
 
 /* -------------------------------------------------------------- composer */
 
-function Composer({ conversation, disabled }: { conversation?: Conversation; disabled: boolean }) {
+function Composer({
+  conversation,
+  conversationId,
+  disabled,
+}: {
+  conversation?: ConversationMeta;
+  conversationId?: string;
+  disabled: boolean;
+}) {
   const session = useSession();
   const navigate = useNavigate();
-  const { pending, conversations } = useConversations();
+  const { pending } = useConversations();
   const [text, setText] = useState("");
   const area = useRef<HTMLTextAreaElement>(null);
-  const currentId = useRef<string | undefined>(conversation?.id);
-  currentId.current = conversation?.id;
+  const currentId = useRef<string | undefined>(conversationId);
+  currentId.current = conversationId;
 
   useEffect(() => {
     const onPrefill = (e: Event) => {
@@ -373,10 +452,10 @@ function Composer({ conversation, disabled }: { conversation?: Conversation; dis
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
-  const busyElsewhere = pending && (pending.conversationId ?? null) !== (conversation?.id ?? null);
+  const busyElsewhere = pending && (pending.conversationId ?? null) !== (conversationId ?? null);
   const busyName = busyElsewhere
     ? pending?.conversationId
-      ? conversations.find((c) => c.id === pending.conversationId)?.name ?? "another conversation"
+      ? conversationStore.get(pending.conversationId)?.name ?? "another conversation"
       : "a new conversation"
     : null;
   const trimmed = text.trim();
@@ -386,7 +465,7 @@ function Composer({ conversation, disabled }: { conversation?: Conversation; dis
   async function send(e?: SubmitEvent) {
     e?.preventDefault();
     if (!canSend) return;
-    const askedFrom = conversation?.id ?? null;
+    const askedFrom = conversationId ?? null;
     setText("");
     const landed = await conversationStore.ask(session.accessToken, askedFrom, trimmed);
     // A new conversation gets its own URL, unless the user has moved on meanwhile.
@@ -405,11 +484,7 @@ function Composer({ conversation, disabled }: { conversation?: Conversation; dis
   return (
     <form onSubmit={send} className="border-t border-rule bg-base px-gutter pb-4 pt-3">
       <div className="mx-auto max-w-4xl">
-        {busyName && (
-          <p className="label mb-2 text-accent">
-            Atlas is answering in {busyName}. One question runs at a time.
-          </p>
-        )}
+        {busyName && <p className="label mb-2 text-accent">Atlas is answering in {busyName}. One question runs at a time.</p>}
         <div className="flex items-end gap-4">
           <label htmlFor="query" className="sr-only">
             Your question
@@ -422,7 +497,7 @@ function Composer({ conversation, disabled }: { conversation?: Conversation; dis
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             disabled={disabled}
-            placeholder={conversation ? "Ask a follow-up" : "Ask a question"}
+            placeholder={conversation || conversationId ? "Ask a follow-up" : "Ask a question"}
             className="field scrollbar-thin max-h-60 min-h-[2.75rem] flex-1 resize-none leading-relaxed placeholder:text-ink-faint"
             aria-invalid={over || undefined}
             aria-describedby="query-meta"

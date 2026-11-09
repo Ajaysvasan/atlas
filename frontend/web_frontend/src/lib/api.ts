@@ -79,6 +79,42 @@ export interface IngestResponse {
   files: IngestFileResult[];
 }
 
+export interface ConversationSummary {
+  conversationId: string;
+  conversationName: string;
+  createdAt: string;
+  lastActivityAt: string;
+  exchangeCount: number;
+}
+
+export interface ConversationListResponse {
+  requestId: string;
+  conversations: ConversationSummary[];
+  nextCursor: string | null;
+}
+
+export interface Exchange {
+  exchangeId: string;
+  query: string;
+  askedAt: string;
+  /** Absent when no answer was recorded for the query. */
+  answer?: string;
+  answeredAt?: string;
+}
+
+export interface ExchangeListResponse {
+  requestId: string;
+  conversationId: string;
+  conversationName: string;
+  exchanges: Exchange[];
+  nextCursor: string | null;
+}
+
+export interface PageRequest {
+  limit?: number;
+  cursor?: string | null;
+}
+
 /** The one error shape every non-2xx response carries. */
 export interface ApiErrorBody {
   timestamp?: string;
@@ -222,6 +258,14 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   return body as T;
 }
 
+function pageQuery({ limit, cursor }: PageRequest): string {
+  const q = new URLSearchParams();
+  if (limit !== undefined) q.set("limit", String(limit));
+  if (cursor) q.set("cursor", cursor);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
 /* ------------------------------------------------------------- endpoints */
 
 export const api = {
@@ -232,6 +276,17 @@ export const api = {
   /** Synchronous: on a CPU this takes minutes, so there is deliberately no client timeout. */
   query: (token: string, req: QueryRequest, signal?: AbortSignal) =>
     request<QueryResponse>("/query", { token, body: req, signal }),
+
+  /** GET /conversations: the caller's conversations, most recently active first. */
+  listConversations: (token: string, page: PageRequest = {}, signal?: AbortSignal) =>
+    request<ConversationListResponse>(`/conversations${pageQuery(page)}`, { token, signal }),
+
+  /** GET /conversations/{id}/exchanges: one conversation's exchanges, oldest first. */
+  listExchanges: (token: string, conversationId: string, page: PageRequest = {}, signal?: AbortSignal) =>
+    request<ExchangeListResponse>(`/conversations/${encodeURIComponent(conversationId)}/exchanges${pageQuery(page)}`, {
+      token,
+      signal,
+    }),
 
   health: async (signal?: AbortSignal): Promise<boolean> => {
     try {

@@ -64,6 +64,7 @@ public record AtlasProperties(
 			@NotNull @DefaultValue("PT20M") Duration queryDeadline,
 			@NotNull @DefaultValue("PT30M") Duration ingestDeadline,
 			@NotNull @DefaultValue("PT10S") Duration healthDeadline,
+			@NotNull @DefaultValue("PT10S") Duration listDeadline,
 			@NotNull @DefaultValue("4MB") DataSize maxInboundMessageSize,
 			@NotNull @DefaultValue("256KB") DataSize chunkSize,
 			@Valid @NotNull Tls tls) {

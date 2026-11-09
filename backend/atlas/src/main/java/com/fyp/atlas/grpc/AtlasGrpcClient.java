@@ -25,6 +25,10 @@ import com.fyp.atlas.grpc.v1.HealthResponse;
 import com.fyp.atlas.grpc.v1.IngestHeader;
 import com.fyp.atlas.grpc.v1.IngestRequest;
 import com.fyp.atlas.grpc.v1.IngestResponse;
+import com.fyp.atlas.grpc.v1.ListConversationsRequest;
+import com.fyp.atlas.grpc.v1.ListConversationsResponse;
+import com.fyp.atlas.grpc.v1.ListExchangesRequest;
+import com.fyp.atlas.grpc.v1.ListExchangesResponse;
 import com.fyp.atlas.grpc.v1.QueryRequest;
 import com.fyp.atlas.grpc.v1.QueryResponse;
 import com.google.protobuf.ByteString;
@@ -90,6 +94,29 @@ public class AtlasGrpcClient {
 			return blocking.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers(requestId)))
 				.withDeadlineAfter(settings.healthDeadline().toMillis(), TimeUnit.MILLISECONDS)
 				.health(HealthRequest.getDefaultInstance());
+		}
+		catch (StatusRuntimeException failure) {
+			throw GrpcErrorTranslator.translate(failure);
+		}
+	}
+
+	/** Read-only, so it never waits behind a running query; a short deadline of its own. */
+	public ListConversationsResponse listConversations(ListConversationsRequest request) {
+		try {
+			return blocking.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers(request.getRequestId())))
+				.withDeadlineAfter(settings.listDeadline().toMillis(), TimeUnit.MILLISECONDS)
+				.listConversations(request);
+		}
+		catch (StatusRuntimeException failure) {
+			throw GrpcErrorTranslator.translate(failure);
+		}
+	}
+
+	public ListExchangesResponse listExchanges(ListExchangesRequest request) {
+		try {
+			return blocking.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers(request.getRequestId())))
+				.withDeadlineAfter(settings.listDeadline().toMillis(), TimeUnit.MILLISECONDS)
+				.listExchanges(request);
 		}
 		catch (StatusRuntimeException failure) {
 			throw GrpcErrorTranslator.translate(failure);

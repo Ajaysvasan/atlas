@@ -1,7 +1,12 @@
 package com.fyp.atlas.support;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -12,6 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import com.fyp.atlas.grpc.v1.AtlasServiceGrpc;
+import com.fyp.atlas.grpc.v1.ConversationSummary;
+import com.fyp.atlas.grpc.v1.ExchangeRecord;
 import com.fyp.atlas.grpc.v1.FileResult;
 import com.fyp.atlas.grpc.v1.FileStatus;
 import com.fyp.atlas.grpc.v1.HealthRequest;
@@ -19,6 +26,10 @@ import com.fyp.atlas.grpc.v1.HealthResponse;
 import com.fyp.atlas.grpc.v1.IngestRequest;
 import com.fyp.atlas.grpc.v1.IngestResponse;
 import com.fyp.atlas.grpc.v1.IngestStatus;
+import com.fyp.atlas.grpc.v1.ListConversationsRequest;
+import com.fyp.atlas.grpc.v1.ListConversationsResponse;
+import com.fyp.atlas.grpc.v1.ListExchangesRequest;
+import com.fyp.atlas.grpc.v1.ListExchangesResponse;
 import com.fyp.atlas.grpc.v1.QueryRequest;
 import com.fyp.atlas.grpc.v1.QueryResponse;
 import com.fyp.atlas.grpc.v1.QueryStatus;
@@ -46,9 +57,19 @@ public class FakePipeline extends AtlasServiceGrpc.AtlasServiceImplBase {
 	public record ReceivedUpload(String requestId, String userId, List<ReceivedFile> files) {
 	}
 
+	public record FakeConversation(String id, String userId, String name, String createdAt,
+			List<ExchangeRecord> exchanges) {
+	}
+
 	public final List<QueryRequest> queries = new CopyOnWriteArrayList<>();
 	public final List<ReceivedUpload> uploads = new CopyOnWriteArrayList<>();
 	public final Map<String, String> owners = new ConcurrentHashMap<>();
+	/** Every conversation in creation order, with the exchanges /query recorded in it. */
+	public final List<FakeConversation> conversations = new CopyOnWriteArrayList<>();
+	public final List<ListConversationsRequest> conversationListings = new CopyOnWriteArrayList<>();
+	public final List<ListExchangesRequest> exchangeListings = new CopyOnWriteArrayList<>();
+	/** When set, every timestamp in a listing is replaced by this text. */
+	public volatile String timestampOverride;
 	public volatile Status failWith;
 	public volatile String failCode;
 	public volatile long stallMillis;
@@ -58,6 +79,9 @@ public class FakePipeline extends AtlasServiceGrpc.AtlasServiceImplBase {
 	public void reset() {
 		queries.clear();
 		uploads.clear();
+		conversationListings.clear();
+		exchangeListings.clear();
+		timestampOverride = null;
 		failWith = null;
 		failCode = null;
 		stallMillis = 0;
@@ -125,6 +149,18 @@ public class FakePipeline extends AtlasServiceGrpc.AtlasServiceImplBase {
 				return;
 			}
 		}
+		String now = OffsetDateTime.now(ZoneOffset.UTC).toString();
+		if (created) {
+			conversations.add(new FakeConversation(conversation, request.getUserId(), "PostgreSQL MVCC", now,
+					new CopyOnWriteArrayList<>()));
+		}
+		find(conversation).exchanges().add(ExchangeRecord.newBuilder()
+			.setExchangeId(UUID.randomUUID().toString().replace("-", ""))
+			.setQuery(request.getQuery())
+			.setAskedAt(now)
+			.setAnswer("PostgreSQL uses multiversion concurrency control.")
+			.setAnsweredAt(now)
+			.build());
 		observer.onNext(QueryResponse.newBuilder()
 			.setRequestId(request.getRequestId())
 			.setConversationId(conversation)
@@ -210,6 +246,109 @@ public class FakePipeline extends AtlasServiceGrpc.AtlasServiceImplBase {
 				observer.onCompleted();
 			}
 		};
+	}
+
+	private FakeConversation find(String id) {
+		return conversations.stream().filter(c -> c.id().equals(id)).findFirst().orElseThrow();
+	}
+
+	private String time(String value) {
+		return timestampOverride == null ? value : timestampOverride;
+	}
+
+	/** The fake's cursor is an offset; the real one is a keyset. Callers treat both as opaque. */
+	private static String cursorAt(int offset) {
+		return Base64.getUrlEncoder().withoutPadding().encodeToString(("@" + offset).getBytes(StandardCharsets.UTF_8));
+	}
+
+	private static Integer offsetOf(String cursor) {
+		if (cursor.isEmpty()) {
+			return 0;
+		}
+		try {
+			String text = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
+			return text.startsWith("@") ? Integer.valueOf(text.substring(1)) : null;
+		}
+		catch (IllegalArgumentException malformed) {
+			return null;
+		}
+	}
+
+	private void invalidCursor(StreamObserver<?> observer) {
+		Metadata trailers = new Metadata();
+		trailers.put(ERROR_CODE, "INVALID_CURSOR");
+		observer.onError(Status.INVALID_ARGUMENT.withDescription("the cursor is not valid").asRuntimeException(trailers));
+	}
+
+	@Override
+	public void listConversations(ListConversationsRequest request, StreamObserver<ListConversationsResponse> observer) {
+		conversationListings.add(request);
+		stall();
+		if (failed(observer)) {
+			return;
+		}
+		Integer offset = offsetOf(request.getCursor());
+		if (offset == null) {
+			invalidCursor(observer);
+			return;
+		}
+		List<FakeConversation> mine = new ArrayList<>(
+				conversations.stream().filter(c -> c.userId().equals(request.getUserId())).toList());
+		Collections.reverse(mine);
+		int limit = request.getLimit() == 0 ? 50 : request.getLimit();
+		int end = Math.min(mine.size(), offset + limit);
+		ListConversationsResponse.Builder response = ListConversationsResponse.newBuilder()
+			.setRequestId(request.getRequestId());
+		for (FakeConversation c : mine.subList(Math.min(offset, end), end)) {
+			response.addConversations(ConversationSummary.newBuilder()
+				.setConversationId(c.id())
+				.setConversationName(c.name())
+				.setCreatedAt(time(c.createdAt()))
+				.setLastActivityAt(time(c.exchanges().isEmpty() ? c.createdAt()
+						: c.exchanges().get(c.exchanges().size() - 1).getAnsweredAt()))
+				.setExchangeCount(c.exchanges().size()));
+		}
+		if (end < mine.size()) {
+			response.setNextCursor(cursorAt(end));
+		}
+		observer.onNext(response.build());
+		observer.onCompleted();
+	}
+
+	@Override
+	public void listExchanges(ListExchangesRequest request, StreamObserver<ListExchangesResponse> observer) {
+		exchangeListings.add(request);
+		stall();
+		if (failed(observer)) {
+			return;
+		}
+		if (!request.getUserId().equals(owners.get(request.getConversationId()))) {
+			Metadata trailers = new Metadata();
+			trailers.put(ERROR_CODE, "CONVERSATION_NOT_FOUND");
+			observer.onError(Status.NOT_FOUND.withDescription("no such conversation").asRuntimeException(trailers));
+			return;
+		}
+		Integer offset = offsetOf(request.getCursor());
+		if (offset == null) {
+			invalidCursor(observer);
+			return;
+		}
+		FakeConversation c = find(request.getConversationId());
+		List<ExchangeRecord> all = c.exchanges();
+		int limit = request.getLimit() == 0 ? 50 : request.getLimit();
+		int end = Math.min(all.size(), offset + limit);
+		ListExchangesResponse.Builder response = ListExchangesResponse.newBuilder()
+			.setRequestId(request.getRequestId())
+			.setConversationId(c.id())
+			.setConversationName(c.name());
+		for (ExchangeRecord e : all.subList(Math.min(offset, end), end)) {
+			response.addExchanges(e.toBuilder().setAskedAt(time(e.getAskedAt())).setAnsweredAt(time(e.getAnsweredAt())));
+		}
+		if (end < all.size()) {
+			response.setNextCursor(cursorAt(end));
+		}
+		observer.onNext(response.build());
+		observer.onCompleted();
 	}
 
 	@Override

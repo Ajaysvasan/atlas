@@ -2,7 +2,6 @@
 
 import hashlib
 import threading
-import uuid
 from typing import List
 
 import grpc
@@ -14,7 +13,6 @@ from grpc_server.generated import atlas_service_pb2_grpc as pb_grpc
 from grpc_server.server import build_server
 from grpc_server.service import AtlasServicer
 from grpc_server.settings import GrpcSettings
-from memory.conversation_registry import ConversationRecord
 from observability.telemetry import RequestRecord
 from pipeline.atlas import AtlasResponse
 from pipeline.uploads import FileOutcome, UploadReport
@@ -24,25 +22,12 @@ ALICE = "6f1c2c0e-9a43-4b8e-8d2c-111111111111"
 BOB = "6f1c2c0e-9a43-4b8e-8d2c-222222222222"
 
 
-class FakeRegistry:
-    def __init__(self) -> None:
-        self.rows = {}
-
-    def create(self, user_id, name):
-        record = ConversationRecord(uuid.uuid4().hex, user_id, name, "2026-11-09T00:00:00+00:00")
-        self.rows[record.conversation_id] = record
-        return record
-
-    def get(self, conversation_id, user_id):
-        record = self.rows.get(conversation_id)
-        return record if record is not None and record.user_id == user_id else None
-
-
 class FakePipeline:
     """new_conversation + ask, the two calls the servicer makes, with a recordable outcome."""
 
-    def __init__(self) -> None:
-        self.registry = FakeRegistry()
+    def __init__(self, registry) -> None:
+        # The root conftest's in-memory registry: the same contract, summaries() included.
+        self.registry = registry
         self.asked: List[tuple] = []
         self.fail_category: str | None = None
         self.raise_on_new: Exception | None = None
@@ -100,15 +85,15 @@ def settings():
 
 
 @pytest.fixture
-def fakes():
-    return FakePipeline(), FakeUploads()
+def fakes(conversation_registry):
+    return FakePipeline(conversation_registry), FakeUploads()
 
 
 @pytest.fixture
-def server(settings, fakes, tmp_path):
+def server(settings, fakes, tmp_path, conversation_rows):
     pipeline, uploads = fakes
     servicer = AtlasServicer(pipeline, uploads, settings, OperationGate(settings.max_waiting),
-                             staging_dir=tmp_path / "staging")
+                             staging_dir=tmp_path / "staging", exchanges=conversation_rows)
     grpc_server, port = build_server(servicer, settings, port=0)
     grpc_server.start()
     yield port

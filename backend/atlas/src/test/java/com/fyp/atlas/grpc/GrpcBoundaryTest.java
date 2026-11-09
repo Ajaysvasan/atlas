@@ -89,7 +89,8 @@ class GrpcBoundaryTest {
 
 	static AtlasProperties properties(int port) {
 		AtlasProperties.Grpc grpc = new AtlasProperties.Grpc("127.0.0.1", port, "a-service-token-long-enough",
-				Duration.ofSeconds(2), Duration.ofSeconds(2), Duration.ofSeconds(2), DataSize.ofMegabytes(4),
+				Duration.ofSeconds(2), Duration.ofSeconds(2), Duration.ofSeconds(2), Duration.ofSeconds(2),
+				DataSize.ofMegabytes(4),
 				DataSize.ofKilobytes(64), new AtlasProperties.Tls(false, null, null, null, null));
 		return new AtlasProperties(null, null, null, null, grpc, new AtlasProperties.Upload(10,
 				DataSize.ofMegabytes(25), DataSize.ofMegabytes(100), Set.of("txt"), DataSize.ofMegabytes(200), 10, 100),
@@ -117,7 +118,8 @@ class GrpcBoundaryTest {
 		AtlasProperties.Grpc grpc = properties(1).grpc();
 		AtlasProperties noToken = new AtlasProperties(null, null, null, null,
 				new AtlasProperties.Grpc(grpc.host(), grpc.port(), "short", grpc.queryDeadline(), grpc.ingestDeadline(),
-						grpc.healthDeadline(), grpc.maxInboundMessageSize(), grpc.chunkSize(), grpc.tls()),
+						grpc.healthDeadline(), grpc.listDeadline(), grpc.maxInboundMessageSize(), grpc.chunkSize(),
+						grpc.tls()),
 				null, null);
 		assertThatThrownBy(() -> new GrpcChannelConfig().atlasChannel(noToken))
 			.hasMessageContaining("ATLAS_GRPC_SERVICE_TOKEN");
