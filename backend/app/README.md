@@ -44,7 +44,7 @@ them with `scripts/validate_corpus.py`.
 
 ```bash
 uv run --no-sync python main.py start              # interactive CLI (the default with no command)
-uv run --no-sync python main.py start --user NAME  # whose conversations (default $ATLAS_USER or your login)
+uv run --no-sync python main.py --user NAME start  # whose conversations (default $ATLAS_USER or your login)
 uv run --no-sync python main.py -q "question"      # one question in a new conversation, then exit
 uv run --no-sync python main.py --no-acquire start # never fetch from trusted sources
 uv run --no-sync python main.py serve              # gRPC server for the Java API
@@ -65,14 +65,16 @@ From another terminal, these monitors read the running service's state and write
 uv run --no-sync python main.py status              # what is loaded, counters, every component's health
 uv run --no-sync python main.py status --time       # stage timings of the last query
 uv run --no-sync python main.py status --retries    # planner and critic retries of the last query
-uv run --no-sync python main.py conversations --user NAME
+uv run --no-sync python main.py --user NAME conversations
 ```
 
 At the `Atlas >` prompt everything is a question, except these commands: `switch`,
 `switch <n|id-prefix>`, `new`, `status`, `help` and `exit`.
 
-The logging flags are `--verbose`, `--log-json` and `--log-file PATH`. The `LOG_*` variables
-override them.
+`--user`, `--no-acquire`, `-q` and the logging flags (`--verbose`, `--log-json`,
+`--log-file PATH`) go **before** the command: `main.py --user NAME start` works, but
+`main.py start --user NAME` is rejected. The `LOG_*` variables override the logging flags.
+The CLI is described in [`cli/README.md`](cli/README.md).
 
 ## Layout
 

@@ -14,7 +14,7 @@ HELP = """Commands (anything else is sent to Atlas as a query):
   exit                 leave (Ctrl+D works too)
 Each command may also be written with a leading '/', e.g. /status.
 From another terminal, without loading anything: main.py status [--time | --retries],
-main.py conversations [--user NAME]."""
+main.py [--user NAME] conversations."""
 
 
 class Command(NamedTuple):

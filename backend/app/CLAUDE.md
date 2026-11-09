@@ -12,19 +12,23 @@ Atlas: a Python RAG backend that ingests documents into a DiskANN index, keeps h
 # From the app/ directory. uv resolves the interpreter and deps from
 # pyproject.toml + uv.lock, so there is nothing to activate.
 uv run python main.py start              # Interactive CLI (also the default with no command)
-uv run python main.py start --user NAME  # Whose conversations (default $ATLAS_USER or login name)
+uv run python main.py --user NAME start  # Whose conversations (default $ATLAS_USER or login name)
 uv run python main.py --no-acquire start # Never fetch from trusted sources
 uv run python main.py -q "question"      # One query in a new conversation, then exit
 uv run python main.py status             # From another terminal: the running Atlas + every component
 uv run python main.py status --time      # The service's last query: stage timings
 uv run python main.py status --retries   # The service's last query: planner/critic retries
-uv run python main.py conversations --user NAME   # NAME's conversations (PostgreSQL only)
+uv run python main.py --user NAME conversations   # NAME's conversations (PostgreSQL only)
 uv run python main.py --verbose          # Debug logging, console as well as file
 uv run python main.py --log-json         # One JSON object per line instead of text
 uv run python main.py --log-file PATH    # Write somewhere other than log/app.log
 uv run --no-sync python main.py serve    # gRPC server for the Java API (needs ATLAS_GRPC_SERVICE_TOKEN)
 uv run --no-sync python main.py --no-acquire serve   # The same, never fetching from trusted sources
 ```
+
+Every option (`--user`, `--no-acquire`, `-q`, the logging flags) belongs to the top-level
+parser and goes before the command; `main.py start --user NAME` is an "unrecognized
+arguments" error.
 
 `serve` builds `Components` once, warms up, and listens on `127.0.0.1:50051`
 until SIGINT/SIGTERM (in-flight calls get 30 s). It refuses to start without
