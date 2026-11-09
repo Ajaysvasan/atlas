@@ -95,7 +95,7 @@ uv run pytest test/ -m real_model                 # Real draft model; self-skipp
 uv run pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v
 ```
 
-**2279 passed** is the expected full result: 2265 without the model and 14
+**2348 passed** is the expected full result: 2334 without the model and 14
 `real_model` tests (KV checkpoints against llama.cpp, and the pipeline with the
 real model). The real-model tests skip themselves when `llama_cpp` or the model
 file is missing; the live tests when PostgreSQL is unreachable. `-rs` prints
