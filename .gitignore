@@ -1,2 +1,4 @@
 ssh_key
 ssh_key.pub
+# backend/app/scripts/backend_e2e.py: throwaway e2e users, passwords and tokens.
+backend_e2e_state.json
