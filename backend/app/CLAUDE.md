@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Atlas: a Python RAG backend that ingests documents into a DiskANN index, keeps hierarchical conversation memory, and answers a query end to end — decomposition → memory → retrieval/KSV/acquisition → thinking (plan, jobs, critique) → generation → persistence — on one shared local Qwen2.5-3B model. It is driven by a development CLI; there is no HTTP surface yet (a Java/Spring backend over gRPC is the next phase).
+Atlas: a Python RAG backend that ingests documents into a DiskANN index, keeps hierarchical conversation memory, and answers a query end to end — decomposition → memory → retrieval/KSV/acquisition → thinking (plan, jobs, critique) → generation → persistence — on one shared local Qwen2.5-3B model. It is driven by a development CLI, and served over gRPC (`main.py serve`) to the Java/Spring API in `../atlas/`, which is the public REST surface and the authentication boundary (accounts, JWTs, uploads). The contract between them is `../proto/atlas/v1/atlas_service.proto`; the whole two-service setup, its settings and the REST API are in `../BACKEND.md`.
 
 ## Running the Application
 
@@ -18,7 +18,23 @@ uv run python main.py -q "question"      # One query in a new conversation, then
 uv run python main.py --verbose          # Debug logging, console as well as file
 uv run python main.py --log-json         # One JSON object per line instead of text
 uv run python main.py --log-file PATH    # Write somewhere other than log/app.log
+uv run --no-sync python main.py serve    # gRPC server for the Java API (needs ATLAS_GRPC_SERVICE_TOKEN)
+uv run --no-sync python main.py --no-acquire serve   # The same, never fetching from trusted sources
 ```
+
+`serve` builds `Components` once, warms up, and listens on `127.0.0.1:50051`
+until SIGINT/SIGTERM (in-flight calls get 30 s). It refuses to start without
+`ATLAS_GRPC_SERVICE_TOKEN` (≥16 chars, the same value the Java service sends),
+and refuses a non-loopback `ATLAS_GRPC_BIND` without `ATLAS_GRPC_TLS_CERT`/`_KEY`.
+Prefer `uv run --no-sync` for anything long-lived: it never touches the venv, so
+it cannot remove `llama-cpp-python` (bug 9.9).
+
+The gRPC bindings in `grpc_server/generated/` are generated, never edited:
+`uv run --no-sync python scripts/generate_grpc.py` after changing the `.proto`,
+`--check` to see whether they are stale (a test runs the same check).
+`scripts/backend_e2e.py --base-url http://localhost:8080` drives the running Java
+API end to end (two `e2e_*` users, a private upload, isolation checks; `--resume`
+after a restart). It writes real data.
 
 At the `Atlas >` prompt anything is a query except a line that is exactly a
 command: `switch`, `switch <n|id-prefix>`, `new`, `status`, `status --time`,
@@ -59,12 +75,13 @@ uv run pytest test/memory_layer_testing/ -v       # Memory layer tests
 uv run pytest test/stress_testing/ -v             # Stress tests
 uv run pytest test/logging_testing/ -v            # Logging tests
 uv run pytest test/live_testing/ -v               # Real PostgreSQL; self-skipping
+uv run pytest test/grpc_testing/ -v               # gRPC server over loopback, uploads, settings, bindings
 uv run pytest test/ -m "not real_model"           # Everything but the real-model tests (~30 s)
 uv run pytest test/ -m real_model                 # Real draft model; self-skipping (~5.5 min CPU)
 uv run pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v
 ```
 
-**2210 passed** is the expected full result: 2196 without the model and 14
+**2279 passed** is the expected full result: 2265 without the model and 14
 `real_model` tests (KV checkpoints against llama.cpp, and the pipeline with the
 real model). The real-model tests skip themselves when `llama_cpp` or the model
 file is missing; the live tests when PostgreSQL is unreachable. `-rs` prints
@@ -112,16 +129,50 @@ All orchestrated by `data_layer/ingestion/ingestion_pipeline.py`.
 
 ### Query Pipeline (`pipeline/`)
 
-`AtlasPipeline.ask(conversation_id, user_id, query)` in order, each stage through its owner's public interface:
+`AtlasPipeline.ask(conversation_id, user_id, query, request_id=None)` in order, each stage through its owner's public interface (`request_id` is the caller's correlation id — the Java request id over gRPC — and a new one when absent, as from the CLI):
 
 1. **Ownership** — `ConversationRegistry.get(conversation_id, user_id)`; another user's conversation is "not found".
 2. **Decomposition** — `Decompose.decompose()` records the exchange in PostgreSQL and returns `Decomposition` (mode, topics, sub-queries).
 3. **Memory** — `MemoryManager(query, …, topic=primary_topic or "General")`: route, `conversation_context()`, `conversation_retrieval()` (KSV inside).
-4. **Global retrieval + KSV** — skipped for a `DOUBT` that memory answers `FULL`. Otherwise `Retriever` over the working query and each sub-query; KSV keeps only supporting passages as evidence.
+4. **Global retrieval + KSV** — skipped for a `DOUBT` that memory answers `FULL`. Otherwise `Retriever` over the working query and each sub-query, as `RetrievalRequest(text, viewer=user_id)` so only public documents and this user's own uploads can come back; KSV keeps only supporting passages as evidence.
 5. **Acquisition** — on a `none`/empty verdict, `Acquirer` (below), then one refresh and re-search.
 6. **Thinking** → 7. **Generation** → 8. **Persistence** — `MemoryManager.update` or `store_new_topic`/`store_new_project` (project named by the draft model), then `Decompose.record_response`. A failed write is a warning on the response, never hidden.
 
 `AtlasResponse` carries the text, status, `persisted` and a `RequestRecord` (`observability/telemetry.py`): monotonic stage timings, retries, model calls by purpose, cache and retrieval outcomes, never prompt text. `status --time`/`--retries` read it. `pipeline/bootstrap.py::Components` builds everything once per process; `observability/health.py` runs 29 bounded checks (no text generation) for `status`. Evidence is tagged `M1…` (memory) / `G1…` (global) with provenance URLs from `corpus_ingestion.source_urls`.
+
+### gRPC Server (`grpc_server/`)
+
+An adapter, not a second orchestrator: the Java API is its only client, and every
+call must carry `authorization: Bearer <ATLAS_GRPC_SERVICE_TOKEN>` (`auth.py`,
+compared in constant time). That token is why the server trusts the `user_id` in
+a request — Java takes it only from a verified JWT. Failures leave as gRPC status
+codes with an `atlas-error-code` trailer (`CONVERSATION_NOT_FOUND`,
+`INVALID_REQUEST`, `QUERY_TOO_LARGE`, `BUSY`, `MODEL_UNAVAILABLE`,
+`DATABASE_UNAVAILABLE`, `INTERNAL`, …) and a message written for the end user —
+never the exception text, a path or a trace.
+
+- **`service.py` — `AtlasServicer`**: `Query` is `pipeline.new_conversation` (no conversation id) or `registry.get(conversation_id, user_id)` (another user's is `NOT_FOUND`), then `pipeline.ask(..., request_id=)`, exactly the CLI's calls; the pipeline's error category maps to a status. `Ingest` is a client stream — header, then per file `FileStart`/`FileChunk`s/`FileEnd` with a SHA-256 — staged under `data/.upload_staging/` (always removed), each file judged on its own, then handed to `UploadIngestion`. `Health` makes no model call.
+- **`gate.py` — `OperationGate`**: one pipeline operation (query or ingestion) at a time, because the model, index and ingestion lock are single-occupancy; up to `ATLAS_GRPC_MAX_WAITING` wait, the next is `BUSY`. A waiting request whose caller left or whose deadline passed never starts (checked again on the way in, after the wake-up). A started request runs to completion even if the caller leaves — a model call cannot be interrupted midway.
+- **`uploads.py`**: safe display names (no directory part, control characters or path syntax); validation — extension allowlist (`pdf docx pptx xlsx txt md html htm json csv`), content matching it (`%PDF-`, a real OOXML package, text with no NUL/controls, parseable JSON), Office zips read entry by entry with the decompressed bytes counted against a total, an entry count and a ratio. The Java side runs the same checks first; these are authoritative.
+- **`settings.py` — `GrpcSettings.from_environment()`**: every `ATLAS_GRPC_*`/`ATLAS_UPLOAD_*`/`ATLAS_QUERY_MAX_CHARS` value; raises `SettingsError` rather than starting unsafe.
+- **`server.py`**: `build_server()` (interceptor, message limits, TLS/mTLS) and `serve()`.
+
+The servicer touches the pipeline only through `new_conversation`, `ask`, `registry.get` and `UploadIngestion.ingest`, so `test/grpc_testing/` runs it over a real loopback server with fakes for those.
+
+### Uploads (`pipeline/uploads.py`)
+
+`UploadIngestion.ingest(user_id, files)` puts a user's validated files into the
+corpus, privately, through the same quota-checked `ingest_files` as everything
+else (`build_index=False`: they join the recent index; the retriever is refreshed
+after). Each file is kept at `data/corpus/uploads/<sha[:2]>/<sha256>.<ext>`
+(0600), so identical bytes are one document whichever user sends them. Before
+`ingest_files` runs, the file is extracted and normalised once to learn its
+document id, and **the owner row is written first** — an interrupted ingestion
+can leave a private document unfinished but never readable by everyone. A file
+that is not ingested is removed again (if this upload placed it) along with the
+owner row this upload added. Ingested files are recorded in the manifest with
+`origin: upload` (no user id). One `IngestionPipeline` is kept for the process
+and rebuilt after a vector-store failure.
 
 ### Thinking Layer (`thinking_layer/`)
 
@@ -142,7 +193,11 @@ Discovery asks a source through its search (sqlite.org, IETF) or, when it has no
 
 ### Ingestion Quota (`data_layer/ingestion/quota.py`, `corpus_ingestion.py`)
 
-`ingest_files()` ingests one document at a time inside `IngestionQuota.reserve()` (a process and file lock, so ingestions are serialised): it estimates growth (24x text + 128 KiB + 8 MiB WAL headroom), refuses before writing, re-measures after, and stops a run that passes the limit. Counted: the chunk store and its WAL, the keyword index, the DiskANN directory, `data/corpus/`, and the corpus's share of PostgreSQL (`VectorRepository.storage_bytes()`). `IngestionPipeline.batch_insert_vectors` checks the quota too, as a backstop. `None` disables the quota, never the disk reserve.
+`ingest_files()` ingests one document at a time inside `IngestionQuota.reserve()` (a process and file lock, so ingestions are serialised): it estimates growth (24x text + 128 KiB + 8 MiB WAL headroom), refuses before writing, re-measures after, and stops a run that passes the limit. Counted: the chunk store and its WAL, the keyword index, the DiskANN directory, `data/corpus/`, and the corpus's share of PostgreSQL (`VectorRepository.storage_bytes()`). `IngestionPipeline.batch_insert_vectors` checks the quota too, as a backstop. `None` disables the quota, never the disk reserve. Uploads go through the same path and the same single, global quota — there is no per-user quota.
+
+### Document Ownership (`data_layer/ingestion/document_owners.py`)
+
+`document_owners(document_id, user_id, created_at)` in the chunk store. **A document with no owner rows is public** (the built corpus, acquired pages); a document with any is visible only to those users. `DocumentOwners.visible(parent_ids, viewer)` walks a hierarchical passage's context id up through `Contexts`/`Sections` to its document (bug 9.8's id) and drops anything unknown. `Retriever` doubles its candidate pool while any private document exists, filters right after hydration, and keys its cache on the viewer too. `viewer=None` sees public documents only.
 
 ### Memory Layer
 
@@ -155,7 +210,7 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 - **ProjectMetaData** (`project_data_repo/project_meta_data.py`): the project registry, scoped to one project *and its topic* — `ProjectMetaData(project_id, topic_id, ...)`. `add_project_vector(vector, vector_id, project_name, project_summary)` writes the embedding to pgvector, then the project row and mapping row in one SQLite transaction, with a compensating delete if the metadata fails. Descriptions are several per project, keyed `(project_id, project_description_id)`. Both child tables carry a denormalised `topic_id`, kept in step by the upsert, so `get_topic_summary_vector_ids()` answers "every summary vector in this topic, and whose it is" without a join — the read the query router needs. `get_project()` returns a `ProjectRow`. See `docs/memory_layer_docs/project_meta_data.md`
 - **ProjectVectorHandler** (`project_data_repo/project_vector_handler.py`): a project's vectors — one for its summary, one per description. Ids are derived from the source (`summary_vector_id(project_id)`, `description_vector_id(project_id, description_id)`), never passed, so add/update/get/delete agree without a lookup. `get_project_vectors(project_id, ids)` reads a batch in the order given; the ids come from `ProjectMetaData.get_topic_summary_vector_ids()` because the vector store cannot enumerate. Keeps one `VectorRepository` per project rather than one per call
 - **TopicManager** (`topic_pool/topic_manager.py`): create, read and soft-delete a topic, over `TopicPoolMetaHandler` (`topic_pool_repo/`). Reads filter on `is_active = 't'`, so a soft-deleted topic is invisible while its row stays, and still satisfies the projects' foreign key
-- **ProjectManager** (`topic_pool/project_pool/project_manager.py`): routes `(topic_id, query)` to an existing project. `route()` -> `project_id` or `None`; `resolve()` -> `ProjectMatch` with score, margin, `ambiguous` and ranked candidates. A project scores as its best-matching vector, not its average. The no branch is a `pass` pending the thinking layer. Architecture lives in `memory/topic_pool/project_pool/README.md` — **module READMEs hold architecture, data flow and design rationale; `docs/` stays the API reference; code comments are only for logic that reads wrong without one**
+- **ProjectManager** (`topic_pool/project_pool/project_manager.py`): routes `(topic_id, query)` to an existing project. **Scoped to an owner** when given `user_id` (which `MemoryManager` always passes): only that user's projects are candidates, and a project it creates records them in `project_table.user_id` — topics stay shared labels, so two users asking about "PostgreSQL" share a topic but never a project, and recall (which reads a whole project) never reaches another user's turns. `user_id=None` (direct callers, tests) sees every project in the topic, as before. `backfill_project_owners()` in `project_meta_data.py` runs at startup (`Components`): an ownerless project gets the one user whose conversations it holds; one holding several users' conversations stays ownerless and is routable by nobody. `route()` -> `project_id` or `None`; `resolve()` -> `ProjectMatch` with score, margin, `ambiguous` and ranked candidates. A project scores as its best-matching vector, not its average. The no branch is a `pass` pending the thinking layer. Architecture lives in `memory/topic_pool/project_pool/README.md` — **module READMEs hold architecture, data flow and design rationale; `docs/` stays the API reference; code comments are only for logic that reads wrong without one**
 - **SnapShot** (`memory/snapshot.py`): Bidirectional cursor traversal and cosine similarity (torch) over a snapshot history, for **either** scope. `scope="conversation"` (the default) walks this conversation's cumulative summaries and needs a `conversation_id`; `scope="project"` walks the project registry and does not. The cursors, `advance`/`prev` and `search` are the same code for both, because each scope stores its vector under the id its listing returns. `add()` is conversation-only and `add_project_snapshot()` project-only; the wrong one raises `WrongSnapshotScope`
 - **ProjectSnapshot** (`topic_pool/project_pool/project_snapshot.py`): a project's rolling description — what it is about and what has been done. Incremental: each snapshot summarises the previous one plus the conversation summaries written since, so cost tracks what changed rather than the project's size. It reads across every conversation (`project_id`, ignoring `conversation_id`) because the result describes the project, not a chat. The watermark is `seq` on `cumulative_vector_meta_data`, allocated monotonically on write under `BEGIN IMMEDIATE`. An empty summary from the draft model does **not** advance the watermark, or those summaries would be dropped from every future snapshot. Triggered on every conversation snapshot, from inside the window where the draft model is already resident — loading it is the expensive part, so a second load is avoided
 - **ConversationRegistry** (`memory/conversation_registry.py`): `conversations(conversation_id, user_id, conversation_name, created_at timestamptz)` **in PostgreSQL**, beside `conversation_table`, through `storage/postgres.py`; obtain it with `open_conversation_registry()`. Names unique per user by the constraint `conversations_user_name_unique`; a clashing name gets ` (n)` via `ON CONFLICT ... DO NOTHING` and a bounded retry. `migrate_from_sqlite` moved the rows an earlier version kept in `memory_layer.db` (that table is now the backup `conversations_migrated`; bug 9.14). Names are proposed by the draft model from the first query (`pipeline/naming.py`), cleaned and bounded, with a deterministic fallback
@@ -168,10 +223,12 @@ Hierarchical organization: Topic → Project → Conversation → Snapshot
 | Store | Path | Purpose |
 |-------|------|---------|
 | DiskANN index | `data/disk_ann_index/` | `gen-NNNNNN/` built generations (the current one and the one before, as a fallback) and `CURRENT` naming the one in use; plus an in-memory index of what was ingested since |
-| SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one; plus `vector_meta_data` — each DiskANN label, its vector id and its chunk, no vectors (`vectorMetaDataRepository.py`) |
+| SQLite (chunker) | `data/hierarchical_db/` | Chunk metadata: `Documents`, `Sections`, `Contexts`, `Chunks` for the hierarchical path and `Documents`, `RecursiveChunks` for the flat one; plus `vector_meta_data` — each DiskANN label, its vector id and its chunk, no vectors (`vectorMetaDataRepository.py`); and `document_owners`, who may retrieve each uploaded document |
 | SQLite (memory) | `data/memory/memory_layer/memory_layer.db` | **Every** memory table, one file (`memory_database.py`): topics, the project registry and its snapshot chain, conversation turns and snapshot metadata, the conversation mapping and `inference_checkpoints`. (`conversations_migrated` is the pre-9.14 registry, kept as a backup and never read.) Foreign keys enforced across all of them. WAL journal (so `.db-wal` and `.db-shm` sit alongside it), `synchronous=NORMAL`. The old `data/topic_db/`, `data/project_db/` and `data/memory_mapping/` files are no longer read |
 | PostgreSQL | localhost:5432, DB `Vectors` | Every vector, via pgvector (`vectorRepository.py`): document chunks under project id `"global"`, the memory layer's under theirs; `conversation_table`, the exchange log (query, response); and `conversations`, the registry (id, owner, unique name, start) |
-| Corpus files | `data/corpus/` | Downloaded sources (`sources/`), acquired text (`acquired/`), `manifest.jsonl` (url, topic, fetched_at, sha256, document_id, stored bytes) |
+| Corpus files | `data/corpus/` | Downloaded sources (`sources/`), acquired text (`acquired/`), users' uploads by content hash (`uploads/`), `manifest.jsonl` (url, topic, fetched_at, sha256, document_id, stored bytes) |
+| Upload staging | `data/.upload_staging/` | One directory per `Ingest` call while it streams; removed whatever happens |
+| PostgreSQL (Java) | DB `Vectors` | `user_table` (accounts, Argon2id hashes) and `atlas_flyway_history`, owned by the Java service; Python never reads them |
 | KV checkpoints | `data/inference_cache/` | One llama.cpp state per conversation; disposable — deleting it costs only recomputation |
 | Models | `models/draft_model/` | `qwen2.5-3b-instruct-q4_k_m.gguf` (~2 GB) |
 
@@ -231,6 +288,7 @@ Central config class with constants:
 - `INFERENCE_CACHE_DIR`, `INFERENCE_CACHE_MAX_BYTES` (2 GiB, LRU)
 - `MAX_INGESTION_STORAGE_BYTES` (1 GiB), `MAX_ACQUISITION_STORAGE_BYTES` (256 MiB), `MAX_ACQUISITION_DOWNLOAD_BYTES` (16 MiB): bytes or `None`; the environment overrides each (`null`/`none` = unlimited, anything non-positive is refused at import). `INGESTION_DISK_RESERVE_BYTES` (512 MiB), `CORPUS_DIR`
 - `LOG_FILE`, `DEBUG`: defaults `main.py` hands to `configure_logging()`
+- Not in `Config`: the gRPC server reads its own environment (`grpc_server/settings.py`) — `ATLAS_GRPC_SERVICE_TOKEN` (required), `ATLAS_GRPC_BIND` (`127.0.0.1`), `ATLAS_GRPC_PORT` (50051), `ATLAS_GRPC_TLS_CERT`/`_KEY`/`_CLIENT_CA`, `ATLAS_GRPC_WORKERS` (8), `ATLAS_GRPC_MAX_WAITING` (4), `ATLAS_UPLOAD_MAX_FILES` (10), `ATLAS_UPLOAD_MAX_FILE_BYTES` (25 MiB), `ATLAS_UPLOAD_MAX_REQUEST_BYTES` (100 MiB), `ATLAS_QUERY_MAX_CHARS` (8000); `.env` is loaded first
 
 ### Exception Hierarchy
 
@@ -244,6 +302,8 @@ Central config class with constants:
 - Bug 9.9 (P2): `uv sync` removes llama-cpp-python and `install_llama_cpp.py` cannot reinstall it (no pip in the venv)
 - Bug 9.8 (P3): hydration's `Passage.document_id` is a context id for hierarchical chunks (worked around in provenance)
 - No corpus or conversation deletion yet; `CheckpointStore.delete_conversation` is ready for it
+- gRPC: a query that has started runs to completion even after its caller times out or disconnects (only queued requests are dropped); the conversation it opened stays
+- The storage quota is one pool for every user; per-user quotas do not exist
 
 **Fixed since this list was written** (each has a regression test):
 - Bugs 2.1/2.2/4.1: the CLI and `-q` run the whole pipeline; `MemoryManager` is implemented and wired
