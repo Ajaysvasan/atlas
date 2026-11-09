@@ -220,6 +220,7 @@ class MemoryManager:
             embedder=self.models.embedder,
             similarity_floor=self.latest_floor,
             historical_floor=self.historical_floor,
+            user_id=self.user_id,
         ) as projects:
             match = projects.route_by_snapshots()
         if match is None:
@@ -390,7 +391,8 @@ class MemoryManager:
                         topics.create_new_topic() if create_topic else topics.get_topic_id()
                     )
                 projects = ProjectManager(
-                    topic_id, self.query, database=self.database, embedder=embedder
+                    topic_id, self.query, database=self.database, embedder=embedder,
+                    user_id=self.user_id,
                 )
                 project_id = projects.create_project(
                     project_name, self.__opening_summary(system_response)

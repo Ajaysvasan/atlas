@@ -128,6 +128,8 @@ class TestRetrievalAndKSV:
         conversation = pipeline.new_conversation(USER, "q")
         pipeline.ask(conversation.conversation_id, USER, "Design MVCC cleanup")
         assert retriever.queries == ["Design MVCC cleanup", "MVCC internals"]
+        # Global retrieval sees only public documents and this user's uploads.
+        assert retriever.viewers == [USER, USER]
 
     def test_nothing_relevant_triggers_acquisition_then_one_more_search(self, tmp_path):
         retriever = FakeRetriever([passage(2, "Unrelated text about baking bread.")])

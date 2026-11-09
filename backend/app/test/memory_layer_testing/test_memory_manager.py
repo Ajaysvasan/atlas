@@ -236,8 +236,8 @@ def new_topic(database, name=TOPIC) -> str:
     return TopicManager(name, database=database).create_new_topic()
 
 
-def new_project(database, embedder, topic_id, name, summary=None) -> str:
-    with ProjectManager(topic_id, "seed", database=database, embedder=embedder) as projects:
+def new_project(database, embedder, topic_id, name, summary=None, owner=U1) -> str:
+    with ProjectManager(topic_id, "seed", database=database, embedder=embedder, user_id=owner) as projects:
         return projects.create_project(name, summary or f"{name} summary")
 
 
@@ -683,3 +683,59 @@ class TestModels:
         models.embedder
         assert len(built) == 1
         assert models.embedder is built[0]
+
+
+class TestOwnership:
+    """A user is routed only into their own projects, so recall never reaches another user's turns."""
+
+    def test_another_users_project_is_never_a_route_however_well_it_matches(
+        self, database, embedder, manager
+    ):
+        topic_id = new_topic(database)
+        theirs = new_project(database, embedder, topic_id, "theirs", owner=U2)
+        project_snapshot(database, theirs, toward(0.95, 31), 1)
+
+        assert manager(user=U1).route.found_by == NO_PROJECT
+        route = manager(user=U2, conversation=C2).route
+        assert (route.found_by, route.project_id) == (LATEST_SNAPSHOT, theirs)
+
+    def test_the_users_own_weaker_match_wins_over_a_stronger_foreign_one(
+        self, database, embedder, manager
+    ):
+        topic_id = new_topic(database)
+        mine = new_project(database, embedder, topic_id, "mine", owner=U1)
+        theirs = new_project(database, embedder, topic_id, "theirs", owner=U2)
+        project_snapshot(database, mine, toward(0.6, 32), 1)
+        project_snapshot(database, theirs, toward(0.9, 33), 2)
+
+        route = manager(user=U1).route
+        assert (route.found_by, route.project_id) == (LATEST_SNAPSHOT, mine)
+
+    def test_an_ownerless_project_is_routable_by_no_user(self, database, embedder, manager):
+        topic_id = new_topic(database)
+        legacy = new_project(database, embedder, topic_id, "legacy", owner=None)
+        project_snapshot(database, legacy, toward(0.95, 34), 1)
+        assert manager(user=U1).route.found_by == NO_PROJECT
+
+    def test_a_new_project_belongs_to_the_user_who_started_it(self, database, embedder, manager):
+        new_topic(database)
+        route = manager(user=U2, conversation=C2).store_new_project("An answer about cells.", "cells")
+        with project_meta_data.ProjectMetaData(route.project_id, route.topic_id, database=database) as registry:
+            assert registry.get_project().user_id == U2
+
+    def test_backfill_gives_each_project_its_one_user_and_leaves_mixed_ones_ownerless(
+        self, database, embedder
+    ):
+        topic_id = new_topic(database)
+        solo = new_project(database, embedder, topic_id, "solo", owner=None)
+        mixed = new_project(database, embedder, topic_id, "mixed", owner=None)
+        mapping = MemoryMappingHandler(database)
+        for conversation, user, project in (("c-a", U1, solo), ("c-b", U1, mixed), ("c-c", U2, mixed)):
+            mapping.populate_conversation_id(conversation, user)
+            mapping.insert_into_mapping_table(conversation, user, topic_id, project, "2026-11-09T00:00:00+00:00")
+
+        filled, left = project_meta_data.backfill_project_owners(database)
+        assert (filled, left) == (1, [mixed])
+        owners = {p: project_meta_data.ProjectMetaData(p, topic_id, database=database).get_project().user_id for p in (solo, mixed)}
+        assert owners == {solo: U1, mixed: None}
+        assert project_meta_data.backfill_project_owners(database) == (0, [mixed])

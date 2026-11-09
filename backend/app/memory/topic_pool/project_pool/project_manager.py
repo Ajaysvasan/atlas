@@ -79,6 +79,7 @@ class ProjectManager:
         similarity_floor: float = SIMILARITY_FLOOR,
         ambiguity_margin: float = AMBIGUITY_MARGIN,
         historical_floor: float = SIMILARITY_FLOOR,
+        user_id: str | None = None,
     ):
         if not isinstance(topic_id, str) or not topic_id.strip():
             raise ValueError("topic_id must be a non-empty string")
@@ -87,6 +88,9 @@ class ProjectManager:
 
         self.topic_id = topic_id
         self.query = query
+        # Set: only this user's projects are candidates, and new ones are theirs.
+        # None (direct callers, tests): every project in the topic, as before.
+        self.user_id = user_id
         self.database = MemoryDatabase.of(database)
         self.similarity_floor = similarity_floor
         self.ambiguity_margin = ambiguity_margin
@@ -135,11 +139,15 @@ class ProjectManager:
 
     def projects(self) -> List[TopicProject]:
         """The project list this layer decides against."""
-        return list_topic_projects(self.topic_id, self.database)
+        if self.user_id is None:
+            return list_topic_projects(self.topic_id, self.database)
+        return list_topic_projects(self.topic_id, self.database, owner=self.user_id)
 
     def __vector_ids_by_project(self) -> List[Tuple[str, List[int]]]:
         grouped: dict[str, List[int]] = {}
-        for project_id, vector_id in list_topic_vector_ids(self.topic_id, self.database):
+        listed = (list_topic_vector_ids(self.topic_id, self.database) if self.user_id is None
+                  else list_topic_vector_ids(self.topic_id, self.database, owner=self.user_id))
+        for project_id, vector_id in listed:
             grouped.setdefault(project_id, []).append(vector_id)
         return list(grouped.items())
 
@@ -199,7 +207,8 @@ class ProjectManager:
 
     def __snapshot_ids_by_project(self) -> dict[str, List[int]]:
         grouped: dict[str, List[int]] = {}
-        for row in list_topic_project_snapshots(self.topic_id, self.database):
+        for row in list_topic_project_snapshots(self.topic_id, self.database, self.user_id,
+                                                any_owner=self.user_id is None):
             grouped.setdefault(row.project_id, []).append(row.project_snapshot_id)
         return grouped
 
@@ -286,7 +295,8 @@ class ProjectManager:
         meta = self.__meta(new_id)
         try:
             meta.add_project_vector(
-                vector, summary_vector_id(new_id), project_name, project_summary
+                vector, summary_vector_id(new_id), project_name, project_summary,
+                user_id=self.user_id,
             )
         finally:
             meta.close()

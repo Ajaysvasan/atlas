@@ -60,6 +60,14 @@ class Components:
         migrated = conversation_registry.migrate_from_sqlite(self.registry, Config.MEMORY_DB)
         if migrated is not None:
             logger.info("Conversation registry migrated to PostgreSQL: %s", migrated)
+        # Projects created before routing was scoped to their owner get one (bug 10.1).
+        from memory.topic_pool.project_pool.project_data_repo.project_meta_data import (
+            backfill_project_owners,
+        )
+
+        filled, mixed = backfill_project_owners(self.database)
+        if filled or mixed:
+            logger.info("Project owners backfilled: %d; left ownerless (mixed users): %d", filled, len(mixed))
         self.checkpoints = CheckpointStore(database=self.database)
         removed = self.checkpoints.sweep()
         if removed:

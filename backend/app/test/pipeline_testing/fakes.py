@@ -116,12 +116,15 @@ class FakeRetriever:
         self.passages = list(passages)
         self.fail = fail
         self.queries: List[str] = []
+        self.viewers: List[str | None] = []
         self.refreshed = 0
 
-    def retrieve(self, text):
+    def retrieve(self, request):
         if self.fail:
             raise self.fail
+        text = getattr(request, "query", request)
         self.queries.append(text)
+        self.viewers.append(getattr(request, "viewer", None))
         return RetrievalResult(list(self.passages), [])
 
     def refresh(self):
