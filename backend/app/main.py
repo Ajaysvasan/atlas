@@ -42,6 +42,9 @@ def parse_arguments(argv=None):
     )
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("start", help="Start Atlas and query it interactively (the default)")
+    commands.add_parser(
+        "serve", help="Serve the pipeline over gRPC to the Java API (ATLAS_GRPC_* settings)"
+    )
     return parser.parse_args(argv)
 
 
@@ -81,6 +84,17 @@ def main(argv=None) -> int:
     try:
         if args.query:
             return single_query(args.user, args.query, not args.no_acquire)
+        if args.command == "serve":
+            from grpc_server.server import serve
+            from grpc_server.settings import GrpcSettings, SettingsError
+
+            try:
+                settings = GrpcSettings.from_environment()
+            except SettingsError as error:
+                print(f"Cannot start the gRPC server: {error}", file=sys.stderr)
+                return 2
+            logger.info("Starting the gRPC server")
+            return serve(settings, acquisition=not args.no_acquire)
         from cli.cli_interface import cli_interface
 
         logger.info("Starting interactive CLI interface for user %s", args.user)

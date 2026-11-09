@@ -13,12 +13,15 @@ class RetrievalRequest(NamedTuple):
     query: str
     top_k: int | None = None
     rerank: bool | None = None
+    # Whose private uploads may appear; None sees public documents only.
+    viewer: str | None = None
 
     def with_defaults(self, settings) -> "RetrievalRequest":
         return RetrievalRequest(
             query=self.query,
             top_k=settings.top_k if self.top_k is None else self.top_k,
             rerank=settings.rerank if self.rerank is None else self.rerank,
+            viewer=self.viewer,
         )
 
 

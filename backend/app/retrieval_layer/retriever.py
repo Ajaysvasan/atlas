@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from config import Config, get_logger, log_context, new_correlation_id
+from data_layer.ingestion.document_owners import DocumentOwners
 from data_layer.vector_db_manager.repository.vectorMetaDataRepository import (
     VectorMetaDataRepository,
 )
@@ -41,6 +42,7 @@ class Retriever:
         hydration: Hydration | None = None,
         reranker: Reranker | None = None,
         cache: ResultCache | None = None,
+        owners: DocumentOwners | None = None,
     ) -> None:
         self.settings = RetrievalSettings() if settings is None else settings
         if chunk_store_path is None:
@@ -67,6 +69,7 @@ class Retriever:
             ResultCache(self.settings.cache_size, self.settings.cache_ttl_seconds)
             if cache is None else cache
         )
+        self.owners = DocumentOwners(chunk_store_path) if owners is None else owners
 
     def retrieve(self, request: RetrievalRequest | str) -> RetrievalResult:
         """The passages that answer a query, best first, within the budget."""
@@ -101,6 +104,11 @@ class Retriever:
     ) -> RetrievalResult:
         settings = self.settings
         pool = request.top_k * settings.candidate_multiplier
+        private = self.owners.any_private()
+        if private:
+            # Other users' uploads are dropped after hydration; widen the pool so
+            # the caller's share still fills top_k.
+            pool *= 2
 
         with recorder.stage("prepare") as stage:
             plan = self.preparation.prepare(request.query)
@@ -121,6 +129,11 @@ class Retriever:
             passages, unresolvable = self.hydration.hydrate(fused)
             passages, _ = deduplicate(passages)
             stage.produced = len(passages)
+        if private:
+            with recorder.stage("access") as stage:
+                allowed = self.owners.visible((p.document_id for p in passages), request.viewer)
+                passages = [p for p in passages if p.document_id in allowed]
+                stage.produced = len(passages)
         if request.rerank:
             with recorder.stage("rerank") as stage:
                 passages = self.reranker.rerank(plan, passages)

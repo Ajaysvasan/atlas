@@ -48,6 +48,14 @@ class ConversationRecord(NamedTuple):
     created_at: str
 
 
+class ConversationSummary(NamedTuple):
+    conversation_id: str
+    conversation_name: str
+    created_at: str
+    last_activity_at: str
+    exchange_count: int
+
+
 class MigrationReport(NamedTuple):
     found: int
     copied: int
@@ -191,6 +199,43 @@ class ConversationRegistry:
             return []
         return self.__select("user_id = %s", (user_id, limit),
                              "order by created_at desc, conversation_id limit %s")
+
+    def summaries(self, user_id: str, limit: int = 50,
+                  after: Tuple[str, str] | None = None) -> List[ConversationSummary]:
+        """This user's conversations with their activity, most recently active first.
+
+        `after` is the (last_activity_at, conversation_id) of the previous page's last row.
+        """
+        try:
+            user_id = require_identifier(user_id, "user_id")
+        except InvalidIdentifier:
+            return []
+        position = (None, None) if after is None else (_as_datetime(after[0]), after[1])
+
+        def query(cursor):
+            # greatest() skips nulls, so a conversation with no exchanges is as active as its start.
+            cursor.execute(
+                "with summary as ("
+                " select c.conversation_id, c.conversation_name, c.created_at,"
+                " greatest(c.created_at, max(e.query_created_at), max(e.system_response_time)) as last_activity_at,"
+                " count(e.exchange_id) as exchange_count"
+                " from conversations c"
+                " left join conversation_table e"
+                " on e.conversation_id = c.conversation_id and e.user_id = c.user_id"
+                " where c.user_id = %s"
+                " group by c.conversation_id, c.conversation_name, c.created_at)"
+                " select conversation_id, conversation_name, created_at, last_activity_at, exchange_count"
+                " from summary"
+                " where %s::timestamptz is null or (last_activity_at, conversation_id) < (%s::timestamptz, %s)"
+                " order by last_activity_at desc, conversation_id desc limit %s",
+                (user_id, position[0], position[0], position[1], limit),
+            )
+            return cursor.fetchall()
+
+        return [
+            ConversationSummary(conversation_id, name, _stamp(created_at), _stamp(last_activity), int(count))
+            for conversation_id, name, created_at, last_activity, count in self.__run(query)
+        ]
 
     def find_by_prefix(self, user_id: str, prefix: str) -> List[ConversationRecord]:
         """This user's conversations whose id starts with `prefix`."""

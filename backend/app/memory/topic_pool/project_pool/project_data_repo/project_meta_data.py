@@ -85,6 +85,9 @@ def _create_tables(cursor: sqlite3.Cursor) -> None:
         "create index if not exists idx_project_topic on project_table(topic_id)"
     )
     cursor.execute(
+        "create index if not exists idx_project_topic_owner on project_table(topic_id, user_id)"
+    )
+    cursor.execute(
         "create index if not exists idx_project_mapping_topic "
         "on project_mapping_table(topic_id)"
     )
@@ -117,38 +120,87 @@ def is_registered(
     return project_topic(project_id, database) is not None
 
 
+_ANY_OWNER = object()
+
+
+def _owner_clause(owner, column: str = "user_id") -> Tuple[str, tuple]:
+    """`and <column> = ?` for one owner; nothing when every owner is wanted."""
+    if owner is _ANY_OWNER:
+        return "", ()
+    return f" and {column} = ?", (owner,)
+
+
 def list_topic_projects(
-    topic_id: str, database: MemoryDatabase | str | Path | None = None
+    topic_id: str, database: MemoryDatabase | str | Path | None = None, owner=_ANY_OWNER
 ) -> List[TopicProject]:
-    """Every project under a topic, oldest first."""
+    """Every project under a topic, oldest first; only `owner`'s when one is given."""
+    clause, parameters = _owner_clause(owner)
     with _registry(database).reading() as cursor:
         cursor.execute(
-            """
+            f"""
             select project_id, project_name, project_summary
             from project_table
-            where topic_id = ?
+            where topic_id = ?{clause}
             order by datetime(created_at), created_at, rowid
             """,
-            (topic_id,),
+            (topic_id, *parameters),
         )
         return [TopicProject(*row) for row in cursor.fetchall()]
 
 
 def list_topic_vector_ids(
-    topic_id: str, database: MemoryDatabase | str | Path | None = None
+    topic_id: str, database: MemoryDatabase | str | Path | None = None, owner=_ANY_OWNER
 ) -> List[Tuple[str, int]]:
-    """[(project_id, vector_id)] for every project under a topic."""
+    """[(project_id, vector_id)] for every project under a topic; only `owner`'s when one is given."""
+    clause, parameters = _owner_clause(owner, "p.user_id")
     with _registry(database).reading() as cursor:
         cursor.execute(
-            """
-            select project_id, project_summary_vector_id
-            from project_mapping_table
-            where topic_id = ?
-            order by project_id, datetime(created_at), created_at, rowid
+            f"""
+            select m.project_id, m.project_summary_vector_id
+            from project_mapping_table as m
+            join project_table as p on p.project_id = m.project_id
+            where m.topic_id = ?{clause}
+            order by m.project_id, datetime(m.created_at), m.created_at, m.rowid
             """,
-            (topic_id,),
+            (topic_id, *parameters),
         )
         return cursor.fetchall()
+
+
+def backfill_project_owners(database: MemoryDatabase | str | Path | None = None) -> Tuple[int, List[str]]:
+    """Give each ownerless project the one user whose conversations it holds.
+
+    Returns (projects filled, projects left ownerless because more than one
+    user's conversations are in them). An ownerless project is routable by no
+    one, so a mixed project fails closed rather than leaking.
+    """
+    registry = _registry(database)
+    with registry.writing() as cursor:
+        exists = cursor.execute(
+            "select 1 from sqlite_master where type = 'table' and name = 'memory_mapping_table'"
+        ).fetchone()
+        if not exists:
+            return 0, []
+        rows = cursor.execute(
+            """
+            select p.project_id, count(distinct m.user_id), min(m.user_id)
+            from project_table as p
+            join memory_mapping_table as m on m.project_id = p.project_id
+            where p.user_id is null
+            group by p.project_id
+            """
+        ).fetchall()
+        filled, mixed = 0, []
+        for project_id, users, user_id in rows:
+            if users == 1:
+                cursor.execute("update project_table set user_id = ? where project_id = ? and user_id is null",
+                               (user_id, project_id))
+                filled += 1
+            else:
+                mixed.append(project_id)
+    if mixed:
+        logger.warning("Projects holding several users' conversations were left without an owner: %s", mixed)
+    return filled, mixed
 
 
 class ProjectRow(NamedTuple):

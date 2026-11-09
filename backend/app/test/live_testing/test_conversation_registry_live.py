@@ -123,3 +123,46 @@ def test_sqlite_rows_migrate_once_with_ids_names_and_starts_intact(registry, use
         assert tables == {"conversations_migrated"}
         assert db.execute("select count(*) from conversations_migrated").fetchone()[0] == 2
     assert migrate_from_sqlite(registry, path) is None
+
+
+@pytest.fixture
+def exchange_log(user):
+    from query_decomposition.conversation_table import ConversationTable
+
+    table = ConversationTable()
+    yield table
+    with table.conn.cursor() as cursor:
+        cursor.execute("delete from conversation_table where user_id = %s", (user,))
+    table.conn.commit()
+    table.close()
+
+
+def test_summaries_join_the_exchange_log_and_order_by_activity(registry, user, exchange_log):
+    quiet = registry.create(user, "Quiet", created_at="2026-01-01T00:00:01+00:00")
+    busy = registry.create(user, "Busy", created_at="2026-01-01T00:00:00+00:00")
+    asked = exchange_log.record_query(busy.conversation_id, user, "first")
+    answered = exchange_log.record_response(asked.exchange_id, "reply")
+    exchange_log.record_query(busy.conversation_id, user, "second")
+    exchange_log.record_query(busy.conversation_id, "someone-else", "not counted")
+
+    rows = registry.summaries(user)
+    assert [r.conversation_id for r in rows] == [busy.conversation_id, quiet.conversation_id]
+    assert rows[0].exchange_count == 2
+    assert datetime.fromisoformat(rows[0].last_activity_at) >= answered.system_response_time
+    assert (rows[1].exchange_count, rows[1].last_activity_at) == (0, rows[1].created_at)
+
+
+def test_summaries_page_by_keyset_without_gaps_or_repeats(registry, user):
+    made = [registry.create(user, f"Topic {n}", created_at=f"2026-01-01T00:00:0{n}+00:00") for n in range(5)]
+    seen, after = [], None
+    while True:
+        page = registry.summaries(user, 2, after)
+        seen += page
+        if len(page) < 2:
+            break
+        after = (page[-1].last_activity_at, page[-1].conversation_id)
+    assert [r.conversation_id for r in seen] == [r.conversation_id for r in reversed(made)]
+
+
+def test_summaries_ignore_a_malformed_user(registry):
+    assert registry.summaries("../etc") == []

@@ -35,7 +35,8 @@ def cache_key(request: RetrievalRequest) -> str:
     before keying it, or `top_k=None` gets its own entry alongside `top_k=8`.
     """
     query = " ".join(request.query.split()).casefold()
-    return f"{query}|{request.top_k}|{request.rerank}"
+    # The viewer decides which private documents may appear, so it is part of the answer.
+    return f"{query}|{request.top_k}|{request.rerank}|{request.viewer or ''}"
 
 
 class ResultCache:

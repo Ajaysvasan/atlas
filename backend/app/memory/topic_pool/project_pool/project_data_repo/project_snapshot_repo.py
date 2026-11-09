@@ -78,23 +78,27 @@ class TopicSnapshot(NamedTuple):
 
 
 def list_topic_project_snapshots(
-    topic_id: str, database: MemoryDatabase | str | Path | None = None
+    topic_id: str, database: MemoryDatabase | str | Path | None = None, owner=None, *, any_owner: bool = True
 ) -> List[TopicSnapshot]:
-    """Every project snapshot under a topic; each project's in history() order, so its last is latest()."""
+    """Every project snapshot under a topic; each project's in history() order, so its last is latest().
+
+    With any_owner=False only `owner`'s projects are listed.
+    """
     store = MemoryDatabase.of(database)
     store.ensure(SCHEMA)
+    clause, parameters = ("", ()) if any_owner else (" and p.user_id = ?", (owner,))
     with store.reading() as cursor:
         cursor.execute(
-            """
+            f"""
             select s.project_id, s.project_snapshot_id
             from project_snapshot_mapping as m
             join project_snapshot as s
               on s.project_snapshot_id = m.project_snapshot_id
             join project_table as p on p.project_id = m.project_id
-            where p.topic_id = ?
+            where p.topic_id = ?{clause}
             order by s.project_id, s.last_seq_included, m.created_at
             """,
-            (topic_id,),
+            (topic_id, *parameters),
         )
         return [TopicSnapshot(*row) for row in cursor.fetchall()]
 

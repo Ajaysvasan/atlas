@@ -44,6 +44,11 @@ dependencies = [
     # Declared ahead of use: no routes exist yet (see todo.md section 3).
     "fastapi==0.136.3",
     "uvicorn==0.48.0",
+
+    # --- gRPC surface (the Java API calls the pipeline through this) ----------
+    # protobuf 7.36 matches the Java side's protobuf-java 4.36.
+    "grpcio==1.84.1",
+    "protobuf==7.36.2",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +56,10 @@ dependencies = [
 xlsx = ["openpyxl==3.1.5"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "grpcio-tools==1.84.1",
+    "pytest>=8.0",
+]
 
 # llama-cpp-python is deliberately absent from every group above. It must be
 # compiled with backend-specific CMAKE_ARGS (CUDA, ROCm, Metal or CPU), and

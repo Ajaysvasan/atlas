@@ -22,7 +22,7 @@ from observability.telemetry import RequestRecord, StageClock, Telemetry
 from pipeline.naming import Namer
 from query_decomposition.models import Decomposition, Mode
 from query_decomposition.query_decomposition_exceptions import QueryTooLarge
-from retrieval_layer.models import Passage
+from retrieval_layer.models import Passage, RetrievalRequest
 from storage.timestamps import utc_now
 from thinking_layer.models import Evidence, MemoryContext, ThinkingRequest, ThinkingResult
 from thinking_layer.orchestrator import ThinkingOrchestrator
@@ -149,8 +149,10 @@ class AtlasPipeline:
         """A conversation named from its first query; the name is unique for this user."""
         return self.registry.create(user_id, self.namer.conversation_name(first_query))
 
-    def ask(self, conversation_id: str, user_id: str, query: str) -> AtlasResponse:
-        request_id = new_correlation_id()
+    def ask(self, conversation_id: str, user_id: str, query: str,
+            request_id: str | None = None) -> AtlasResponse:
+        """One query; `request_id` is the caller's correlation id (gRPC), else a new one (CLI)."""
+        request_id = request_id or new_correlation_id()
         record = RequestRecord(request_id, conversation_id, utc_now())
         stages = StageClock(record, self.clock)
         warnings: List[str] = []
@@ -209,7 +211,7 @@ class AtlasPipeline:
             record.retrieval["global"] = "skipped: memory answers it"
         else:
             with stages.stage("retrieval"):
-                retrieved = self.__retrieve(decomposition)
+                retrieved = self.__retrieve(decomposition, user_id)
             with stages.stage("ksv"):
                 sufficiency, global_evidence = self.__verify(decomposition, retrieved)
             record.retrieval["global"] = sufficiency
@@ -219,7 +221,7 @@ class AtlasPipeline:
                 if outcome is not None and outcome.stored_documents:
                     with stages.stage("retrieval"):
                         self.retriever.refresh()
-                        retrieved = self.__retrieve(decomposition)
+                        retrieved = self.__retrieve(decomposition, user_id)
                     with stages.stage("ksv"):
                         sufficiency, global_evidence = self.__verify(decomposition, retrieved)
                     record.retrieval["global"] = sufficiency
@@ -283,13 +285,13 @@ class AtlasPipeline:
             limitations.append("Earlier conversations could not be searched")
             return []
 
-    def __retrieve(self, decomposition: Decomposition) -> "Retrieved":
+    def __retrieve(self, decomposition: Decomposition, user_id: str) -> "Retrieved":
         queries = [decomposition.working_query, *decomposition.sub_queries]
         best: Dict[int, Passage] = {}
         try:
             retriever = self.retriever.get()
             for text in queries:
-                for passage in retriever.retrieve(text).passages:
+                for passage in retriever.retrieve(RetrievalRequest(text, viewer=user_id)).passages:
                     if passage.vector_id not in best or passage.score > best[passage.vector_id].score:
                         best[passage.vector_id] = passage
         except Exception as error:

@@ -1,8 +1,9 @@
 """conversation_table in PostgreSQL: each query as it arrives, and the system's response once there is one."""
 
+import threading
 import uuid
 from datetime import datetime, timezone
-from typing import List, NamedTuple
+from typing import List, NamedTuple, Tuple
 
 from config import get_logger
 from query_decomposition.query_decomposition_exceptions import (
@@ -40,10 +41,12 @@ def _connect():
 class ConversationTable:
     def __init__(self, connection=None) -> None:
         self.conn = _connect() if connection is None else connection
+        # The gRPC server reads one table from several threads; a transaction must not interleave.
+        self.__lock = threading.RLock()
         self.__create_table()
 
     def __create_table(self) -> None:
-        with self.conn.cursor() as cursor:
+        with self.__lock, self.conn.cursor() as cursor:
             cursor.execute("""
                 create table if not exists conversation_table(
                     exchange_id varchar primary key,
@@ -62,16 +65,21 @@ class ConversationTable:
             )
         self.conn.commit()
 
+    def __rows(self, query: str, parameters) -> List[tuple]:
+        with self.__lock:
+            try:
+                with self.conn.cursor() as cursor:
+                    cursor.execute(query, parameters)
+                    rows = cursor.fetchall()
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return rows
+
     def __one(self, query: str, parameters) -> Exchange | None:
-        try:
-            with self.conn.cursor() as cursor:
-                cursor.execute(query, parameters)
-                row = cursor.fetchone()
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        return None if row is None else Exchange(*row)
+        rows = self.__rows(query, parameters)
+        return Exchange(*rows[0]) if rows else None
 
     def record_query(self, conversation_id: str, user_id: str, query: str) -> Exchange:
         """Store a query as it arrives; its response is recorded later."""
@@ -116,23 +124,30 @@ class ConversationTable:
 
     def history(self, conversation_id: str, user_id: str) -> List[Exchange]:
         """Every exchange of one conversation, oldest first."""
-        try:
-            with self.conn.cursor() as cursor:
-                cursor.execute(
-                    f"select {_COLUMNS} from conversation_table "
-                    f"where conversation_id = %s and user_id = %s "
-                    f"order by query_created_at, exchange_id",
-                    (conversation_id, user_id),
-                )
-                rows = cursor.fetchall()
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        rows = self.__rows(
+            f"select {_COLUMNS} from conversation_table "
+            f"where conversation_id = %s and user_id = %s "
+            f"order by query_created_at, exchange_id",
+            (conversation_id, user_id),
+        )
+        return [Exchange(*row) for row in rows]
+
+    def page(self, conversation_id: str, user_id: str, limit: int,
+             after: Tuple[datetime, str] | None = None) -> List[Exchange]:
+        """Up to `limit` exchanges of one conversation, oldest first, after (query_created_at, exchange_id)."""
+        position = (None, None) if after is None else after
+        rows = self.__rows(
+            f"select {_COLUMNS} from conversation_table "
+            f"where conversation_id = %s and user_id = %s "
+            f"and (%s::timestamptz is null or (query_created_at, exchange_id) > (%s::timestamptz, %s)) "
+            f"order by query_created_at, exchange_id limit %s",
+            (conversation_id, user_id, position[0], position[0], position[1], limit),
+        )
         return [Exchange(*row) for row in rows]
 
     def close(self) -> None:
-        self.conn.close()
+        with self.__lock:
+            self.conn.close()
 
 
 def open_conversation_table() -> ConversationTable:

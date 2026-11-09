@@ -225,6 +225,12 @@ class InMemoryConversationTable:
             key=lambda row: (row.query_created_at, row.exchange_id),
         )
 
+    def page(self, conversation_id, user_id, limit, after=None):
+        rows = self.history(conversation_id, user_id)
+        if after is not None:
+            rows = [row for row in rows if (row.query_created_at, row.exchange_id) > tuple(after)]
+        return rows[:limit]
+
     def close(self) -> None:
         self.closed = True
 
@@ -299,11 +305,13 @@ def real_model():
 class InMemoryConversationRegistry:
     """The PostgreSQL `conversations` table's contract, over a dict: unique names per user, newest first."""
 
-    def __init__(self) -> None:
+    def __init__(self, exchange_log=None) -> None:
         import threading
 
         self.rows = {}
         self.lock = threading.Lock()
+        # The real summaries() joins conversation_table; the stand-in reads the in-memory one.
+        self.exchange_log = exchange_log
 
     def create(self, user_id, proposed_name, conversation_id=None, created_at=None):
         import uuid
@@ -330,6 +338,33 @@ class InMemoryConversationRegistry:
     def list(self, user_id, limit=50):
         mine = [r for r in self.rows.values() if r.user_id == user_id]
         return sorted(mine, key=lambda r: (r.created_at, r.conversation_id), reverse=True)[:limit]
+
+    def summaries(self, user_id, limit=50, after=None):
+        from datetime import datetime, timezone
+
+        from memory.conversation_registry import ConversationSummary
+
+        def stamp(value):
+            value = datetime.fromisoformat(value) if isinstance(value, str) else value
+            value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        out = []
+        for record in (r for r in self.rows.values() if r.user_id == user_id):
+            exchanges = ([] if self.exchange_log is None
+                         else self.exchange_log.history(record.conversation_id, user_id))
+            moments = [stamp(record.created_at)]
+            moments += [e.query_created_at for e in exchanges]
+            moments += [e.system_response_time for e in exchanges if e.system_response_time is not None]
+            last = max(moments).isoformat(timespec="microseconds")
+            out.append(ConversationSummary(record.conversation_id, record.conversation_name,
+                                           stamp(record.created_at).isoformat(timespec="microseconds"),
+                                           last, len(exchanges)))
+        out.sort(key=lambda row: (stamp(row.last_activity_at), row.conversation_id), reverse=True)
+        if after is not None:
+            position = (stamp(after[0]), after[1])
+            out = [row for row in out if (stamp(row.last_activity_at), row.conversation_id) < position]
+        return out[:limit]
 
     def find_by_prefix(self, user_id, prefix):
         prefix = (prefix or "").strip()
@@ -382,11 +417,11 @@ def _no_real_postgres_outside_live_tests(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def conversation_registry(monkeypatch):
+def conversation_registry(monkeypatch, conversation_rows):
     """Conversations the pipeline and CLI create go to memory, never to the real PostgreSQL."""
     from memory import conversation_registry as module
 
-    registry = InMemoryConversationRegistry()
+    registry = InMemoryConversationRegistry(exchange_log=conversation_rows)
     monkeypatch.setattr(module, "open_conversation_registry", lambda: registry)
     return registry
 
