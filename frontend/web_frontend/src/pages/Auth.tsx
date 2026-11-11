@@ -37,7 +37,7 @@ function AuthLayout({
         <Wordmark />
         <div className="my-16 lg:my-0">
           <p className="label mb-6">
-            <span className="text-accent">{index}</span>
+            <span className="text-accent-ink">{index}</span>
             <span className="mx-3 text-ink-faint">—</span>
             {en} <span className="text-ink-faint">/</span>{" "}
             <span lang="ja" className="tracking-[0.1em]">
@@ -46,7 +46,7 @@ function AuthLayout({
           </p>
           <h1
             data-reveal="now"
-            className="font-display text-[clamp(2.75rem,5.4vw,5.75rem)] font-extrabold leading-[0.92] tracking-[-0.045em]"
+            className="display text-[clamp(3.2rem,6.6vw,7rem)] leading-[0.9]"
           >
             {title}
           </h1>
@@ -139,7 +139,7 @@ export function SignIn() {
       en="Sign in"
       ja="ログイン"
       title="Welcome back."
-      aside={<p className="max-w-sm text-sm">Sessions last one hour. Your conversation list is kept in this browser.</p>}
+      aside={<p className="max-w-sm text-sm">Sessions last one hour. Your conversations are kept on the server, under your account.</p>}
     >
       <form onSubmit={onSubmit} noValidate className="space-y-9">
         {justRegistered && (

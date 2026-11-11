@@ -58,11 +58,11 @@ export function Workspace() {
         <div className="flex items-center justify-between gap-4 border-b border-rule px-gutter py-3">
           <div className="min-w-0">
             <p className="label">
-              <span className="text-accent">{conversationId ? "Conversation" : "New"}</span>
+              <span className="text-accent-ink">{conversationId ? "Conversation" : "New"}</span>
               <span className="mx-2 text-ink-faint">/</span>
               <span lang="ja">会話</span>
             </p>
-            <h1 className="truncate font-display text-lg font-bold tracking-[-0.01em]">{title}</h1>
+            <h1 className="truncate text-lg font-bold">{title}</h1>
           </div>
           <button type="button" className="label link shrink-0 lg:hidden" onClick={() => setRailOpen(true)}>
             History{list.status === "ready" ? ` (${list.items.length}${list.nextCursor ? "+" : ""})` : ""}
@@ -103,7 +103,7 @@ function ConversationRail({
     <aside className={`min-h-0 flex-col ${className}`} aria-label="Conversations">
       <div className="flex items-center justify-between px-gutter py-4 lg:px-6">
         <p className="label">
-          History <span className="text-ink-faint">/</span> <span lang="ja">履歴</span>
+          Ship&rsquo;s log <span className="text-ink-faint">/</span> <span lang="ja">航海日誌</span>
         </p>
         <Link to="/workspace" onClick={onNavigate} className="label link text-ink">
           + New
@@ -155,10 +155,10 @@ function RailItem({ c, active, running, onNavigate }: { c: ConversationMeta; act
         }
       >
         {active && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-px bg-accent" />}
-        <span className="block truncate font-display text-[15px] font-bold tracking-[-0.01em]">{c.name}</span>
+        <span className="block truncate text-[15px] font-bold">{c.name}</span>
         <span className="label mt-1 block text-[10px]">
           {formatStamp(c.lastActivityAt)} · {c.exchangeCount} {c.exchangeCount === 1 ? "turn" : "turns"}
-          {running && <span className="ml-2 text-accent">· Running</span>}
+          {running && <span className="ml-2 text-accent-ink">· Running</span>}
         </span>
       </NavLink>
     </li>
@@ -192,8 +192,8 @@ function RailDrawer({ list, activeId, onClose }: { list: ListState; activeId?: s
 function UnknownConversation() {
   return (
     <div className="flex flex-1 flex-col justify-center px-gutter">
-      <p className="label mb-4 text-accent">404</p>
-      <p className="max-w-xl font-display text-3xl font-bold tracking-[-0.02em]">No such conversation.</p>
+      <p className="label mb-4 text-accent-ink">404</p>
+      <p className="display max-w-xl text-4xl">No such conversation.</p>
       <p className="mt-4 max-w-xl text-ink-dim">It does not exist, or it belongs to another account.</p>
       <Link to="/workspace" className="btn mt-8 self-start">
         Start a new conversation
@@ -283,7 +283,7 @@ function TurnView({ turn, index, onDismiss }: { turn: Turn; index: number; onDis
       <div className="-ml-8 mb-4 sm:-ml-12">
         <MeridianTick label={`T—${String(index).padStart(2, "0")} · ${formatStamp(turn.askedAt)}`} />
       </div>
-      <p className="mb-6 whitespace-pre-wrap font-display text-[clamp(1.15rem,2vw,1.45rem)] font-bold leading-[1.3] tracking-[-0.015em]">
+      <p className="mb-6 whitespace-pre-wrap text-[clamp(1.15rem,2vw,1.45rem)] font-bold leading-[1.35]">
         {turn.query}
       </p>
 
@@ -337,7 +337,7 @@ function Meta({ k, v, accent = false, title }: { k: string; v: string; accent?: 
   return (
     <div className="flex gap-2" title={title}>
       <dt className="label text-[10px] text-ink-faint">{k}</dt>
-      <dd className={`label text-[10px] ${accent ? "text-accent" : "text-ink-dim"}`}>{v}</dd>
+      <dd className={`label text-[10px] ${accent ? "text-accent-ink" : "text-ink-dim"}`}>{v}</dd>
     </div>
   );
 }
@@ -358,14 +358,14 @@ function PendingTurn({ query, startedAt, index }: { query: string; startedAt: nu
       <div className="-ml-8 mb-4 sm:-ml-12">
         <MeridianTick label={`T—${String(index).padStart(2, "0")} · ${formatStamp(startedAt)}`} active />
       </div>
-      <p className="mb-6 whitespace-pre-wrap font-display text-[clamp(1.15rem,2vw,1.45rem)] font-bold leading-[1.3] tracking-[-0.015em]">
+      <p className="mb-6 whitespace-pre-wrap text-[clamp(1.15rem,2vw,1.45rem)] font-bold leading-[1.35]">
         {query}
       </p>
       <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
-        <p className="label text-accent" role="status">
+        <p className="label text-accent-ink" role="status">
           Running · {formatDuration(elapsed, true)}
         </p>
-        <p className="text-sm text-ink-dim">Decomposing, recalling, retrieving, planning and critiquing. On a CPU this takes minutes.</p>
+        <p className="text-sm text-ink-dim">Decomposing, recalling, retrieving, planning and critiquing: seconds on a GPU, minutes on a CPU.</p>
       </div>
       <button
         type="button"
@@ -384,11 +384,11 @@ function EmptyState() {
     <div className="scrollbar-thin flex min-h-0 flex-1 flex-col justify-center overflow-y-auto px-gutter py-12">
       <div className="mx-auto w-full max-w-4xl">
         <p className="label mb-6">
-          <span className="text-accent">01</span>
+          <span className="text-accent-ink">01</span>
           <span className="mx-3 text-ink-faint">—</span>
-          Ask <span className="text-ink-faint">/</span> <span lang="ja">質問</span>
+          Set sail <span className="text-ink-faint">/</span> <span lang="ja">出航</span>
         </p>
-        <h2 className="max-w-3xl font-display text-[clamp(2.4rem,6vw,5rem)] font-extrabold leading-[0.95] tracking-[-0.04em]">
+        <h2 className="display max-w-3xl text-[clamp(2.8rem,7vw,6rem)] leading-[0.92]">
           What do you want to know?
         </h2>
         <p className="mt-6 max-w-xl text-ink-dim">
@@ -403,9 +403,9 @@ function EmptyState() {
                 className="group flex w-full items-baseline gap-6 py-4 text-left transition-transform duration-700 hover:translate-x-2"
                 onClick={() => window.dispatchEvent(new CustomEvent("atlas:prefill", { detail: q }))}
               >
-                <span className="font-mono text-xs text-accent">{String(i + 1).padStart(2, "0")}</span>
+                <span className="font-mono text-xs text-accent-ink">{String(i + 1).padStart(2, "0")}</span>
                 <span className="flex-1 text-ink-dim transition-colors group-hover:text-ink">{q}</span>
-                <span aria-hidden="true" className="text-accent opacity-0 transition-opacity duration-500 group-hover:opacity-100">
+                <span aria-hidden="true" className="text-accent-ink opacity-0 transition-opacity duration-500 group-hover:opacity-100">
                   →
                 </span>
               </button>
@@ -484,7 +484,7 @@ function Composer({
   return (
     <form onSubmit={send} className="border-t border-rule bg-base px-gutter pb-4 pt-3">
       <div className="mx-auto max-w-4xl">
-        {busyName && <p className="label mb-2 text-accent">Atlas is answering in {busyName}. One question runs at a time.</p>}
+        {busyName && <p className="label mb-2 text-accent-ink">Atlas is answering in {busyName}. One question runs at a time.</p>}
         <div className="flex items-end gap-4">
           <label htmlFor="query" className="sr-only">
             Your question

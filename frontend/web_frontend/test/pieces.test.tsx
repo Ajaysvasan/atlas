@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseBlocks } from "../src/components/Answer";
+import { render } from "@testing-library/react";
+import { parseBlocks, renderInline } from "../src/components/Answer";
 import { decodeSubject } from "../src/lib/auth";
 import { formatDuration } from "../src/lib/format";
 import { validateRegistration } from "../src/pages/Auth";
@@ -49,5 +50,23 @@ describe("formatDuration", () => {
     expect(formatDuration(12_400)).toBe("12.4 s");
     expect(formatDuration(187_000)).toBe("3 m 07 s");
     expect(formatDuration(187_000, true)).toBe("03:07");
+  });
+});
+
+describe("renderInline", () => {
+  const html = (text: string) => render(<p>{renderInline(text)}</p>).container.querySelector("p")!.innerHTML;
+
+  it("renders code, bold and italic", () => {
+    expect(html("a `b` **c** *d* e")).toBe("a <code>b</code> <strong>c</strong> <em>d</em> e");
+  });
+
+  it("leaves arithmetic and stray asterisks alone", () => {
+    expect(html("2 * 3 * 4")).toBe("2 * 3 * 4");
+    expect(html("a* b *c")).toBe("a* b *c");
+    expect(html("*")).toBe("*");
+  });
+
+  it("keeps italics inside a sentence with punctuation", () => {
+    expect(html("they become *dead tuples*.")).toBe("they become <em>dead tuples</em>.");
   });
 });

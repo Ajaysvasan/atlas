@@ -69,8 +69,8 @@ All calls go through [`src/lib/api.ts`](src/lib/api.ts):
 - **Errors:** they come back as `ApiError`, carrying the server's `code`, field errors and
   `Retry-After`.
 - **Uploads:** they use `XMLHttpRequest` so progress can be shown.
-- **Queries:** they can take minutes on a CPU, so the composer shows elapsed time and allows
-  cancelling.
+- **Queries:** they take seconds on a GPU but minutes on a CPU, so the composer shows elapsed
+  time and allows cancelling.
 
 Auth and history are handled like this:
 
@@ -88,7 +88,7 @@ Auth and history are handled like this:
 src/
   main.tsx, router.tsx        entry and routes
   lib/                        api client, auth, conversation store, motion helpers, formatting
-  components/                 header and menu, app shell, meridian, globe, answer renderer, ...
+  components/                 header and menu, app shell, voyage route, sea chart, answer renderer, ...
   pages/                      Landing, Auth, Workspace, Documents, NotFound
   styles/index.css            design tokens and Tailwind theme
 test/                         Vitest suites (api client, conversation store, routing, components)
@@ -96,9 +96,30 @@ test/                         Vitest suites (api client, conversation store, rou
 
 ## Design
 
-The look is cold, sci-fi editorial: a near-black base (`#05070A`), pale ink (`#D7E2EA`) and
-one orange accent (`#FF7A00`). The fonts are Syne for display, Zen Kaku Gothic New for body
-text and JetBrains Mono for labels, with film grain over the page. The recurring element is
-the meridian, a thin orange line with coordinate ticks. All colours come from the tokens in
-[`src/styles/index.css`](src/styles/index.css). Animation runs only when the system allows
-motion (`prefers-reduced-motion`). Otherwise everything is shown without animation.
+The look is an original high-seas adventure: a shonen poster set on a sea chart. It borrows
+no franchise's names, logo, characters or artwork.
+
+- **Colours:** night-sea navy (`#0B1626`), parchment ink (`#EFE3C8`), one vermilion accent
+  (`#E0442E`), and brass (`#C9A04A`) on less than 5% of any page. Small vermilion text uses
+  `--accent-ink` (`#F0533A`), because the accent alone measures 4.35:1 on the navy and
+  WCAG AA needs 4.5:1.
+- **Fonts:** Anton for headings, in capitals (the `.display` class); Zen Kaku Gothic New for
+  body text, questions and answers; JetBrains Mono for labels. Grain over the page reads as
+  chart paper.
+- **The voyage route** ([`Meridian.tsx`](src/components/Meridian.tsx)) is the recurring element:
+  a dashed vermilion line with diamond port markers. It runs down the landing page (one port
+  per section), the edge of the sign-in panel and the conversation log (one port per question),
+  and a ship's marker sails down it while a query runs.
+- **The hero** ([`SeaChart.tsx`](src/components/SeaChart.tsx)) is an SVG chart drawn in code:
+  seeded islands with depth contours, rhumb lines from a compass rose, soundings, and the route
+  through six ports, one per pipeline stage. To use your own key art, put a 2560×1440 image in
+  `public/` and set `HERO_ART` in [`Landing.tsx`](src/pages/Landing.tsx); the chart then sits
+  over it, dimmed.
+- **Section labels** carry a light nautical voice, in English and Japanese: *The voyage / 航海*,
+  *Ports of call / 寄港地*, *Own waters / 領海*, *Set sail / 出航*, *Ship's log / 航海日誌*,
+  *Cargo / 積荷*. Buttons, form labels, errors and navigation stay plain.
+
+All colours come from the tokens in [`src/styles/index.css`](src/styles/index.css). Animation
+runs only when the system allows motion (`prefers-reduced-motion`): the route draws itself in,
+headings reveal line by line, and the chart drifts slightly on scroll. Otherwise everything is
+shown complete and still.

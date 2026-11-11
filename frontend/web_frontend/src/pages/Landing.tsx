@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 import { Footer } from "../components/Footer";
-import { Globe } from "../components/Globe";
 import { Header } from "../components/Header";
 import { Meridian } from "../components/Meridian";
+import { SeaChart } from "../components/SeaChart";
 import { SectionLabel } from "../components/SectionLabel";
 import { useAuth } from "../lib/auth";
 import { revealLines, ScrollTrigger, useMotion, useSmoothScroll } from "../lib/motion";
@@ -51,7 +51,14 @@ const CREDITS: Array<[string, string]> = [
 ];
 
 const SECTIONS = ["introduction", "pipeline", "privacy", "access"];
-const TICKS = ["00 N", "01 INTRO", "02 PIPE", "03 PRIV", "04 ACCESS"];
+const TICKS = ["00 DEPART", "01 VOYAGE", "02 PORTS", "03 WATERS", "04 SAIL"];
+
+/**
+ * Your own key art, when you have it: put a 2560×1440 image (subject right of centre, transparent
+ * or dark on the left) in public/ and set its path here, e.g. "/key-visual.webp". The sea chart
+ * then sits over it, dimmed, so the art leads.
+ */
+const HERO_ART: string | null = null;
 
 export function Landing() {
   const root = useRef<HTMLDivElement>(null);
@@ -95,29 +102,34 @@ export function Landing() {
       <main>
         {/* HERO / KEY VISUAL */}
         <section className="relative isolate flex min-h-[100svh] flex-col overflow-hidden" aria-labelledby="hero-title">
-          <div className="absolute inset-0 -z-10 bg-[radial-gradient(120%_80%_at_70%_40%,var(--base-2)_0%,var(--base)_70%)]" />
-          <div className="pointer-events-none absolute inset-0 -z-10 flex items-center justify-end">
-            <Globe className="h-[min(118vh,1100px)] w-auto translate-x-[22%] opacity-90 max-md:translate-x-[38%] max-md:opacity-50" />
+          <div className="absolute inset-0 -z-10 bg-[radial-gradient(110%_90%_at_72%_35%,var(--base-2)_0%,var(--base)_72%)]" />
+          {HERO_ART && (
+            <img src={HERO_ART} alt="" className="absolute inset-0 -z-10 h-full w-full object-cover object-right" fetchPriority="high" />
+          )}
+          <div className="pointer-events-none absolute inset-0 -z-10">
+            <SeaChart className={`h-full w-full ${HERO_ART ? "opacity-40" : "opacity-95 max-md:opacity-45"}`} />
           </div>
-          <div className="absolute inset-x-0 bottom-0 -z-10 h-1/2 bg-gradient-to-t from-base via-base/85 to-transparent" />
+          {/* scrims: keep the title and the call to action legible over the chart */}
+          <div className="absolute inset-y-0 left-0 -z-10 w-[62%] bg-gradient-to-r from-base via-base/70 to-transparent [mask-image:linear-gradient(to_bottom,transparent_18%,black_45%)] max-md:w-full max-md:[mask-image:none]" />
+          <div className="absolute inset-x-0 bottom-0 -z-10 h-[58%] bg-gradient-to-t from-base via-base/85 to-transparent" />
 
           <div className="mt-auto grid grid-cols-12 gap-x-gutter px-gutter pb-[10vh] pt-28">
             <div className="col-span-12 lg:col-span-9 lg:col-start-2">
               <p className="label mb-6" data-fade="now" data-delay="0.2">
-                <span className="text-accent">0° 00′ 00″</span>
+                <span className="text-brass">00°00′N · 00°00′E</span>
                 <span className="mx-3 text-ink-faint">—</span>
                 Local retrieval-augmented generation
               </p>
               <h1
                 id="hero-title"
                 data-reveal="now"
-                className="w-fit whitespace-nowrap font-display text-[clamp(4.5rem,17vw,15rem)] font-extrabold leading-[0.86] tracking-[-0.045em]"
+                className="display w-fit whitespace-nowrap text-[clamp(6.5rem,22vw,17.5rem)] leading-[0.84]"
               >
                 ATLAS
               </h1>
-              <div className="mt-6 grid gap-6 md:grid-cols-[minmax(0,34rem)_auto] md:items-end md:gap-12">
+              <div className="mt-8 grid gap-6 md:grid-cols-[minmax(0,34rem)_auto] md:items-end md:gap-12">
                 <div>
-                  <p data-reveal="now" data-delay="0.25" className="font-display text-[clamp(1.25rem,2.4vw,1.9rem)] font-medium leading-[1.25]">
+                  <p data-reveal="now" data-delay="0.25" className="text-[clamp(1.25rem,2.4vw,1.9rem)] font-bold leading-[1.3]">
                     Ask your own documents. Answered on your own machine.
                   </p>
                   <p lang="ja" data-fade="now" data-delay="0.6" className="mt-3 text-sm tracking-[0.12em] text-ink-dim">
@@ -139,19 +151,19 @@ export function Landing() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between border-t border-rule px-gutter py-4">
-            <p className="label">Qwen2.5-3B · DiskANN · PostgreSQL</p>
-            <p className="label hidden sm:block">v0.1 — Final year project</p>
-            <p className="label">Scroll</p>
+          <div className="flex items-center justify-between gap-4 border-t border-rule px-gutter py-4">
+            <p className="label truncate">Qwen2.5-3B · DiskANN · PostgreSQL</p>
+            <p className="label hidden md:block">v0.1 — Final year project</p>
+            <p className="label hidden sm:block">Scroll</p>
           </div>
         </section>
 
         {/* 01 — INTRODUCTION */}
         <section id="introduction" className="grid scroll-mt-20 grid-cols-12 gap-x-gutter px-gutter py-[18vh]">
-          <SectionLabel index="01" en="Introduction" ja="概要" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
+          <SectionLabel index="01" en="The voyage" ja="航海" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
           <blockquote
             data-reveal
-            className="col-span-12 font-display text-[clamp(1.9rem,4.6vw,4.2rem)] font-bold leading-[1.05] tracking-[-0.03em] lg:col-span-9 lg:col-start-2"
+            className="display col-span-12 text-[clamp(2.2rem,5.2vw,4.8rem)] leading-[1.02] lg:col-span-9 lg:col-start-2"
           >
             Every answer is traced through memory, retrieval and a critique before a word of it is written.
           </blockquote>
@@ -162,9 +174,9 @@ export function Landing() {
               answer, on one model running locally.
             </p>
             <p data-fade>
-              It is slow by design: on a CPU an answer takes minutes, because each one is planned, checked against the
-              evidence, and revised. What you upload stays private to your account, and only your own queries can
-              retrieve it.
+              Each answer is planned, checked against the evidence and revised before it is written: seconds on a GPU,
+              minutes on a CPU. What you upload stays private to your account, and only your own queries can retrieve
+              it.
             </p>
           </div>
         </section>
@@ -172,10 +184,10 @@ export function Landing() {
         {/* 02 — PIPELINE */}
         <section id="pipeline" className="scroll-mt-20 border-t border-rule px-gutter py-[18vh]">
           <div className="grid grid-cols-12 gap-x-gutter">
-            <SectionLabel index="02" en="Pipeline" ja="仕組み" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
+            <SectionLabel index="02" en="Ports of call" ja="寄港地" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
             <h2
               data-reveal
-              className="col-span-12 mb-16 font-display text-[clamp(2.4rem,6vw,5.5rem)] font-extrabold leading-[0.95] tracking-[-0.035em] lg:col-span-8 lg:col-start-2"
+              className="display col-span-12 mb-16 text-[clamp(2.8rem,7vw,6.5rem)] leading-[0.92] lg:col-span-8 lg:col-start-2"
             >
               Six stages, one model.
             </h2>
@@ -186,17 +198,20 @@ export function Landing() {
                   data-fade
                   className="group grid grid-cols-[3rem_1fr] gap-x-6 border-b border-rule py-7 transition-transform duration-700 ease-[var(--ease-out)] hover:translate-x-2 md:grid-cols-[4rem_minmax(0,21rem)_1fr_2rem] md:items-baseline"
                 >
-                  <span className="font-mono text-xs tracking-[0.2em] text-accent">{String(i + 1).padStart(2, "0")}</span>
-                  <h3 className="font-display text-2xl font-bold tracking-[-0.01em] md:text-3xl">
+                  <span className="flex items-center gap-3 font-mono text-xs tracking-[0.2em] text-accent-ink">
+                    <span className="port" aria-hidden="true" />
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <h3 className="display text-3xl md:text-4xl">
                     {s.en}
-                    <span lang="ja" className="ml-3 font-body text-sm font-normal text-ink-faint">
+                    <span lang="ja" className="ml-3 align-middle font-body text-sm font-normal normal-case tracking-normal text-ink-faint">
                       {s.ja}
                     </span>
                   </h3>
                   <p className="col-start-2 mt-2 max-w-[56ch] text-ink-dim md:col-start-3 md:mt-0">{s.body}</p>
                   <span
                     aria-hidden="true"
-                    className="hidden -translate-x-2 text-accent opacity-0 transition-all duration-700 group-hover:translate-x-0 group-hover:opacity-100 md:block"
+                    className="hidden -translate-x-2 text-accent-ink opacity-0 transition-all duration-700 group-hover:translate-x-0 group-hover:opacity-100 md:block"
                   >
                     →
                   </span>
@@ -209,10 +224,10 @@ export function Landing() {
         {/* 03 — PRIVACY: set like end credits */}
         <section id="privacy" className="scroll-mt-20 border-t border-rule px-gutter py-[18vh]">
           <div className="grid grid-cols-12 gap-x-gutter">
-            <SectionLabel index="03" en="Privacy" ja="分離" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
+            <SectionLabel index="03" en="Own waters" ja="領海" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
             <h2
               data-reveal
-              className="col-span-12 font-display text-[clamp(2.4rem,6vw,5.5rem)] font-extrabold leading-[0.95] tracking-[-0.035em] lg:col-span-5 lg:col-start-2"
+              className="display col-span-12 text-[clamp(2.8rem,7vw,6.5rem)] leading-[0.92] lg:col-span-5 lg:col-start-2"
             >
               Yours stays yours.
             </h2>
@@ -230,10 +245,10 @@ export function Landing() {
         {/* 04 — ACCESS */}
         <section id="access" className="scroll-mt-20 border-t border-rule px-gutter py-[20vh]">
           <div className="grid grid-cols-12 gap-x-gutter">
-            <SectionLabel index="04" en="Access" ja="接続" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
+            <SectionLabel index="04" en="Set sail" ja="出航" className="col-span-12 mb-14 lg:col-span-10 lg:col-start-2" />
             <p
               data-reveal
-              className="col-span-12 font-display text-[clamp(3rem,10vw,9.5rem)] font-extrabold leading-[0.88] tracking-[-0.045em] lg:col-span-10 lg:col-start-2"
+              className="display col-span-12 text-[clamp(3.6rem,12vw,11.5rem)] leading-[0.86] lg:col-span-10 lg:col-start-2"
             >
               Ask the first question.
             </p>

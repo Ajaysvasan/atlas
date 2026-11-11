@@ -1,21 +1,27 @@
 @import "tailwindcss";
 
 /*
- * Atlas — direction: sci-fi / cyber, editorial restraint. Tone: cold, precise, quiet.
- * Signature move: the meridian — a 1px orange vertical line with coordinate ticks.
+ * Atlas — direction: high-seas adventure, a shonen poster set on a sea chart. Original: no
+ * franchise's names, marks or characters. Tone: bold, salt-worn, adventurous.
+ * Signature move: the voyage route — a dashed vermilion line with port markers.
  * Only these tokens are used for colour.
  */
 :root {
-  --base: #05070a;
-  --base-2: #0a0e13;
-  --ink: #d7e2ea;
-  --ink-dim: color-mix(in oklab, var(--ink) 62%, transparent);
-  --ink-faint: color-mix(in oklab, var(--ink) 38%, transparent);
-  --rule: color-mix(in oklab, var(--ink) 16%, transparent);
+  --base: #0b1626; /* night sea */
+  --base-2: #13233a; /* a shade lighter, for panels and the chart's land */
+  --ink: #efe3c8; /* parchment */
+  --ink-dim: color-mix(in oklab, var(--ink) 66%, transparent);
+  --ink-faint: color-mix(in oklab, var(--ink) 50%, transparent);
+  --rule: color-mix(in oklab, var(--ink) 15%, transparent);
   --rule-strong: color-mix(in oklab, var(--ink) 30%, transparent);
-  --accent: #ff7a00;
+  /* Vermilion. Lines, markers and fills use --accent; small text uses --accent-ink, which is
+     the same hue made light enough for 4.5:1 on the navy (--accent alone measures 4.35:1). */
+  --accent: #e0442e;
+  --accent-ink: #f0533a;
   --accent-dim: color-mix(in oklab, var(--accent) 22%, transparent);
-  --danger: #ff5a4f;
+  /* Brass, under 5% of any page: coordinates, soundings, the compass ring. */
+  --brass: #c9a04a;
+  --danger: #ff7a6b;
 
   --ease-wipe: cubic-bezier(0.7, 0, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -33,10 +39,13 @@
   --color-rule: var(--rule);
   --color-rule-strong: var(--rule-strong);
   --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
   --color-accent-dim: var(--accent-dim);
+  --color-brass: var(--brass);
   --color-danger: var(--danger);
 
-  --font-display: "Syne", "Zen Kaku Gothic New", system-ui, sans-serif;
+  /* Anton has one weight; font-synthesis below stops browsers faking a bold one. */
+  --font-display: "Anton", "Zen Kaku Gothic New", "Noto Sans JP", Impact, system-ui, sans-serif;
   --font-body: "Zen Kaku Gothic New", "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
@@ -47,6 +56,7 @@
   html {
     background: var(--base);
     -webkit-text-size-adjust: 100%;
+    font-synthesis-weight: none;
   }
   body {
     margin: 0;
@@ -62,7 +72,7 @@
   }
   ::selection {
     background: var(--accent);
-    color: var(--base);
+    color: var(--ink);
   }
   :focus-visible {
     outline: 1px solid var(--accent);
@@ -78,20 +88,28 @@
     cursor: not-allowed;
   }
 
-  /* Film grain: cheap, and it takes the digital flatness off the black. */
+  /* Grain: reads as weathered chart paper over the navy, and takes the digital flatness off. */
   body::after {
     content: "";
     position: fixed;
     inset: 0;
     pointer-events: none;
     z-index: 9999;
-    opacity: 0.07;
+    opacity: 0.09;
     mix-blend-mode: overlay;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
   }
 }
 
 @layer components {
+  /* Poster headings in Anton: always upright weight, set in capitals. */
+  .display {
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.01em;
+  }
+
   /* 11-13px uppercase meta labels with wide tracking */
   .label {
     font-family: var(--font-mono);
@@ -206,7 +224,7 @@
   }
   .prose-atlas h3,
   .prose-atlas h4 {
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-weight: 700;
     margin: 1.4em 0 0.5em;
     line-height: 1.2;
@@ -263,10 +281,40 @@
   }
 }
 
-/* The meridian's running indicator: a tick that travels down the line. */
-@keyframes meridian-scan {
+/* The voyage route: a dashed vermilion line. It draws itself in from the top when it mounts. */
+.route-line {
+  background-image: repeating-linear-gradient(to bottom, var(--accent) 0 7px, transparent 7px 13px);
+  animation: route-draw 1.6s var(--ease-wipe) both;
+}
+@keyframes route-draw {
+  from {
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* A port on the route: a diamond, hollow until it is the current port. */
+.port {
+  width: 9px;
+  height: 9px;
+  transform: rotate(45deg);
+  border: 1.5px solid var(--accent);
+  background: var(--base);
+  transition:
+    background-color 700ms var(--ease-out),
+    box-shadow 700ms var(--ease-out);
+}
+.port[data-on="true"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-dim);
+}
+
+/* The route's running indicator: the ship's marker sails down the line while the pipeline works. */
+@keyframes route-sail {
   0% {
-    transform: translateY(-100%);
+    transform: translateY(-100%) rotate(45deg);
     opacity: 0;
   }
   15%,
@@ -274,12 +322,12 @@
     opacity: 1;
   }
   100% {
-    transform: translateY(100vh);
+    transform: translateY(100vh) rotate(45deg);
     opacity: 0;
   }
 }
-.meridian-scan {
-  animation: meridian-scan 2.4s var(--ease-wipe) infinite;
+.route-sail {
+  animation: route-sail 2.6s var(--ease-wipe) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -290,9 +338,13 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
-  .meridian-scan {
+  .route-line {
     animation: none;
-    transform: none;
+    clip-path: none;
+  }
+  .route-sail {
+    animation: none;
+    transform: rotate(45deg);
     opacity: 1;
   }
 }

@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode } from "react";
 
 /**
- * Renders the model's answer: paragraphs, headings, lists, fenced code, inline `code` and **bold**.
+ * Renders the model's answer: paragraphs, headings, lists, fenced code, inline `code`, **bold** and *italic*.
  * It builds React elements and never injects HTML, so nothing in an answer can run as markup.
  */
 type Block =
@@ -74,14 +74,17 @@ export function parseBlocks(src: string): Block[] {
 
 export function renderInline(text: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  // *italic* only when the asterisks hug a word on both sides, so "2 * 3 * 4" stays arithmetic.
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|(?<![*\w])\*(?![\s*])[^*\n]*?[^\s*]\*(?![*\w]))/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let k = 0;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const tok = m[0];
-    out.push(tok.startsWith("`") ? <code key={k++}>{tok.slice(1, -1)}</code> : <strong key={k++}>{tok.slice(2, -2)}</strong>);
+    if (tok.startsWith("`")) out.push(<code key={k++}>{tok.slice(1, -1)}</code>);
+    else if (tok.startsWith("**")) out.push(<strong key={k++}>{tok.slice(2, -2)}</strong>);
+    else out.push(<em key={k++}>{tok.slice(1, -1)}</em>);
     last = m.index + tok.length;
   }
   if (last < text.length) out.push(text.slice(last));

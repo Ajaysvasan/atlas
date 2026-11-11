@@ -5,7 +5,7 @@ export function Footer() {
     <footer className="border-t border-rule px-gutter pb-10 pt-16">
       <div className="grid grid-cols-12 gap-x-gutter gap-y-10">
         <div className="col-span-12 md:col-span-6 lg:col-start-2">
-          <p className="font-display text-[clamp(2.5rem,6vw,4.5rem)] font-extrabold leading-none tracking-[-0.04em]">ATLAS</p>
+          <p className="display text-[clamp(3rem,8vw,6rem)] leading-none tracking-[0.03em]">ATLAS</p>
           <p lang="ja" className="mt-2 text-sm tracking-[0.2em] text-ink-faint">
             アトラス
           </p>

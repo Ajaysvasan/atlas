@@ -25,7 +25,7 @@ const APP_NAV: NavItem[] = [
 export function Wordmark() {
   return (
     <Link to="/" className="group flex items-baseline gap-3" aria-label="Atlas, home">
-      <span className="font-display text-[19px] font-extrabold tracking-[-0.02em] text-ink">ATLAS</span>
+      <span className="display text-[23px] leading-none tracking-[0.04em] text-ink">ATLAS</span>
       <span lang="ja" className="hidden font-body text-[11px] tracking-[0.25em] text-ink-faint sm:inline">
         アトラス
       </span>
@@ -150,7 +150,7 @@ function OverlayMenu({ nav, onClose }: { nav: NavItem[]; onClose: () => void }) 
     mm.add(MOTION_OK, () => {
       gsap
         .timeline()
-        .fromTo(root.querySelector("[data-wipe]"), { scaleX: 0 }, { scaleX: 1, transformOrigin: "left", duration: 0.55, ease: EASE_WIPE })
+        .fromTo(root.querySelector("[data-wipe]"), { scaleY: 0 }, { scaleY: 1, transformOrigin: "top", duration: 0.55, ease: EASE_WIPE })
         .from(root.querySelectorAll("[data-item]"), { yPercent: 110, duration: 0.8, ease: "power4.out", stagger: 0.06 }, "-=0.15");
     });
 
@@ -162,7 +162,7 @@ function OverlayMenu({ nav, onClose }: { nav: NavItem[]; onClose: () => void }) 
     };
   }, [onClose]);
 
-  const linkCls = "block font-display text-[clamp(2.4rem,11vw,4.5rem)] font-bold leading-[1.05] tracking-[-0.02em]";
+  const linkCls = "display block whitespace-nowrap text-[clamp(2.4rem,10.5vw,5rem)] leading-[1.05]";
 
   return (
     <div
@@ -173,7 +173,7 @@ function OverlayMenu({ nav, onClose }: { nav: NavItem[]; onClose: () => void }) 
       aria-label="Menu"
       className="fixed inset-0 z-50 flex flex-col bg-base px-gutter"
     >
-      <div data-wipe className="absolute inset-y-0 left-6 w-px bg-accent" aria-hidden="true" />
+      <div data-wipe className="route-line absolute bottom-0 left-6 top-14 w-[2px]" aria-hidden="true" />
       <div className="flex h-14 items-center justify-between">
         <Wordmark />
         <button type="button" className="label" onClick={onClose}>
@@ -184,9 +184,9 @@ function OverlayMenu({ nav, onClose }: { nav: NavItem[]; onClose: () => void }) 
         {nav.map((item, i) => (
           <span key={item.to} className="mask">
             <Link data-item to={item.to} className={linkCls} onClick={onClose}>
-              <span className="mr-4 align-top font-mono text-xs text-accent">0{i + 1}</span>
+              <span className="mr-4 align-top font-mono text-xs normal-case tracking-[0.2em] text-accent-ink">0{i + 1}</span>
               {item.en}
-              <span lang="ja" className="ml-4 align-middle font-body text-sm font-normal text-ink-faint">
+              <span lang="ja" className="ml-4 align-middle font-body text-sm font-normal normal-case tracking-normal text-ink-faint">
                 {item.ja}
               </span>
             </Link>

@@ -119,8 +119,8 @@ export function Documents() {
   return (
     <div className="px-gutter pb-24 pt-12">
       <div className="grid grid-cols-12 gap-x-gutter">
-        <SectionLabel index="02" en="Documents" ja="資料" className="col-span-12 mb-10 lg:col-span-10 lg:col-start-2" />
-        <h1 className="col-span-12 font-display text-[clamp(2.6rem,7vw,6rem)] font-extrabold leading-[0.92] tracking-[-0.04em] lg:col-span-7 lg:col-start-2">
+        <SectionLabel index="02" en="Cargo" ja="積荷" className="col-span-12 mb-10 lg:col-span-10 lg:col-start-2" />
+        <h1 className="display col-span-12 text-[clamp(3rem,8vw,7rem)] leading-[0.9] lg:col-span-7 lg:col-start-2">
           Give Atlas something to read.
         </h1>
         <p className="col-span-12 mt-6 max-w-xl text-ink-dim lg:col-span-4 lg:col-start-9 lg:mt-3">
@@ -145,7 +145,7 @@ export function Documents() {
             <p className="label">
               {UPLOAD_LIMITS.extensions.map((e) => `.${e}`).join("  ")}
             </p>
-            <p className="font-display text-2xl font-bold tracking-[-0.01em] sm:text-3xl">Drop files here</p>
+            <p className="display text-3xl sm:text-4xl">Drop files here</p>
             <button type="button" className="btn" onClick={() => input.current?.click()} disabled={busy}>
               Choose files
             </button>
@@ -249,7 +249,7 @@ function Progress({ phase }: { phase: Phase }) {
   return (
     <div className="mt-10" role="status" aria-live="polite">
       <div className="flex justify-between">
-        <p className="label text-accent">{phase.kind === "uploading" ? `Uploading · ${pct}%` : "Ingesting · parsing, chunking, embedding"}</p>
+        <p className="label text-accent-ink">{phase.kind === "uploading" ? `Uploading · ${pct}%` : "Ingesting · parsing, chunking, embedding"}</p>
         {phase.kind === "ingesting" && <Elapsed since={phase.since} />}
       </div>
       <div className="mt-3 h-px w-full bg-rule">
@@ -280,7 +280,7 @@ function IngestReport({ result }: { result: { httpStatus: number; body: IngestRe
   return (
     <section className="mt-12" aria-label="Ingestion report">
       <div className="flex flex-wrap items-baseline justify-between gap-4 border-b border-rule pb-4">
-        <p className="font-display text-2xl font-bold tracking-[-0.01em]">
+        <p className="display text-3xl">
           {HTTP_SUMMARY[httpStatus] ?? body.status}
         </p>
         <p className="label">
@@ -290,7 +290,7 @@ function IngestReport({ result }: { result: { httpStatus: number; body: IngestRe
       <ul>
         {body.files.map((f) => (
           <li key={f.index} className="grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-4 border-b border-rule py-4 sm:grid-cols-[2.5rem_minmax(0,1fr)_9rem_12rem]">
-            <span className="font-mono text-xs text-accent">{String(f.index + 1).padStart(2, "0")}</span>
+            <span className="font-mono text-xs text-accent-ink">{String(f.index + 1).padStart(2, "0")}</span>
             <span className="min-w-0">
               <span className="block truncate">{f.filename}</span>
               {f.message && <span className="text-sm text-ink-dim">{f.message}</span>}
