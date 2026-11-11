@@ -139,7 +139,7 @@ uv run --no-sync pytest test/live_testing/ -v                    # real PostgreS
 uv run --no-sync python scripts/generate_grpc.py --check         # are the gRPC bindings current?
 ```
 
-- **Expected result:** the full run has **2425 passed**: 2411 without the model, plus 14
+- **Expected result:** the full run has **2450 passed**: 2436 without the model, plus 14
   `real_model` tests.
 - **Isolation:** the root `conftest.py` keeps the default suite off your real data. It
   redirects every data path, swaps PostgreSQL for in-memory stand-ins, and refuses database
