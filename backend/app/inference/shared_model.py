@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterator, List, NamedTuple
 
 from config import Config, get_logger
+from inference import devices
 from inference.inference_exceptions import (
     InferenceError,
     ModelFileMissing,
@@ -33,6 +34,8 @@ class ModelSpec(NamedTuple):
     n_ctx: int = Config.SHARED_MODEL_CONTEXT_WINDOW
     n_threads: int | None = Config.MODEL_THREADS
     seed: int = 7
+    # None: decided at load (devices.gpu_layers); 0 forces the CPU.
+    n_gpu_layers: int | None = None
 
     @staticmethod
     def draft() -> "ModelSpec":
@@ -87,6 +90,8 @@ def _default_loader(spec: ModelSpec):
     options = dict(model_path=str(spec.path), n_ctx=spec.n_ctx, seed=spec.seed, verbose=False)
     if spec.n_threads:
         options["n_threads"] = spec.n_threads
+    if spec.n_gpu_layers:
+        options["n_gpu_layers"] = spec.n_gpu_layers
     return Llama(**options)
 
 
@@ -102,6 +107,10 @@ class SharedModel:
         self.__fingerprint: str | None = None
         self.load_error: str | None = None
         self.load_ms: float | None = None
+        # What the resident instance actually got: None until loaded, 0 on the CPU.
+        self.gpu_layers: int | None = None
+        # Why a GPU load fell back to the CPU, if it did.
+        self.offload_error: str | None = None
         self.__calls: Dict[str, int] = {}
         self.__prompt_tokens = 0
         self.__evaluated = 0
@@ -123,6 +132,11 @@ class SharedModel:
             except OSError as error:
                 raise ModelUnavailable(f"cannot read {self.spec.path}: {error}") from error
             payload = f"{model}|n_ctx={self.spec.n_ctx}|format={CHECKPOINT_FORMAT}|{_runtime_version()}"
+            layers = self.gpu_layers if self.gpu_layers is not None else self.__requested_layers()
+            if layers:
+                # A GPU computes the cache differently from the CPU, so its states are kept apart.
+                # CPU fingerprints are unchanged, which keeps checkpoints saved before this valid.
+                payload += f"|gpu_layers={layers}"
             self.__fingerprint = hashlib.sha256(payload.encode()).hexdigest()
         return self.__fingerprint
 
@@ -136,18 +150,34 @@ class SharedModel:
                 "Run:  uv run python download_models/download_draft_model.py"
             )
         started = time.monotonic()
+        layers = self.__requested_layers()
         try:
-            llm = self.__loader(self.spec)
+            llm = self.__loader(self.spec._replace(n_gpu_layers=layers))
         except Exception as error:
-            self.load_error = str(error)
-            raise ModelUnavailable(f"could not load {self.spec.path}: {error}") from error
+            if not layers:
+                self.load_error = str(error)
+                raise ModelUnavailable(f"could not load {self.spec.path}: {error}") from error
+            logger.warning("Could not load %s on the GPU (%s); loading it on the CPU",
+                           self.spec.path.name, error)
+            self.offload_error = str(error).splitlines()[0][:200] if str(error) else type(error).__name__
+            layers = 0
+            try:
+                llm = self.__loader(self.spec._replace(n_gpu_layers=0))
+            except Exception as cpu_error:
+                self.load_error = str(cpu_error)
+                raise ModelUnavailable(f"could not load {self.spec.path}: {cpu_error}") from cpu_error
         self.load_ms = (time.monotonic() - started) * 1000.0
         self.load_error = None
+        self.gpu_layers = layers
+        self.__fingerprint = None  # it depends on where the model landed
         self.__meter = _EvalMeter(llm) if hasattr(llm, "eval") else None
         self.__llm = llm
-        logger.info("Loaded %s (n_ctx=%d) in %.0f ms", self.spec.path.name, self.spec.n_ctx,
-                    self.load_ms)
+        logger.info("Loaded %s (n_ctx=%d, %s) in %.0f ms", self.spec.path.name, self.spec.n_ctx,
+                    describe_layers(layers), self.load_ms)
         return llm
+
+    def __requested_layers(self) -> int:
+        return devices.gpu_layers() if self.spec.n_gpu_layers is None else self.spec.n_gpu_layers
 
     def ensure_loaded(self) -> None:
         with self.__lock:
@@ -255,6 +285,13 @@ class ChatAdapter:
 
     def create_chat_completion(self, **request) -> Dict:
         return self.model.chat_completion(purpose=self.purpose, **request)
+
+
+def describe_layers(layers: int | None) -> str:
+    """'CPU', 'GPU, every layer' or 'GPU, n layers', for logs and status."""
+    if not layers:
+        return "CPU"
+    return "GPU, every layer" if layers < 0 else f"GPU, {layers} layer(s)"
 
 
 def _runtime_version() -> str:

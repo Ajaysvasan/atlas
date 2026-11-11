@@ -70,9 +70,13 @@ CPython 3.11 if needed. **3.11 is a hard ceiling, not a preference** —
 `diskannpy` has never published a wheel past `cp311` in its entire release
 history, so a newer Python has no on-disk ANN index without a source build.
 `llama-cpp-python` is deliberately not a dependency, so **`uv sync` removes it**.
-Reinstall with `uv pip install llama-cpp-python` (CPU; add `CMAKE_ARGS=-DGGML_CUDA=on`
-for an NVIDIA GPU). `download_models/install_llama_cpp.py` detects the GPU but
-calls `python -m pip`, which the uv venv lacks (bug 9.9). The draft model is
+Reinstall with `uv run --no-sync python download_models/install_llama_cpp.py`: it
+picks the backend (CUDA with the GPU's `CMAKE_CUDA_ARCHITECTURES`, ROCm, Metal, CPU),
+keeps the installed version, installs through `uv pip --python <venv>` when the venv
+has no pip, rebuilds only llama-cpp-python (`--reinstall-package`, so numpy stays as
+locked), refuses a CUDA build without `nvcc` or below 12.8 for Blackwell, and stops
+with the Secure Boot fix when an NVIDIA card is present but `nvidia-smi` fails
+(`--backend`, `--version`, `--dry-run`). The draft model is
 fetched by `uv run python download_models/download_draft_model.py`; set
 `HF_HUB_DISABLE_XET=1` if the Xet transfer stalls.
 
@@ -99,7 +103,7 @@ uv run pytest test/ -m real_model                 # Real draft model; self-skipp
 uv run pytest test/data_layer_testing/test_data_layer_production.py::TestClass::test_name -v
 ```
 
-**2348 passed** is the expected full result: 2334 without the model and 14
+**2425 passed** is the expected full result: 2411 without the model and 14
 `real_model` tests (KV checkpoints against llama.cpp, and the pipeline with the
 real model). The real-model tests skip themselves when `llama_cpp` or the model
 file is missing; the live tests when PostgreSQL is unreachable. `-rs` prints
@@ -199,6 +203,7 @@ Depth comes from decomposition, with no new classification: `DOUBT` → **DIRECT
 ### Inference (`inference/`)
 
 - **One model per process** (`SharedModel`, `runtime.shared_runtime()`): loaded on first use at `Config.SHARED_MODEL_CONTEXT_WINDOW` (32768), every call under one `RLock`. Query decomposition's `DraftModel()` and the summariser borrow it; `ReasoningModel` sends worker/stitch jobs to the main model (the draft unless `Config.MAIN_MODEL_PATH` is set). Callers use `infer(system, user, schema=, max_tokens=, purpose=)` (`model_port.TextModel`).
+- **Devices** (`inference/devices.py`): the AI models go to the GPU when one is usable; everything else (DiskANN, SQLite, PostgreSQL, parsing, snapshot similarity) stays on the CPU. llama.cpp gets `n_gpu_layers = Config.MODEL_GPU_LAYERS` (`ATLAS_GPU_LAYERS`, default -1 = every layer) only when `llama_cpp.llama_supports_gpu_offload()` — a CUDA build *and* a visible device — else 0. `SharedModel` records where it landed (`gpu_layers`); a GPU load that raises is retried on the CPU, with the reason in `offload_error` (status DEGRADED, and a warm-up warning). The embedder and reranker are built through `load_on_device` on `torch_device()` (`ATLAS_TORCH_DEVICE`: auto/cuda/cpu), with the same CPU fallback. The checkpoint fingerprint gains `|gpu_layers=n` only when offloaded, so CPU fingerprints — and the checkpoints saved under them — are unchanged, and GPU states are never restored into a CPU run or the reverse. `status` reports each model's placement and the GPU's name; the monitor still imports neither torch nor llama.cpp (a test checks).
 - **KV checkpoints** (`KVSessionManager`, `CheckpointStore`): main generation formats and tokenises the prompt with the model's own template, restores the conversation's saved state when its tokens are a longer exact prefix than what is resident, generates, then truncates to the evidence-free prefix (system + history) and saves it. Files in `data/inference_cache/` (0600, atomic, no pickle) are loaded only if model fingerprint, context window, format version and SHA-256 match the `inference_checkpoints` row; anything else is discarded and recomputed. The generation history window moves in half-window steps so the saved prefix stays reusable. llama.cpp's results depend on batch partitioning, so a cold recompute is not bit-identical to a restored run — compare like with like.
 
 ### Generation Layer (`generation_layer/`)
@@ -302,7 +307,7 @@ Central config class with constants:
 - `MAX_VECTORS`: 1,000,000 — the corpus size designed for; no index is sized to it
 - `VECTOR_INDEX_RAM_MB` (512), `RECENT_VECTOR_CAPACITY` (20,000), `INDEX_REBUILD_AT` (10,000), `MEMORY_HEADROOM_MB` (256), `GLOBAL_VECTOR_SCOPE` (`"global"`)
 - `INDEX_PATH`, `DB_PATH`, `CONVERSATION` paths
-- `SHARED_MODEL_CONTEXT_WINDOW` (32768), `MAIN_MODEL_PATH` (None = the draft answers), `MODEL_THREADS`
+- `SHARED_MODEL_CONTEXT_WINDOW` (32768), `MAIN_MODEL_PATH` (None = the draft answers), `MODEL_THREADS`, `MODEL_GPU_LAYERS` (-1; `ATLAS_GPU_LAYERS`), `TORCH_DEVICE` (`auto`; `ATLAS_TORCH_DEVICE`) — both validated at import
 - `THINKING_*` budgets (workers 2, job retries 1, runtime retries 1, plan revisions 1, planned jobs 3, deadline 900 s); `GENERATION_MAX_TOKENS` (1200), `GENERATION_CONTEXT_TOKENS` (12000), `GENERATION_HISTORY_TURNS` (6)
 - `INFERENCE_CACHE_DIR`, `INFERENCE_CACHE_MAX_BYTES` (2 GiB, LRU); `RUN_DIR` (`data/run`, the service lock and state)
 - `MAX_INGESTION_STORAGE_BYTES` (1 GiB), `MAX_ACQUISITION_STORAGE_BYTES` (256 MiB), `MAX_ACQUISITION_DOWNLOAD_BYTES` (16 MiB): bytes or `None`; the environment overrides each (`null`/`none` = unlimited, anything non-positive is refused at import). `INGESTION_DISK_RESERVE_BYTES` (512 MiB), `CORPUS_DIR`
@@ -318,7 +323,7 @@ Central config class with constants:
 
 **Open:**
 - Python and MDN docs are reachable only by explicit URL: no usable search, and their sitemaps list version roots / gzipped children
-- Bug 9.9 (P2): `uv sync` removes llama-cpp-python and `install_llama_cpp.py` cannot reinstall it (no pip in the venv)
+- Bug 9.9 (P2): `uv sync` removes llama-cpp-python (`install_llama_cpp.py` now reinstalls it through uv)
 - Bug 9.8 (P3): hydration's `Passage.document_id` is a context id for hierarchical chunks (worked around in provenance)
 - No corpus or conversation deletion yet; `CheckpointStore.delete_conversation` is ready for it
 - gRPC: a query that has started runs to completion even after its caller times out or disconnects (only queued requests are dropped); the conversation it opened stays

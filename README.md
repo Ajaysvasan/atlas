@@ -67,8 +67,8 @@ backend/
 | Node.js | 20.19+ or 22.12+ | web frontend |
 | Docker | any | only for the Java tests (Testcontainers) |
 
-The model takes about 2 GB of disk. A query runs on the CPU by default and takes minutes;
-an NVIDIA GPU makes it much faster.
+The model takes about 2 GB of disk. On the CPU a query takes minutes; on an NVIDIA GPU it
+takes seconds. See [Using an NVIDIA GPU](#using-an-nvidia-gpu-optional).
 
 ### 1. Database
 
@@ -86,7 +86,7 @@ Java API creates `user_table` with Flyway on first start.
 cd backend/app
 cp .env.example .env                       # then set DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 uv sync --all-extras                       # builds .venv from uv.lock
-uv pip install llama-cpp-python            # CPU; for an NVIDIA GPU: CMAKE_ARGS=-DGGML_CUDA=on uv pip install llama-cpp-python
+uv run --no-sync python download_models/install_llama_cpp.py   # llama-cpp-python for this machine's GPU or CPU
 uv run --no-sync python download_models/download_draft_model.py   # Qwen2.5-3B-Instruct, Q4_K_M
 uv run --no-sync python scripts/smoke.py   # optional: one real round trip through PostgreSQL
 ```
@@ -98,6 +98,38 @@ re-syncs the environment and **removes `llama-cpp-python`**, which isn't in the 
 
 Optional: `uv run --no-sync python scripts/build_corpus.py` ingests a starter corpus of
 documentation pages from postgresql.org, sqlite.org and cassandra.apache.org.
+
+#### Using an NVIDIA GPU (optional)
+
+The language model (llama.cpp), the embedder and the reranker run on the GPU when one is
+usable. Everything else (the vector index, the databases, parsing and chunking) stays on the
+CPU. Nothing needs configuring, but the GPU has to be usable first:
+
+1. **The NVIDIA driver must be loaded.** `nvidia-smi` should list the card. On Linux with
+   Secure Boot, the driver module from akmods is signed with a local key the firmware doesn't
+   trust yet, so it's rejected at boot and `nvidia-smi` fails. Enroll the key once, then reboot
+   and choose *Enroll MOK* on the blue screen:
+   ```bash
+   sudo mokutil --import /etc/pki/akmods/certs/public_key.der
+   ```
+2. **The CUDA toolkit (`nvcc`)** must be on `PATH` to compile llama.cpp for the GPU. RTX 50xx
+   (Blackwell) cards need CUDA 12.8 or later.
+3. **Rebuild llama-cpp-python for CUDA.** The installer detects the GPU and its architecture,
+   and keeps the installed version:
+   ```bash
+   uv run --no-sync python download_models/install_llama_cpp.py
+   ```
+
+Then `main.py status` shows, for example, `resident on the GPU (every layer)` for the model
+and `on the GPU (NVIDIA GeForce RTX ...)` for the embedder and reranker. If a GPU load fails
+(for example, out of GPU memory), that model falls back to the CPU and `status` says why.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ATLAS_GPU_LAYERS` | `-1` | Model layers on the GPU: `-1` all of them, `0` none (CPU only), or a number for a GPU with little memory |
+| `ATLAS_TORCH_DEVICE` | `auto` | Embedder and reranker: `auto` (GPU when present), `cuda` or `cpu` |
+
+With the defaults, Atlas uses about 4 to 4.5 GB of GPU memory at its 32k-token context.
 
 ### 3. Java API
 
@@ -189,5 +221,6 @@ These suites write throwaway data. See each component's README for details.
 | Queries fail with `BACKEND_UNAVAILABLE` | The pipeline isn't running yet, or the two backends have different `ATLAS_GRPC_SERVICE_TOKEN` values. `source` the same secrets file in both terminals and restart both. |
 | The Java API can't start: port 8080 in use | Another service holds port 8080. Run it with `ATLAS_HTTP_PORT=8081 ./mvnw spring-boot:run` and set `VITE_API_BASE_URL=http://localhost:8081`. |
 | Browser CORS errors | The frontend isn't on `http://localhost:5173` or `:3000`. Add its address to `ATLAS_ALLOWED_ORIGINS`. |
-| `No module named 'llama_cpp'` | `uv sync` removed it. Reinstall it with `uv pip install llama-cpp-python`, and use `uv run --no-sync` from then on. |
+| `No module named 'llama_cpp'` | `uv sync` removed it. Reinstall it with `uv run --no-sync python download_models/install_llama_cpp.py`, and use `uv run --no-sync` from then on. |
+| `status` says `no GPU offload` | llama-cpp-python is a CPU build, or the GPU isn't visible. Check `nvidia-smi`, then rerun the installer. See [Using an NVIDIA GPU](#using-an-nvidia-gpu-optional). |
 | Another Atlas is running | `start`, `serve` and `-q` lock the data directory. Stop the other one (`main.py status` shows it). |

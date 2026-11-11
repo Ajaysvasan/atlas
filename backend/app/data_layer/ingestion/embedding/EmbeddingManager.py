@@ -12,6 +12,7 @@ from data_layer.datalayer_exceptions.datalayer_exceptions import (
 from data_layer.ingestion.embedding.vector_ids import vector_id_for
 from data_layer.ingestion.metadata.metadata import EmbeddedChunkMetaData
 from data_layer.ingestion.nodes.nodes import EmbeddedChunk, HChunk, RChunk
+from inference.devices import CPU, load_on_device, release_cuda_cache
 
 
 logger = get_logger(__name__)
@@ -27,7 +28,8 @@ class EmbeddingManager:
     ):
         self.model_name = model_name
         with log_timing(logger, "loading embedding model", model=model_name):
-            self.model = SentenceTransformer(model_name)
+            self.model, self.device = load_on_device(
+                lambda device: SentenceTransformer(model_name, device=device), "embedding model")
         self.embedding_dimension = embeddding_dimension
 
     def __generate_vector_id(self, chunk_id: str) -> int:
@@ -126,8 +128,11 @@ class EmbeddingManager:
         """Release the model. Safe to call more than once."""
         if getattr(self, "model", None) is None:
             return
+        on_gpu = getattr(self, "device", CPU) != CPU
         self.model = None
         gc.collect()
+        if on_gpu:
+            release_cuda_cache()
 
     def __enter__(self) -> "EmbeddingManager":
         return self

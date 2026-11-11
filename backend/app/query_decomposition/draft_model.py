@@ -51,10 +51,18 @@ class DraftModel:
                 f"Draft model not found at {self.model_file}.\n"
                 "Run:  python download_models/download_draft_model.py"
             )
+        from inference.devices import gpu_layers
+
         logger.info("Loading draft model from %s", self.model_file)
-        self.__model = Llama(
-            model_path=str(self.model_file), n_ctx=self.context_window, verbose=False
-        )
+        options = dict(model_path=str(self.model_file), n_ctx=self.context_window, verbose=False)
+        layers = gpu_layers()
+        try:
+            self.__model = Llama(**options, **({"n_gpu_layers": layers} if layers else {}))
+        except Exception as error:
+            if not layers:
+                raise
+            logger.warning("Could not load the draft model on the GPU (%s); loading it on the CPU", error)
+            self.__model = Llama(**options)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

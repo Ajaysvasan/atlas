@@ -89,6 +89,21 @@ def _sqlite_count(path: Path, table: str) -> int:
 NOT_RUNNING = "Atlas is not running"
 
 
+def _placement(layers) -> str:
+    """'CPU', 'GPU (every layer)' or 'GPU (n layers)' from a published gpu_layers."""
+    if not isinstance(layers, int) or layers == 0:
+        return "CPU"
+    return "GPU (every layer)" if layers < 0 else f"GPU ({layers} layers)"
+
+
+def _device_name(device: str, facts: dict) -> str:
+    """'the CPU', or the GPU's name when the service published one."""
+    if device == "cpu":
+        return "the CPU"
+    gpu = (facts.get("devices") or {}).get("gpu")
+    return f"the GPU ({gpu})" if gpu else "the GPU"
+
+
 def check_all(components) -> List[ComponentHealth]:
     """Every component's health from inside the running process; `components` is bootstrap.Components."""
     from observability.service_state import service_facts
@@ -149,10 +164,15 @@ def check(facts: dict | None, absent: str = NOT_RUNNING) -> List[ComponentHealth
                 return Health.UNAVAILABLE, f"failed to load: {published['load_error'][:120]}"
             if not published.get("loaded"):
                 return Health.NOT_INITIALIZED, f"{name} present; loads on first use"
-            return Health.HEALTHY, (
-                f"{name} resident, n_ctx={published.get('n_ctx')}, "
+            detail = (
+                f"{name} resident on the {_placement(published.get('gpu_layers'))}, n_ctx={published.get('n_ctx')}, "
                 f"{published.get('calls', 0)} call(s), {published.get('failures', 0)} failure(s)"
             )
+            if published.get("offload_error"):
+                return Health.DEGRADED, f"{detail}; the GPU load failed ({published['offload_error'][:100]})"
+            if not published.get("gpu_layers") and Config.MODEL_GPU_LAYERS != 0:
+                detail += "; no GPU offload (llama-cpp-python is a CPU build, or no GPU is visible)"
+            return Health.HEALTHY, detail
         return probe
 
     def draft_model():
@@ -263,7 +283,9 @@ def check(facts: dict | None, absent: str = NOT_RUNNING) -> List[ComponentHealth
         if not retriever.get("built"):
             return Health.NOT_INITIALIZED, "builds on first query (loads reranker and index)"
         generation = retriever.get("generation")
-        return Health.HEALTHY, f"ready; searching generation {generation or 'none (recent vectors only)'}"
+        device = (facts.get("devices") or {}).get("reranker")
+        reranker = f"; reranker on {_device_name(device, facts)}" if device else ""
+        return Health.HEALTHY, f"ready; searching generation {generation or 'none (recent vectors only)'}{reranker}"
 
     def ksv():
         from knowledge_sufficiency.thresholds import PARTIAL_FLOOR, SUFFICIENT_FLOOR
@@ -362,7 +384,8 @@ def check(facts: dict | None, absent: str = NOT_RUNNING) -> List[ComponentHealth
         if not running:
             embedder = f"embedder loaded by `start` ({absent})"
         elif facts.get("embedder_resident"):
-            embedder = "embedder resident"
+            device = (facts.get("devices") or {}).get("embedder")
+            embedder = f"embedder resident on {_device_name(device, facts)}" if device else "embedder resident"
         else:
             embedder = "embedder loads on first query"
         return Health.HEALTHY, f"routing, recall and storage ready; {embedder}"

@@ -36,6 +36,13 @@ class Config:
     SHARED_MODEL_CONTEXT_WINDOW = 32_768
     DRAFT_MODEL_CONTEXT_WINDOW = SHARED_MODEL_CONTEXT_WINDOW
     MODEL_THREADS = max(1, min(8, (os.cpu_count() or 2) // 2))
+    # Model layers llama.cpp offloads to the GPU: -1 every layer, 0 none. Takes
+    # effect only when llama-cpp-python is a GPU build and a GPU is visible;
+    # otherwise the model runs on the CPU. Environment: ATLAS_GPU_LAYERS.
+    MODEL_GPU_LAYERS = -1
+    # Where the embedder and reranker run: "auto" (CUDA when available, else
+    # CPU), "cuda" or "cpu". Environment: ATLAS_TORCH_DEVICE.
+    TORCH_DEVICE = "auto"
     INDEX_PATH = os.path.join(DATA_DIR, "disk_ann_index")
     DISTANCE_METRIC = "l2"
     VECTOR_DTYPE = np.float32
@@ -158,6 +165,32 @@ def parse_storage_limit(value) -> int | None:
     return value
 
 
+def parse_gpu_layers(value) -> int:
+    """-1 (every layer), 0 (CPU only) or a positive layer count; anything else is refused."""
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError as error:
+            raise ValueError(f"ATLAS_GPU_LAYERS {value!r} is not a whole number") from error
+    if isinstance(value, bool) or not isinstance(value, int) or value < -1:
+        raise ValueError(f"ATLAS_GPU_LAYERS must be -1, 0 or a positive number of layers, got {value!r}")
+    return value
+
+
+TORCH_DEVICES = ("auto", "cuda", "cpu")
+
+
+def parse_torch_device(value) -> str:
+    """One of TORCH_DEVICES; anything else is refused."""
+    text = str(value).strip().lower()
+    if text not in TORCH_DEVICES:
+        raise ValueError(f"ATLAS_TORCH_DEVICE must be one of {', '.join(TORCH_DEVICES)}, got {value!r}")
+    return text
+
+
+Config.MODEL_GPU_LAYERS = parse_gpu_layers(os.environ.get("ATLAS_GPU_LAYERS", Config.MODEL_GPU_LAYERS))
+Config.TORCH_DEVICE = parse_torch_device(os.environ.get("ATLAS_TORCH_DEVICE", Config.TORCH_DEVICE))
+
 for _limit in (
     "MAX_INGESTION_STORAGE_BYTES",
     "MAX_ACQUISITION_STORAGE_BYTES",
@@ -175,5 +208,7 @@ __all__ = [
     "log_context",
     "log_timing",
     "new_correlation_id",
+    "parse_gpu_layers",
     "parse_storage_limit",
+    "parse_torch_device",
 ]

@@ -26,7 +26,7 @@ versions.
 cp .env.example .env                       # DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 createdb Vectors && psql -d Vectors -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 uv sync --all-extras                       # .venv from uv.lock
-uv pip install llama-cpp-python            # CPU; NVIDIA GPU: CMAKE_ARGS=-DGGML_CUDA=on uv pip install llama-cpp-python
+uv run --no-sync python download_models/install_llama_cpp.py   # llama-cpp-python for this machine's GPU or CPU
 uv run --no-sync python download_models/download_draft_model.py   # ~2 GB into models/draft_model/
 uv run --no-sync python scripts/smoke.py   # optional: one real round trip through PostgreSQL
 ```
@@ -35,6 +35,15 @@ uv run --no-sync python scripts/smoke.py   # optional: one real round trip throu
 use **`uv run --no-sync`**: a plain `uv sync` or `uv run` removes `llama-cpp-python`,
 because it isn't in the lock file (bug 9.9). If the model download stalls, set
 `HF_HUB_DISABLE_XET=1`.
+
+**GPU.** The language model, the embedder and the reranker run on an NVIDIA GPU when one is
+usable; everything else stays on the CPU. That needs a loaded driver (`nvidia-smi` works),
+the CUDA toolkit (12.8+ for RTX 50xx), and llama-cpp-python rebuilt by the installer above.
+The installer stops with the fix when the card is present but its driver isn't loaded (on
+Linux with Secure Boot, an akmods key that was never enrolled). `ATLAS_GPU_LAYERS` (`-1` all,
+`0` CPU only, or a count) and `ATLAS_TORCH_DEVICE` (`auto`, `cuda`, `cpu`) override the
+defaults. A GPU load that fails falls back to the CPU, and `main.py status` shows where each
+model is running and why. Steps: [project README](../../README.md#using-an-nvidia-gpu-optional).
 
 Optional: `uv run --no-sync python scripts/build_corpus.py` ingests 58 documentation pages
 from postgresql.org, sqlite.org and cassandra.apache.org, within the storage quota. Check
@@ -130,7 +139,7 @@ uv run --no-sync pytest test/live_testing/ -v                    # real PostgreS
 uv run --no-sync python scripts/generate_grpc.py --check         # are the gRPC bindings current?
 ```
 
-- **Expected result:** the full run has **2348 passed**: 2334 without the model, plus 14
+- **Expected result:** the full run has **2425 passed**: 2411 without the model, plus 14
   `real_model` tests.
 - **Isolation:** the root `conftest.py` keeps the default suite off your real data. It
   redirects every data path, swaps PostgreSQL for in-memory stand-ins, and refuses database
@@ -157,8 +166,8 @@ Java API with per-user isolation of conversations, projects and uploads.
 
 Open issues (details in [`bugs.md`](bugs.md) and [`production_impact_report.md`](production_impact_report.md)):
 
-- `uv sync` removes `llama-cpp-python`, and `install_llama_cpp.py` can't reinstall it
-  (bug 9.9).
+- `uv sync` removes `llama-cpp-python` (bug 9.9). `install_llama_cpp.py` now reinstalls it
+  through uv, for the GPU when there is one.
 - There is no deletion of documents or conversations yet.
 - The storage quota is one pool shared by every user.
 - Over gRPC, a query that has started runs to completion even if its caller has gone away.

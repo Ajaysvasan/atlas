@@ -78,22 +78,39 @@ def _model_facts(shared) -> Dict[str, object]:
         "n_ctx": shared.spec.n_ctx,
         "loaded": shared.loaded,
         "load_error": shared.load_error,
+        "gpu_layers": getattr(shared, "gpu_layers", None),
+        "offload_error": getattr(shared, "offload_error", None),
         "calls": calls,
         "failures": failures,
     }
 
 
+def _any_gpu(runtime, embedder, models) -> bool:
+    """Whether anything resident is on the GPU, so its name is worth asking torch for."""
+    layers = [getattr(runtime.draft, "gpu_layers", None), getattr(runtime.main, "gpu_layers", None)]
+    torch_devices = [getattr(embedder, "device", None), getattr(getattr(models, "reranker", None), "device", None)]
+    return any(isinstance(n, int) and n != 0 for n in layers) or any(d not in (None, "cpu") for d in torch_devices)
+
+
 def service_facts(components) -> Dict[str, object]:
     """What only the running process knows: what is loaded, and its counters. Never prompt text."""
+    from inference.devices import gpu_name
+
     runtime = components.runtime
     models = getattr(components, "models", None)
     handle = components.retriever
     retriever = handle.retriever
     sessions = components.sessions
+    embedder = getattr(models, "_MemoryModels__embedder", None) if models is not None else None
     return {
         "draft": _model_facts(runtime.draft),
         "main": _model_facts(runtime.main) if runtime.separate_main else None,
-        "embedder_resident": models is not None and getattr(models, "_MemoryModels__embedder", None) is not None,
+        "embedder_resident": embedder is not None,
+        "devices": {
+            "embedder": getattr(embedder, "device", None),
+            "reranker": getattr(getattr(models, "reranker", None), "device", None),
+            "gpu": gpu_name() if _any_gpu(runtime, embedder, models) else None,
+        },
         "retriever": {
             "built": retriever is not None,
             "error": handle.error,

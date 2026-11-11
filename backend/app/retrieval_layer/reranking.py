@@ -33,6 +33,8 @@ class Reranker:
         self.model_name = model_name
         self.batch_size = batch_size
         self.__scorer = scorer
+        # Where the loaded cross-encoder runs; None until loaded (or with an injected scorer).
+        self.device: str | None = None
 
     @property
     def scorer(self) -> Scorer:
@@ -44,11 +46,15 @@ class Reranker:
     def __load(self) -> Scorer:
         try:
             from sentence_transformers import CrossEncoder
-            model = CrossEncoder(self.model_name)
+
+            from inference.devices import load_on_device
+
+            model, self.device = load_on_device(
+                lambda device: CrossEncoder(self.model_name, device=device), "reranking model")
         except (ImportError , Exception) as error:
             # TODO : Implement a logger here which should also contain the stack trace as well
             raise RerankerUnavailable(self.model_name, str(error)) from error
-        logger.info("Loaded the reranking model %s", self.model_name)
+        logger.info("Loaded the reranking model %s on %s", self.model_name, self.device)
         return lambda pairs: model.predict(
             list(pairs), batch_size=self.batch_size
         )

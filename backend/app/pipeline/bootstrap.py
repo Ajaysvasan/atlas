@@ -104,6 +104,10 @@ class Components:
         self.runtime.draft.ensure_loaded()
         if self.runtime.separate_main:
             self.runtime.main.ensure_loaded()
+        for model in {id(m): m for m in (self.runtime.draft, self.runtime.main)}.values():
+            if getattr(model, "offload_error", None):
+                problems.append(f"GPU: could not load {model.spec.path.name} on the GPU, so it runs on the CPU "
+                                f"({model.offload_error})")
         self.models.embedder  # noqa: B018 - loading is the point
         try:
             # One search opens the vector index and loads the reranker.
