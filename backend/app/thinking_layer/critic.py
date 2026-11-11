@@ -23,8 +23,8 @@ from thinking_layer.prompt_text import (
 )
 from thinking_layer.replies import (
     JOB_CRITIQUE_SCHEMA,
-    PLAN_CRITIQUE_SCHEMA,
     UnusableReply,
+    plan_critique_schema,
     read_job_critique,
     read_plan_critique,
 )
@@ -66,21 +66,29 @@ class JobCritic:
             evidence_block(evidence, self.settings.evidence_chars // 2),
             f"<result>\n{trim(text, self.settings.dependency_chars)}\n</result>",
         )
+        limit = self.settings.critic_max_tokens
         try:
-            return read_job_critique(
+            critique = read_job_critique(
                 self.model.infer(
                     self.prompts.job_critic,
                     user,
                     schema=JOB_CRITIQUE_SCHEMA,
-                    max_tokens=self.settings.critic_max_tokens,
+                    max_tokens=limit,
                     purpose=CRITIC,
                 )
             )
         except UnusableReply as error:
             # An unreadable review is not evidence the result is bad; it is
             # accepted and the missing review is reported as a limitation.
-            logger.warning("%s; accepting job %s unreviewed", error, job.job_id)
+            logger.warning("%s (limit %d tokens); accepting job %s unreviewed", error, limit, job.job_id)
             return Critique(Verdict.ACCEPT, (str(error),), (), reviewed=False)
+        if critique.cut_off:
+            logger.warning(
+                "The job critic reply for job %s hit its %d-token limit; using its verdict (%s) "
+                "and the %d item(s) finished before the cut",
+                job.job_id, limit, critique.verdict.value, len(critique.reasons) + len(critique.missing),
+            )
+        return critique
 
 
 class PlanCritic:
@@ -105,17 +113,25 @@ class PlanCritic:
             ),
             evidence_block(evidence, self.settings.evidence_chars // 2),
         )
+        limit = self.settings.critic_max_tokens
         try:
-            return read_plan_critique(
+            critique = read_plan_critique(
                 self.model.infer(
                     self.prompts.plan_critic,
                     user,
-                    schema=PLAN_CRITIQUE_SCHEMA,
-                    max_tokens=self.settings.critic_max_tokens,
+                    schema=plan_critique_schema(len(results)),
+                    max_tokens=limit,
                     purpose=CRITIC,
                 ),
                 [job_id for job_id, _ in results],
             )
         except UnusableReply as error:
-            logger.warning("%s; accepting the plan unreviewed", error)
+            logger.warning("%s (limit %d tokens); accepting the plan unreviewed", error, limit)
             return PlanCritique(PlanVerdict.ACCEPT, (), (), (str(error),), reviewed=False)
+        if critique.cut_off:
+            logger.warning(
+                "The plan critic reply hit its %d-token limit; using its verdict (%s) "
+                "and the item(s) finished before the cut",
+                limit, critique.verdict.value,
+            )
+        return critique

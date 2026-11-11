@@ -111,6 +111,8 @@ class Critique(NamedTuple):
     reasons: Tuple[str, ...] = ()
     missing: Tuple[str, ...] = ()
     reviewed: bool = True
+    # The reply hit its token limit; the verdict and the items finished before the cut were kept.
+    cut_off: bool = False
 
 
 class PlanCritique(NamedTuple):
@@ -119,6 +121,7 @@ class PlanCritique(NamedTuple):
     missing: Tuple[str, ...] = ()
     reasons: Tuple[str, ...] = ()
     reviewed: bool = True
+    cut_off: bool = False
 
 
 class RetryEvent(NamedTuple):

@@ -20,7 +20,7 @@ class ThinkingSettings(NamedTuple):
     planner_max_tokens: int = 512
     job_max_tokens: int = 700
     stitch_max_tokens: int = 1000
-    critic_max_tokens: int = 256
+    critic_max_tokens: int = 384
     query_chars: int = 12_000
     evidence_chars: int = 6_000
     dependency_chars: int = 5_000
