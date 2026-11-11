@@ -25,11 +25,12 @@ def llama_gpu_offload() -> bool:
         return False
 
 
-def gpu_layers(configured: int | None = None, supported: Callable[[], bool] = llama_gpu_offload) -> int:
+def gpu_layers(configured: int | None = None, supported: Callable[[], bool] | None = None) -> int:
     """The n_gpu_layers to request: the configured value when offload is possible, else 0."""
     configured = Config.MODEL_GPU_LAYERS if configured is None else configured
     if configured == 0:
         return 0
+    supported = llama_gpu_offload if supported is None else supported
     return configured if supported() else 0
 
 
@@ -45,11 +46,12 @@ def cuda_available() -> bool:
         return False
 
 
-def torch_device(configured: str | None = None, available: Callable[[], bool] = cuda_available) -> str:
+def torch_device(configured: str | None = None, available: Callable[[], bool] | None = None) -> str:
     """The device for the embedder and reranker: CUDA for auto/cuda when it is there, else the CPU."""
     configured = Config.TORCH_DEVICE if configured is None else configured
     if configured == CPU:
         return CPU
+    available = cuda_available if available is None else available
     if available():
         return CUDA
     if configured == CUDA:
@@ -57,8 +59,9 @@ def torch_device(configured: str | None = None, available: Callable[[], bool] = 
     return CPU
 
 
-def gpu_name(available: Callable[[], bool] = cuda_available) -> str | None:
+def gpu_name(available: Callable[[], bool] | None = None) -> str | None:
     """The first CUDA device's name, for status; None without one."""
+    available = cuda_available if available is None else available
     if not available():
         return None
     try:
